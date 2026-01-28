@@ -333,7 +333,7 @@ if btn:
         c4.metric("Capital Structure", f"Eq {t['We']:.0%} : Dt {t['Wd']:.0%}")
         
         # ----------------------------------------------------------------------
-        # [SECTION] Detailed Calculation Process
+        # [SECTION] Detailed Calculation Process (Hyperlinks)
         # ----------------------------------------------------------------------
         st.markdown("---")
         st.subheader("🧮 Detailed Calculation Process (Breakdown)")
@@ -344,29 +344,49 @@ if btn:
         with col_ke:
             st.markdown("#### 1. Cost of Equity (자기자본비용)")
             st.latex(r"\text{Cost of Equity} = \text{Risk Free Rate} + (\beta \times \text{Market Risk Premium})")
+            
             ke_data = {
                 "Item": ["Risk-Free Rate", "Re-levered Beta", "Market Risk Premium"],
                 "Value": [f"{m['Rf']:.2%}", f"{t['Beta']:.2f}", f"{m['MRP']:.2%}"],
-                "Source": ["US Treasury 10Y (^TNX)", "Peer Group Median", "Implied Return - Rf"],
+                "Source URL": ["https://finance.yahoo.com/quote/%5ETNX", None, None],
+                "Source": ["🔗 Yahoo Finance (^TNX)", "Peer Group Median", "Implied Return - Rf"],
                 "Logic": ["Risk-free asset yield (5-day avg)", "Unlevered Median adjusted for Target D/E", "Expected Equity Return excess over Rf"]
             }
-            st.dataframe(pd.DataFrame(ke_data), hide_index=True, use_container_width=True)
+            df_ke = pd.DataFrame(ke_data)
+            st.dataframe(
+                df_ke, 
+                hide_index=True, 
+                use_container_width=True,
+                column_config={
+                    "Source URL": st.column_config.LinkColumn("Reference", display_text="Source")
+                }
+            )
             st.info(f"💡 **Calculation:** {m['Rf']:.2%} + ({t['Beta']:.2f} × {m['MRP']:.2%}) = **{t['Ke']:.2%}**")
 
         # 2. Cost of Debt
         with col_kd:
             st.markdown("#### 2. Cost of Debt (타인자본비용)")
             st.latex(r"\text{Cost of Debt} = (\text{Risk Free Rate} + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
+            
             kd_data = {
                 "Item": ["Risk-Free Rate", "Credit Spread", "Tax Rate"],
                 "Value": [f"{m['Rf']:.2%}", f"{t['Spread']:.2%}", f"{tax:.1f}%"],
-                "Source": ["US Treasury 10Y (^TNX)", "Assumption / Synthetic Rating", "User Input"],
-                "Logic": ["Base rate for debt pricing", "Premium for Default Risk", "Corporate Tax Shield"]
+                "Source URL": ["https://finance.yahoo.com/quote/%5ETNX", "https://fred.stlouisfed.org/series/BAMLC0A0CM", None],
+                "Source": ["🔗 Yahoo Finance (^TNX)", "🔗 FRED (ICE BofA BBB)", "User Input"],
+                "Logic": ["Base rate for debt pricing", "Proxy: US Corp BBB Option-Adjusted Spread", "Corporate Tax Shield"]
             }
-            st.dataframe(pd.DataFrame(kd_data), hide_index=True, use_container_width=True)
+            df_kd = pd.DataFrame(kd_data)
+            st.dataframe(
+                df_kd, 
+                hide_index=True, 
+                use_container_width=True,
+                column_config={
+                    "Source URL": st.column_config.LinkColumn("Reference", display_text="Source")
+                }
+            )
             st.info(f"💡 **Calculation:** ({m['Rf']:.2%} + {t['Spread']:.2%}) × (1 - {tax/100:.2f}) = **{t['Kd']:.2%}**")
 
-        # 3. Target Capital Structure Analysis (New Section)
+        # 3. Target Capital Structure Analysis
         st.markdown("#### 3. Target Capital Structure Logic (Capital Weights)")
         st.caption("기업이 장기적으로 유지할 것으로 예상되는 목표 자본구조입니다. Peer Group의 중간값(Median)을 사용하여 산출합니다.")
         
@@ -384,13 +404,24 @@ if btn:
 
         # 4. Implied Market Return
         st.markdown("#### 4. Implied Market Return Basis")
+        st.caption("Market Risk Premium 산출을 위한 시장 기대수익률($R_m$) 구성 요소입니다.")
+        
         rm_data = {
             "Item": ["Dividend Yield", "Buyback Yield", "Growth Rate"],
             "Value": [f"{m['Div']:.2%}", f"{buyback/100:.2%}", f"{growth/100:.2%}"],
-            "Source": ["S&P 500 (SPY ETF)", "User Input (S&P Avg)", "User Input (GDP+)"],
+            "Source URL": ["https://finance.yahoo.com/quote/SPY", "https://www.spglobal.com/spdji/en/indices/equity/sp-500/#overview", "https://www.federalreserve.gov/monetarypolicy/fomc_projtabl.htm"],
+            "Source": ["🔗 Yahoo Finance (SPY)", "🔗 S&P Global (Buyback)", "🔗 Fed SEP (Long-run GDP)"],
             "Logic": ["Real-time 12m Trailing Yield", "Cash returned via repurchases", "Expected long-term earnings growth"]
         }
-        st.dataframe(pd.DataFrame(rm_data), hide_index=True, use_container_width=True)
+        df_rm = pd.DataFrame(rm_data)
+        st.dataframe(
+            df_rm, 
+            hide_index=True, 
+            use_container_width=True,
+            column_config={
+                "Source URL": st.column_config.LinkColumn("Reference", display_text="Source")
+            }
+        )
         st.info(f"💡 **Calculation:** {m['Div']:.2%} + {buyback/100:.2%} + {growth/100:.2%} = **{m['Rm']:.2%}**")
         
         st.divider()
