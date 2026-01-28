@@ -2,13 +2,15 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
 from datetime import datetime
+import io
 
 # 페이지 설정
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # ==============================================================================
-# [MODULE] Data Fetcher (NYU Stern HTML Integration)
+# [MODULE] Data Fetcher (NYU Stern HTML Integration with Requests)
 # ==============================================================================
 @st.cache_data(ttl=3600*24) # 24시간 캐싱
 def get_sp_buyback_data():
@@ -20,11 +22,21 @@ def get_sp_buyback_data():
     default_bb_yield = 2.0 
     default_div_yield = 1.5
     
+    # [FIX] 봇 차단 방지를 위한 헤더 추가
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
     try:
-        # 1. HTML 표 읽기
-        dfs = pd.read_html(url, header=0)
+        # 1. Requests로 HTML 원본 가져오기 (안정성 강화)
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status() # 404, 403 에러 발생 시 예외 처리
         
-        # 2. 올바른 테이블 찾기
+        # 2. HTML 표 읽기
+        # lxml 라이브러리가 설치되어 있어야 함
+        dfs = pd.read_html(io.StringIO(response.text), header=0)
+        
+        # 3. 올바른 테이블 찾기
         df = None
         for d in dfs:
             cols_str = [str(c).lower() for c in d.columns]
@@ -33,9 +45,9 @@ def get_sp_buyback_data():
                 break
         
         if df is None:
-            return default_bb_yield, default_div_yield, None, ["⚠️ HTML 테이블을 찾을 수 없습니다."]
+            return default_bb_yield, default_div_yield, None, ["⚠️ HTML 테이블 구조가 변경되어 찾을 수 없습니다."]
 
-        # 3. 컬럼 매핑
+        # 4. 컬럼 매핑
         cols_map = {}
         for c in df.columns:
             c_lower = str(c).lower().strip()
@@ -45,7 +57,8 @@ def get_sp_buyback_data():
             elif "dividends + buybacks" in c_lower or ("buybacks" in c_lower and "+" in c_lower): cols_map["TotalCash"] = c 
 
         if not all(k in cols_map for k in ["Period", "S&P 500", "Dividends", "TotalCash"]):
-             return default_bb_yield, default_div_yield, None, ["⚠️ 필요한 컬럼을 식별하지 못했습니다."]
+             missing = [k for k in ["Period", "S&P 500", "Dividends", "TotalCash"] if k not in cols_map]
+             return default_bb_yield, default_div_yield, None, [f"⚠️ 데이터 컬럼 식별 실패: {missing}"]
 
         # 데이터 추출
         clean_df = pd.DataFrame()
@@ -54,7 +67,7 @@ def get_sp_buyback_data():
         clean_df["Dividends"] = df[cols_map["Dividends"]]
         clean_df["TotalCash"] = df[cols_map["TotalCash"]]
 
-        # 4. 전처리
+        # 5. 전처리
         clean_df["Year"] = pd.to_numeric(clean_df["Year"], errors='coerce')
         clean_df = clean_df.dropna(subset=["Year"])
         clean_df = clean_df.sort_values(by="Year", ascending=False)
@@ -62,7 +75,7 @@ def get_sp_buyback_data():
         for c in ["S&P 500", "Dividends", "TotalCash"]:
             clean_df[c] = pd.to_numeric(clean_df[c], errors='coerce')
 
-        # 5. Yield 계산
+        # 6. Yield 계산
         clean_df["Buybacks"] = clean_df["TotalCash"] - clean_df["Dividends"]
         clean_df["Buyback Yield"] = clean_df["Buybacks"] / clean_df["S&P 500"]
         clean_df["Dividend Yield"] = clean_df["Dividends"] / clean_df["S&P 500"]
@@ -73,7 +86,7 @@ def get_sp_buyback_data():
         clean_df["Dividend Yield %"] = clean_df["Dividend Yield"] * 100
         clean_df["Total Yield %"] = clean_df["Total Yield"] * 100
 
-        # 6. 최근 5개년 평균 계산
+        # 7. 최근 5개년 평균 계산
         valid_rows = clean_df[clean_df["Buyback Yield"] > 0].head(5)
         
         avg_bb_yield = valid_rows["Buyback Yield %"].mean()
@@ -85,7 +98,8 @@ def get_sp_buyback_data():
         return avg_bb_yield, avg_div_yield, display_df, []
 
     except Exception as e:
-        return default_bb_yield, default_div_yield, None, [f"⚠️ HTML 파싱 실패: {str(e)}"]
+        # 구체적인 에러 메시지 반환
+        return default_bb_yield, default_div_yield, None, [f"⚠️ 데이터 연동 실패 ({type(e).__name__}): {str(e)}"]
 
 # ==============================================================================
 # [MODULE] Peer Recommender
@@ -260,7 +274,6 @@ class DetailWACCModel:
         except: return 0.040
 
     def get_implied_market_return(self):
-        # [UPDATED] Use user input (5Y Avg from Damodaran) instead of SPY fetch
         return self.div_yield + self.buyback_yield + self.growth_rate, self.div_yield
 
     def calculate_beta(self, ticker):
@@ -482,6 +495,12 @@ if btn:
         # [MARKET DATA] NYU Stern Buyback Data Reference
         st.divider()
         st.subheader("📉 Market Data Reference")
+        
+        # 에러 발생 시 구체적 이유 표시
+        if sp_df is None and sp_logs:
+            st.error(f"데이터 로드 실패: {sp_logs[0]}")
+            st.info("💡 팁: 터미널에서 `pip install lxml requests` 를 실행했는지 확인해주세요.")
+            
         with st.expander("📊 S&P 500 Buyback & Dividend Historical Data (Source: NYU Stern / A. Damodaran)", expanded=False):
             if sp_df is not None:
                 disp_sp = sp_df.copy()
@@ -501,4 +520,4 @@ if btn:
                 )
                 st.caption(f"Source: Aswath Damodaran (NYU Stern) | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             else:
-                st.error("데이터를 불러오지 못했습니다.")
+                st.warning("데이터를 불러오지 못했습니다. 잠시 후 다시 시도하거나 라이브러리 설치를 확인해주세요.")
