@@ -10,9 +10,9 @@ import io
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # ==============================================================================
-# [MODULE] Data Fetcher (NYU Stern HTML Integration with Requests)
+# [MODULE] Data Fetcher 1: NYU Stern (Buyback & Dividend)
 # ==============================================================================
-@st.cache_data(ttl=3600*24) # 24시간 캐싱
+@st.cache_data(ttl=3600*24)
 def get_sp_buyback_data():
     """
     NYU Stern (Aswath Damodaran) S&P 500 Earnings & Dividends HTML 데이터 크롤링
@@ -22,21 +22,17 @@ def get_sp_buyback_data():
     default_bb_yield = 2.0 
     default_div_yield = 1.5
     
-    # [FIX] 봇 차단 방지를 위한 헤더 추가
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
     
     try:
-        # 1. Requests로 HTML 원본 가져오기 (안정성 강화)
         response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status() # 404, 403 에러 발생 시 예외 처리
+        response.raise_for_status()
         
-        # 2. HTML 표 읽기
-        # lxml 라이브러리가 설치되어 있어야 함
+        # HTML 표 읽기 (lxml 필요)
         dfs = pd.read_html(io.StringIO(response.text), header=0)
         
-        # 3. 올바른 테이블 찾기
         df = None
         for d in dfs:
             cols_str = [str(c).lower() for c in d.columns]
@@ -47,7 +43,6 @@ def get_sp_buyback_data():
         if df is None:
             return default_bb_yield, default_div_yield, None, ["⚠️ HTML 테이블 구조가 변경되어 찾을 수 없습니다."]
 
-        # 4. 컬럼 매핑
         cols_map = {}
         for c in df.columns:
             c_lower = str(c).lower().strip()
@@ -57,17 +52,14 @@ def get_sp_buyback_data():
             elif "dividends + buybacks" in c_lower or ("buybacks" in c_lower and "+" in c_lower): cols_map["TotalCash"] = c 
 
         if not all(k in cols_map for k in ["Period", "S&P 500", "Dividends", "TotalCash"]):
-             missing = [k for k in ["Period", "S&P 500", "Dividends", "TotalCash"] if k not in cols_map]
-             return default_bb_yield, default_div_yield, None, [f"⚠️ 데이터 컬럼 식별 실패: {missing}"]
+             return default_bb_yield, default_div_yield, None, ["⚠️ 데이터 컬럼 식별 실패"]
 
-        # 데이터 추출
         clean_df = pd.DataFrame()
         clean_df["Year"] = df[cols_map["Period"]]
         clean_df["S&P 500"] = df[cols_map["S&P 500"]]
         clean_df["Dividends"] = df[cols_map["Dividends"]]
         clean_df["TotalCash"] = df[cols_map["TotalCash"]]
 
-        # 5. 전처리
         clean_df["Year"] = pd.to_numeric(clean_df["Year"], errors='coerce')
         clean_df = clean_df.dropna(subset=["Year"])
         clean_df = clean_df.sort_values(by="Year", ascending=False)
@@ -75,31 +67,70 @@ def get_sp_buyback_data():
         for c in ["S&P 500", "Dividends", "TotalCash"]:
             clean_df[c] = pd.to_numeric(clean_df[c], errors='coerce')
 
-        # 6. Yield 계산
         clean_df["Buybacks"] = clean_df["TotalCash"] - clean_df["Dividends"]
         clean_df["Buyback Yield"] = clean_df["Buybacks"] / clean_df["S&P 500"]
         clean_df["Dividend Yield"] = clean_df["Dividends"] / clean_df["S&P 500"]
         clean_df["Total Yield"] = clean_df["Buyback Yield"] + clean_df["Dividend Yield"]
 
-        # % 단위 변환
         clean_df["Buyback Yield %"] = clean_df["Buyback Yield"] * 100
         clean_df["Dividend Yield %"] = clean_df["Dividend Yield"] * 100
         clean_df["Total Yield %"] = clean_df["Total Yield"] * 100
 
-        # 7. 최근 5개년 평균 계산
         valid_rows = clean_df[clean_df["Buyback Yield"] > 0].head(5)
         
         avg_bb_yield = valid_rows["Buyback Yield %"].mean()
         avg_div_yield = valid_rows["Dividend Yield %"].mean()
 
-        # UI 표시용 DF
         display_df = clean_df[["Year", "S&P 500", "Dividends", "Buybacks", "Dividend Yield %", "Buyback Yield %", "Total Yield %"]].copy()
         
         return avg_bb_yield, avg_div_yield, display_df, []
 
     except Exception as e:
-        # 구체적인 에러 메시지 반환
-        return default_bb_yield, default_div_yield, None, [f"⚠️ 데이터 연동 실패 ({type(e).__name__}): {str(e)}"]
+        return default_bb_yield, default_div_yield, None, [f"⚠️ NYU Stern 데이터 연동 실패: {str(e)}"]
+
+# ==============================================================================
+# [MODULE] Data Fetcher 2: FRED (GDP Growth)
+# ==============================================================================
+@st.cache_data(ttl=3600*24)
+def get_fred_gdp_data():
+    """
+    FRED (St. Louis Fed) GDP Growth Data (Annual)
+    Series ID: A191RP1A027NBEA (Gross Domestic Product, Percent Change from Preceding Period, Annual)
+    CSV URL: https://fred.stlouisfed.org/graph/fredgraph.csv?id=A191RP1A027NBEA
+    """
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=A191RP1A027NBEA"
+    default_gdp_growth = 2.0
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # CSV 읽기
+        df = pd.read_csv(io.StringIO(response.text))
+        
+        # 컬럼 이름 변경 (DATE, A191RP1A027NBEA) -> (Date, GDP Growth %)
+        df.columns = ["Date", "GDP Growth %"]
+        
+        # 날짜 처리 및 정렬 (최신순)
+        df["Date"] = pd.to_datetime(df["Date"])
+        df["Year"] = df["Date"].dt.year
+        df = df.sort_values(by="Date", ascending=False)
+        
+        # 최근 5년 평균 계산
+        recent_5 = df.head(5)
+        avg_gdp_growth = recent_5["GDP Growth %"].mean()
+        
+        # 표시용 데이터 (최근 10년)
+        display_df = df[["Year", "GDP Growth %"]].head(10).copy()
+        
+        return avg_gdp_growth, display_df, []
+        
+    except Exception as e:
+        return default_gdp_growth, None, [f"⚠️ FRED 데이터 연동 실패: {str(e)}"]
 
 # ==============================================================================
 # [MODULE] Peer Recommender
@@ -355,10 +386,13 @@ if 'peers_input_val' not in st.session_state: st.session_state['peers_input_val'
 if 'rec_logs' not in st.session_state: st.session_state['rec_logs'] = []
 if 'rec_success_msg' not in st.session_state: st.session_state['rec_success_msg'] = ""
 
-# 앱 시작 시 NYU Stern Buyback & Dividend 데이터 로드
+# [DATA LOAD] NYU Stern Buyback & FRED GDP Data
 sp_avg_bb_yield, sp_avg_div_yield, sp_df, sp_logs = get_sp_buyback_data()
-if sp_logs:
-    st.toast(sp_logs[0], icon="⚠️")
+gdp_avg_growth, gdp_df, gdp_logs = get_fred_gdp_data()
+
+# 에러 로깅 (Toast 메시지)
+if sp_logs: st.toast(sp_logs[0], icon="⚠️")
+if gdp_logs: st.toast(gdp_logs[0], icon="⚠️")
 
 with st.sidebar:
     st.header("1. Target & Peers")
@@ -393,10 +427,12 @@ with st.sidebar:
     st.header("2. Assumptions")
     tax = st.slider("Tax Rate (%)", 0.0, 40.0, 25.0, 1.0)
     
-    # [LIVE DATA] S&P 500 5년 평균 Buyback & Dividend Yield 자동 적용 (Source: NYU Stern)
+    # [LIVE DATA] S&P 500 5년 평균 Buyback & Dividend Yield
     buyback = st.number_input(f"Buyback Yield (5Y Avg: {sp_avg_bb_yield:.2f}%)", value=sp_avg_bb_yield, step=0.1)
     div_yield_in = st.number_input(f"Dividend Yield (5Y Avg: {sp_avg_div_yield:.2f}%)", value=sp_avg_div_yield, step=0.1)
-    growth = st.number_input("Growth Rate (%)", value=5.5, step=0.1)
+    
+    # [LIVE DATA] FRED GDP 5년 평균
+    growth = st.number_input(f"Growth Rate (5Y Avg GDP: {gdp_avg_growth:.2f}%)", value=gdp_avg_growth, step=0.1)
     
     st.divider()
     btn = st.button("Calculate WACC", type="primary", use_container_width=True)
@@ -466,9 +502,9 @@ if btn:
         rm_data = {
             "Item": ["Dividend Yield", "Buyback Yield", "Growth Rate"],
             "Value": [f"{div_yield_in:.2f}%", f"{buyback:.2f}%", f"{growth:.2f}%"],
-            "Source URL": ["https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://insight.factset.com/"],
-            "Source": ["🔗 NYU Stern (Damodaran)", "🔗 NYU Stern (Damodaran)", "🔗 FactSet Insight"],
-            "Logic": [f"5Y Avg (Live Data: {sp_avg_div_yield:.2f}%)", f"5Y Avg (Live Data: {sp_avg_bb_yield:.2f}%)", "S&P 500 Long-term EPS Growth Consensus"]
+            "Source URL": ["https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://fred.stlouisfed.org/series/A191RP1A027NBEA"],
+            "Source": ["🔗 NYU Stern (Damodaran)", "🔗 NYU Stern (Damodaran)", "🔗 FRED (GDP Growth)"],
+            "Logic": [f"5Y Avg (Live Data: {sp_avg_div_yield:.2f}%)", f"5Y Avg (Live Data: {sp_avg_bb_yield:.2f}%)", f"5Y Avg (Live Data: {gdp_avg_growth:.2f}%)"]
         }
         st.dataframe(pd.DataFrame(rm_data), hide_index=True, use_container_width=True, 
                      column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
@@ -492,20 +528,16 @@ if btn:
             with st.expander("⚠️ 데이터 경고"):
                 for e in res['errors']: st.write(e)
 
-        # [MARKET DATA] NYU Stern Buyback Data Reference
+        # [MARKET DATA] Reference Tables
         st.divider()
         st.subheader("📉 Market Data Reference")
         
-        # 에러 발생 시 구체적 이유 표시
-        if sp_df is None and sp_logs:
-            st.error(f"데이터 로드 실패: {sp_logs[0]}")
-            st.info("💡 팁: 터미널에서 `pip install lxml requests` 를 실행했는지 확인해주세요.")
-            
-        with st.expander("📊 S&P 500 Buyback & Dividend Historical Data (Source: NYU Stern / A. Damodaran)", expanded=False):
+        tab_sp, tab_gdp = st.tabs(["📊 S&P 500 Buyback & Dividend", "📈 US GDP Growth (Annual)"])
+        
+        with tab_sp:
             if sp_df is not None:
-                disp_sp = sp_df.copy()
                 st.dataframe(
-                    disp_sp,
+                    sp_df,
                     use_container_width=True,
                     hide_index=True,
                     column_config={
@@ -520,4 +552,19 @@ if btn:
                 )
                 st.caption(f"Source: Aswath Damodaran (NYU Stern) | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             else:
-                st.warning("데이터를 불러오지 못했습니다. 잠시 후 다시 시도하거나 라이브러리 설치를 확인해주세요.")
+                st.error("Buyback 데이터를 불러오지 못했습니다.")
+
+        with tab_gdp:
+            if gdp_df is not None:
+                st.dataframe(
+                    gdp_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Year": st.column_config.NumberColumn("Year", format="%d"),
+                        "GDP Growth %": st.column_config.NumberColumn("GDP Growth (Annual)", format="%.2f%%")
+                    }
+                )
+                st.caption(f"Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            else:
+                st.error("GDP 데이터를 불러오지 못했습니다.")
