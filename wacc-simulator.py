@@ -10,7 +10,7 @@ st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 # ==============================================================================
 # [MODULE] Data Fetcher (S&P Global Excel Integration)
 # ==============================================================================
-@st.cache_data(ttl=3600*24) # 24시간 캐싱 (매번 다운로드 방지)
+@st.cache_data(ttl=3600*24) # 24시간 캐싱
 def get_sp_buyback_data():
     """
     S&P Global 공식 엑셀에서 Buyback 데이터 추출
@@ -21,7 +21,6 @@ def get_sp_buyback_data():
     
     try:
         # 1. 엑셀 로드 ('TABLE' 시트)
-        # S&P 엑셀은 상단에 빈 행이나 설명이 많으므로 헤더를 동적으로 찾아야 함
         df_raw = pd.read_excel(url, sheet_name='TABLE', header=None)
         
         # 2. 헤더 찾기 (Buyback Yield 컬럼이 있는 행 찾기)
@@ -38,20 +37,18 @@ def get_sp_buyback_data():
         # 3. 데이터 프레임 재구성
         df = pd.read_excel(url, sheet_name='TABLE', header=header_row_idx)
         
-        # 4. 필요한 컬럼 매핑 및 정리
-        # 실제 컬럼명은 파일 버전에 따라 조금씩 다를 수 있어 핵심 키워드로 찾음
+        # 4. 컬럼 매핑 (엑셀 버전 변화 대응)
         cols_map = {}
         for c in df.columns:
             c_str = str(c).lower()
             if "period" in c_str or "date" in c_str: cols_map["Period"] = c
             elif "market value" in c_str: cols_map["Market Value"] = c
-            elif "cash" in c_str and "dividend" in c_str and "yield" not in c_str: cols_map["Dividends"] = c # Dividends (Amount)
-            elif "buyback" in c_str and "yield" not in c_str: cols_map["Buybacks"] = c # Buybacks (Amount)
+            elif "cash" in c_str and "dividend" in c_str and "yield" not in c_str: cols_map["Dividends"] = c 
+            elif "buyback" in c_str and "yield" not in c_str: cols_map["Buybacks"] = c 
             elif "dividend yield" in c_str: cols_map["Dividend Yield"] = c
             elif "buyback yield" in c_str and "&" not in c_str: cols_map["Buyback Yield"] = c
             elif "buyback" in c_str and "dividend" in c_str and "yield" in c_str: cols_map["Total Yield"] = c
 
-        # 필요한 컬럼만 선택
         final_cols = ["Period", "Market Value", "Dividends", "Buybacks", "Dividend Yield", "Buyback Yield", "Total Yield"]
         display_df = pd.DataFrame()
         
@@ -59,33 +56,27 @@ def get_sp_buyback_data():
             if k in cols_map:
                 display_df[k] = df[cols_map[k]]
         
-        # 날짜 기준 내림차순 정렬 (최신순)
-        # S&P 데이터는 보통 최신이 위인지 아래인지 확인 필요 -> 보통 내림차순(최신이 위)이나 안전하게 정렬
+        # 데이터 정제 (최신순 정렬)
         if "Period" in display_df.columns:
-            # Period가 텍스트일 수도 있으니 처리 (예: 12/31/2023)
             display_df["Period"] = pd.to_datetime(display_df["Period"], errors='coerce')
             display_df = display_df.dropna(subset=["Period"]).sort_values(by="Period", ascending=False)
             
-            # 숫자형 변환 (Yield는 %단위로 들어오는지 소수점인지 확인 -> 보통 S&P는 %값(예: 0.02 or 2.0))
-            # 엑셀 샘플상 0.0xxx 형태일 확률 높음. 
+            # 숫자형 변환
             num_cols = ["Market Value", "Dividends", "Buybacks", "Dividend Yield", "Buyback Yield", "Total Yield"]
             for c in num_cols:
                 if c in display_df.columns:
                     display_df[c] = pd.to_numeric(display_df[c], errors='coerce')
 
-            # 5. 최근 5개년 평균 계산 (분기 데이터 기준 20개 행)
-            # 최근 20분기(5년) 평균
+            # 5. 최근 5개년(20분기) 평균 계산
             if "Buyback Yield" in display_df.columns:
                 recent_20 = display_df["Buyback Yield"].head(20)
-                # 데이터가 1(100%) 단위인지 0.01(1%) 단위인지 체크. 보통 0.01 단위임.
-                # 만약 평균이 0.05 미만이면 * 100을 해줘야 %단위 입력값에 맞음
                 avg_val = recent_20.mean()
-                if avg_val < 0.5: # 0.02 처럼 소수점 데이터라면
+                if avg_val < 0.5: # 0.02 형태라면 %로 변환
                     avg_val = avg_val * 100
                 
                 return avg_val, display_df, []
         
-        return default_yield, None, ["⚠️ 날짜 컬럼을 인식하지 못했습니다."]
+        return default_yield, None, ["⚠️ 날짜 컬럼 인식 실패"]
 
     except Exception as e:
         return default_yield, None, [f"⚠️ S&P 엑셀 연동 실패: {str(e)}"]
@@ -389,43 +380,6 @@ with st.sidebar:
     
     # [LIVE DATA] S&P 500 5년 평균 Buyback Yield 자동 적용
     buyback = st.number_input(f"Buyback Yield (Default: {sp_avg_yield:.2f}%)", value=sp_avg_yield, step=0.1)
-    
-    # [Table Expander] S&P 500 Buyback Annual Data
-    with st.expander("📑 S&P 500 Buyback Annual Data"):
-        if sp_df is not None:
-            # 포맷팅을 위한 Display용 복사본
-            disp_sp = sp_df.copy()
-            if "Period" in disp_sp.columns:
-                disp_sp["Period"] = disp_sp["Period"].dt.strftime('%Y-%m-%d')
-            
-            # 숫자 포맷팅 (Market Value 등 큰 숫자는 Billions 등 처리하거나 그대로 표출)
-            # 여기서는 깔끔하게 원본 데이터 유지하되, Yield는 %로 보이게 처리
-            cols_pct = ["Dividend Yield", "Buyback Yield", "Total Yield"]
-            for c in cols_pct:
-                if c in disp_sp.columns:
-                    # 데이터가 0.02 형태면 x100, 2.0 형태면 그대로
-                    # S&P Raw 데이터는 보통 0.xx 단위일 때가 많음. 확인 후 적용.
-                    # 여기선 Raw 데이터를 존중하되, 사용자가 보기 편하게 컬럼 config 설정
-                    pass 
-
-            st.dataframe(
-                disp_sp,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Period": "Date",
-                    "Market Value": st.column_config.NumberColumn("Market Cap ($M)", format="$%d"),
-                    "Dividends": st.column_config.NumberColumn("Dividends ($M)", format="$%d"),
-                    "Buybacks": st.column_config.NumberColumn("Buybacks ($M)", format="$%d"),
-                    "Dividend Yield": st.column_config.NumberColumn("Div Yield", format="%.2f%%"),
-                    "Buyback Yield": st.column_config.NumberColumn("Buyback Yield", format="%.2f%%"),
-                    "Total Yield": st.column_config.NumberColumn("Total Yield", format="%.2f%%"),
-                }
-            )
-            st.caption("Source: S&P Dow Jones Indices (Official Excel)")
-        else:
-            st.warning("데이터를 불러오지 못했습니다.")
-
     growth = st.number_input("Growth Rate (%)", value=5.5, step=0.1)
     
     st.divider()
@@ -517,6 +471,35 @@ if btn:
         for c in ["EBIT % (TTM)", "EBIT % (FY)", "EBITDA % (TTM)", "EBITDA % (FY)", "D/E Ratio"]: df_disp[c] = df_disp[c].apply(fmt_pct)
         for c in ["Levered Beta", "Unlevered Beta"]: df_disp[c] = df_disp[c].apply(lambda x: f"{x:.2f}")
         st.dataframe(df_disp, use_container_width=True, column_config={"Company Name": st.column_config.TextColumn(width="medium")})
+        
         if res['errors']:
             with st.expander("⚠️ 데이터 경고"):
                 for e in res['errors']: st.write(e)
+
+        # [NEW] Market Data Reference Section (Moved from Sidebar)
+        st.divider()
+        st.subheader("📉 Market Data Reference")
+        with st.expander("📊 S&P 500 Buyback & Dividend Historical Data (Official Excel Source)", expanded=False):
+            if sp_df is not None:
+                # 포맷팅을 위한 Display용 복사본
+                disp_sp = sp_df.copy()
+                if "Period" in disp_sp.columns:
+                    disp_sp["Period"] = disp_sp["Period"].dt.strftime('%Y-%m-%d')
+                
+                st.dataframe(
+                    disp_sp,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Period": "Date",
+                        "Market Value": st.column_config.NumberColumn("Market Cap ($M)", format="$%d"),
+                        "Dividends": st.column_config.NumberColumn("Dividends ($M)", format="$%d"),
+                        "Buybacks": st.column_config.NumberColumn("Buybacks ($M)", format="$%d"),
+                        "Dividend Yield": st.column_config.NumberColumn("Div Yield", format="%.2f%%"),
+                        "Buyback Yield": st.column_config.NumberColumn("Buyback Yield", format="%.2f%%"),
+                        "Total Yield": st.column_config.NumberColumn("Total Yield", format="%.2f%%"),
+                    }
+                )
+                st.caption(f"Source: S&P Dow Jones Indices (Excel) | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            else:
+                st.error("데이터를 불러오지 못했습니다.")
