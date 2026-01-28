@@ -355,7 +355,6 @@ if btn:
             st.info(f"💡 **Calculation:** ({m['Rf']:.2%} + {t['Spread']:.2%}) × (1 - {tax/100:.2f}) = **{t['Kd']:.2%}**")
 
         st.markdown("#### 3. Target Capital Structure Logic (Capital Weights)")
-        st.caption("기업이 장기적으로 유지할 것으로 예상되는 목표 자본구조 (Peer Group Median 사용)")
         col_str1, col_str2 = st.columns(2)
         with col_str1:
             st.markdown("**A. Target D/E Ratio**")
@@ -366,13 +365,12 @@ if btn:
             st.write(f"- **Equity:** **{t['We']:.1%}** | **Debt:** **{t['Wd']:.1%}**")
 
         st.markdown("#### 4. Implied Market Return Basis")
-        st.caption("Market Risk Premium 산출을 위한 시장 기대수익률($R_m$) 구성 요소")
         rm_data = {
             "Item": ["Dividend Yield", "Buyback Yield", "Growth Rate"],
             "Value": [f"{m['Div']:.2%}", f"{buyback/100:.2%}", f"{growth/100:.2%}"],
-            "Source URL": ["https://finance.yahoo.com/quote/SPY", "https://www.yardeni.com/pub/buybackdiv.pdf", "https://advantage.factset.com/earnings-insight"],
-            "Source": ["🔗 Yahoo Finance (SPY)", "🔗 Yardeni Research (S&P Buybacks)", "🔗 FactSet Earnings Insight"],
-            "Logic": ["Real-time 12m Trailing Yield", "Avg S&P 500 Buyback Yield (10yr)", "S&P 500 Long-term EPS Growth Consensus"]
+            "Source URL": ["https://finance.yahoo.com/quote/SPY", "https://ycharts.com/indicators/sp_500_buyback_yield", "https://advantage.factset.com/earnings-insight"],
+            "Source": ["🔗 Yahoo Finance (SPY)", "🔗 YCharts (S&P 500 Buyback Yield)", "🔗 FactSet Earnings Insight"],
+            "Logic": ["Real-time 12m Trailing Yield", "S&P 500 Buyback Yield (Visual)", "S&P 500 Long-term EPS Growth Consensus"]
         }
         st.dataframe(pd.DataFrame(rm_data), hide_index=True, use_container_width=True, 
                      column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
@@ -380,7 +378,6 @@ if btn:
         
         st.divider()
         st.subheader("🏢 Peer Group Analysis (TTM vs FY)")
-        st.caption("※ TTM: Trailing Twelve Months (최근 12개월) / FY: Fiscal Year (작년 연말 결산)")
         df = res['peer_df'].copy()
         cols_order = ["Ticker", "Company Name", "Currency", "FY Date", "Revenue (TTM)", "Revenue (FY)", "EBIT (TTM)", "EBIT % (TTM)", "EBIT (FY)", "EBIT % (FY)", "EBITDA (TTM)", "EBITDA % (TTM)", "EBITDA (FY)", "EBITDA % (FY)", "Levered Beta", "Unlevered Beta", "D/E Ratio", "Market Cap", "Total Debt"]
         cols_order = [c for c in cols_order if c in df.columns]
