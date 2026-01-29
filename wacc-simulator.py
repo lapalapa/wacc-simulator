@@ -3,8 +3,9 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
+import time
 
 # 페이지 설정
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
@@ -16,7 +17,6 @@ st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 def get_sp_buyback_data():
     """
     NYU Stern (Aswath Damodaran) S&P 500 Earnings & Dividends HTML 데이터 크롤링
-    Target URL: https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html
     """
     url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html"
     default_bb_yield = 2.0 
@@ -30,7 +30,6 @@ def get_sp_buyback_data():
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        # HTML 표 읽기 (lxml 필요)
         dfs = pd.read_html(io.StringIO(response.text), header=0)
         
         df = None
@@ -41,7 +40,7 @@ def get_sp_buyback_data():
                 break
         
         if df is None:
-            return default_bb_yield, default_div_yield, None, ["⚠️ HTML 테이블 구조가 변경되어 찾을 수 없습니다."]
+            return default_bb_yield, default_div_yield, None, ["⚠️ NYU Stern: HTML 테이블 구조 변경됨."]
 
         cols_map = {}
         for c in df.columns:
@@ -52,7 +51,7 @@ def get_sp_buyback_data():
             elif "dividends + buybacks" in c_lower or ("buybacks" in c_lower and "+" in c_lower): cols_map["TotalCash"] = c 
 
         if not all(k in cols_map for k in ["Period", "S&P 500", "Dividends", "TotalCash"]):
-             return default_bb_yield, default_div_yield, None, ["⚠️ 데이터 컬럼 식별 실패"]
+             return default_bb_yield, default_div_yield, None, ["⚠️ NYU Stern: 데이터 컬럼 식별 실패"]
 
         clean_df = pd.DataFrame()
         clean_df["Year"] = df[cols_map["Period"]]
@@ -77,7 +76,6 @@ def get_sp_buyback_data():
         clean_df["Total Yield %"] = clean_df["Total Yield"] * 100
 
         valid_rows = clean_df[clean_df["Buyback Yield"] > 0].head(5)
-        
         avg_bb_yield = valid_rows["Buyback Yield %"].mean()
         avg_div_yield = valid_rows["Dividend Yield %"].mean()
 
@@ -86,7 +84,7 @@ def get_sp_buyback_data():
         return avg_bb_yield, avg_div_yield, display_df, []
 
     except Exception as e:
-        return default_bb_yield, default_div_yield, None, [f"⚠️ NYU Stern 데이터 연동 실패: {str(e)}"]
+        return default_bb_yield, default_div_yield, None, [f"⚠️ NYU Stern 접속 실패: {str(e)}"]
 
 # ==============================================================================
 # [MODULE] Data Fetcher 2: FRED (GDP Growth)
@@ -96,7 +94,6 @@ def get_fred_gdp_data():
     """
     FRED (St. Louis Fed) GDP Growth Data (Annual)
     Series ID: A191RP1A027NBEA (Gross Domestic Product, Percent Change from Preceding Period, Annual)
-    CSV URL: https://fred.stlouisfed.org/graph/fredgraph.csv?id=A191RP1A027NBEA
     """
     url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=A191RP1A027NBEA"
     default_gdp_growth = 2.0
@@ -109,31 +106,62 @@ def get_fred_gdp_data():
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         
-        # CSV 읽기
         df = pd.read_csv(io.StringIO(response.text))
-        
-        # 컬럼 이름 변경 (DATE, A191RP1A027NBEA) -> (Date, GDP Growth %)
         df.columns = ["Date", "GDP Growth %"]
         
-        # 날짜 처리 및 정렬 (최신순)
         df["Date"] = pd.to_datetime(df["Date"])
         df["Year"] = df["Date"].dt.year
         df = df.sort_values(by="Date", ascending=False)
         
-        # 최근 5년 평균 계산
-        recent_5 = df.head(5)
-        avg_gdp_growth = recent_5["GDP Growth %"].mean()
+        # [CHANGE] Use Latest Value instead of Average
+        latest_gdp_growth = df["GDP Growth %"].iloc[0]
         
-        # 표시용 데이터 (최근 10년)
         display_df = df[["Year", "GDP Growth %"]].head(10).copy()
         
-        return avg_gdp_growth, display_df, []
+        return latest_gdp_growth, display_df, []
         
     except Exception as e:
-        return default_gdp_growth, None, [f"⚠️ FRED 데이터 연동 실패: {str(e)}"]
+        return default_gdp_growth, None, [f"⚠️ FRED GDP 접속 실패: {str(e)}"]
 
 # ==============================================================================
-# [MODULE] Peer Recommender
+# [MODULE] Data Fetcher 3: FRED (Risk Free Rate - DGS10)
+# ==============================================================================
+@st.cache_data(ttl=3600*24)
+def get_fred_risk_free_rate():
+    """
+    FRED (St. Louis Fed) 10-Year Treasury Constant Maturity Rate
+    Series ID: DGS10
+    """
+    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10"
+    default_rf = 4.0
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        df = pd.read_csv(io.StringIO(response.text))
+        df.columns = ["Date", "Rate"]
+        
+        df["Date"] = pd.to_datetime(df["Date"])
+        df["Rate"] = pd.to_numeric(df["Rate"], errors='coerce')
+        df = df.dropna().sort_values(by="Date", ascending=False)
+        
+        latest_rf = df["Rate"].iloc[0]
+        
+        cutoff_date = df["Date"].max() - timedelta(days=365*5)
+        trend_df = df[df["Date"] >= cutoff_date].copy()
+        
+        return latest_rf, trend_df, []
+        
+    except Exception as e:
+        return default_rf, None, [f"⚠️ FRED RF 접속 실패: {str(e)}"]
+
+# ==============================================================================
+# [MODULE] Peer Recommender (Rate Limit 방지)
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
@@ -172,7 +200,7 @@ class PeerRecommender:
                 if 'symbol' in top_df.columns: raw_list = top_df['symbol'].tolist()
                 elif 'Symbol' in top_df.columns: raw_list = top_df['Symbol'].tolist()
                 else: raw_list = top_df.index.tolist()
-                candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:20]
+                candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:10]
             else:
                 return None, group_name, logs
 
@@ -181,10 +209,12 @@ class PeerRecommender:
             revenue_map = []
             total_cand = len(candidates)
             for idx, ticker in enumerate(candidates):
+                time.sleep(1.0)
                 rev = self.get_revenue(ticker)
                 revenue_map.append((ticker, rev))
+                
                 if progress_bar: 
-                    progress_bar.progress(0.3 + (0.4 * (idx / total_cand)), text=f"Scanning: {ticker}")
+                    progress_bar.progress(0.3 + (0.4 * (idx / total_cand)), text=f"Scanning: {ticker} (Safety Delay...)")
             
             revenue_map.sort(key=lambda x: x[1], reverse=True)
             top_10 = [item[0] for item in revenue_map][:10]
@@ -199,9 +229,10 @@ class PeerRecommender:
 # [LOGIC] WACC Engine
 # ==============================================================================
 class DetailWACCModel:
-    def __init__(self, target, peers, buyback, div_yield, growth, tax):
+    def __init__(self, target, peers, rf_rate, buyback, div_yield, growth, tax):
         self.target = target
         self.peers = [p.strip() for p in peers.split(',') if p.strip()]
+        self.rf = rf_rate / 100
         self.buyback_yield = buyback / 100
         self.div_yield = div_yield / 100
         self.growth_rate = growth / 100
@@ -300,10 +331,6 @@ class DetailWACCModel:
         except Exception as e:
             return {"name": ticker, "logs": [str(e)]}
 
-    def get_risk_free_rate(self):
-        try: return yf.Ticker(self.rf_ticker).history(period="5d")['Close'].iloc[-1]/100
-        except: return 0.040
-
     def get_implied_market_return(self):
         return self.div_yield + self.buyback_yield + self.growth_rate, self.div_yield
 
@@ -363,12 +390,12 @@ class DetailWACCModel:
         target_we = 1 / (1 + median_de)
         target_wd = median_de / (1 + median_de)
         relevered_beta = median_unlev_beta * (1 + (1 - self.tax) * median_de)
-        ke = rf + relevered_beta * mrp
+        ke = self.rf + relevered_beta * mrp
         credit_spread = 0.02
-        kd = (rf + credit_spread) * (1 - self.tax)
+        kd = (self.rf + credit_spread) * (1 - self.tax)
         wacc = (target_we * ke) + (target_wd * kd)
         return {
-            "market": {"Rf": rf, "Rm": rm, "MRP": mrp, "Div": div_yield},
+            "market": {"Rf": self.rf, "Rm": rm, "MRP": mrp, "Div": div_yield},
             "peer_df": pd.DataFrame(peer_results),
             "target": {"WACC": wacc, "Ke": ke, "Kd": kd, "Spread": credit_spread, 
                        "Beta": relevered_beta, "DE": median_de, "We": target_we, "Wd": target_wd},
@@ -386,13 +413,15 @@ if 'peers_input_val' not in st.session_state: st.session_state['peers_input_val'
 if 'rec_logs' not in st.session_state: st.session_state['rec_logs'] = []
 if 'rec_success_msg' not in st.session_state: st.session_state['rec_success_msg'] = ""
 
-# [DATA LOAD] NYU Stern Buyback & FRED GDP Data
+# [DATA LOAD] NYU Stern, FRED GDP, FRED RF
 sp_avg_bb_yield, sp_avg_div_yield, sp_df, sp_logs = get_sp_buyback_data()
-gdp_avg_growth, gdp_df, gdp_logs = get_fred_gdp_data()
+gdp_latest_growth, gdp_df, gdp_logs = get_fred_gdp_data()
+latest_rf, rf_trend_df, rf_logs = get_fred_risk_free_rate()
 
-# 에러 로깅 (Toast 메시지)
+# 에러 로깅
 if sp_logs: st.toast(sp_logs[0], icon="⚠️")
 if gdp_logs: st.toast(gdp_logs[0], icon="⚠️")
+if rf_logs: st.toast(rf_logs[0], icon="⚠️")
 
 with st.sidebar:
     st.header("1. Target & Peers")
@@ -427,18 +456,21 @@ with st.sidebar:
     st.header("2. Assumptions")
     tax = st.slider("Tax Rate (%)", 0.0, 40.0, 25.0, 1.0)
     
-    # [LIVE DATA] S&P 500 5년 평균 Buyback & Dividend Yield
+    # [LIVE DATA] Risk Free Rate (FRED)
+    rf_input = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
+
+    # [LIVE DATA] S&P 500 Buyback & Dividend (NYU Stern)
     buyback = st.number_input(f"Buyback Yield (5Y Avg: {sp_avg_bb_yield:.2f}%)", value=sp_avg_bb_yield, step=0.1)
     div_yield_in = st.number_input(f"Dividend Yield (5Y Avg: {sp_avg_div_yield:.2f}%)", value=sp_avg_div_yield, step=0.1)
     
-    # [LIVE DATA] FRED GDP 5년 평균
-    growth = st.number_input(f"Growth Rate (5Y Avg GDP: {gdp_avg_growth:.2f}%)", value=gdp_avg_growth, step=0.1)
+    # [LIVE DATA] FRED GDP Latest
+    growth = st.number_input(f"Growth Rate (Latest GDP: {gdp_latest_growth:.2f}%)", value=gdp_latest_growth, step=0.1)
     
     st.divider()
     btn = st.button("Calculate WACC", type="primary", use_container_width=True)
 
 if btn:
-    model = DetailWACCModel(target, peers, buyback, div_yield_in, growth, tax)
+    model = DetailWACCModel(target, peers, rf_input, buyback, div_yield_in, growth, tax)
     with st.spinner("Calculating..."):
         res = model.run()
         
@@ -465,9 +497,9 @@ if btn:
             ke_data = {
                 "Item": ["Risk-Free Rate", "Re-levered Beta", "Market Risk Premium"],
                 "Value": [f"{m['Rf']:.2%}", f"{t['Beta']:.2f}", f"{m['MRP']:.2%}"],
-                "Source URL": ["https://finance.yahoo.com/quote/%5ETNX", None, None],
-                "Source": ["🔗 Yahoo Finance (^TNX)", "Peer Group Median", "Implied Return - Rf"],
-                "Logic": ["Risk-free asset yield (5-day avg)", "Unlevered Median adjusted for Target D/E", "Expected Equity Return excess over Rf"]
+                "Source URL": ["https://fred.stlouisfed.org/series/DGS10", None, None],
+                "Source": ["🔗 FRED (DGS10)", "Peer Group Median", "Implied Return - Rf"],
+                "Logic": [f"10-Year Treasury Constant Maturity (Latest: {rf_input:.2f}%)", "Unlevered Median adjusted for Target D/E", "Expected Equity Return excess over Rf"]
             }
             st.dataframe(pd.DataFrame(ke_data), hide_index=True, use_container_width=True, 
                          column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
@@ -479,8 +511,8 @@ if btn:
             kd_data = {
                 "Item": ["Risk-Free Rate", "Credit Spread", "Tax Rate"],
                 "Value": [f"{m['Rf']:.2%}", f"{t['Spread']:.2%}", f"{tax:.1f}%"],
-                "Source URL": ["https://finance.yahoo.com/quote/%5ETNX", "https://fred.stlouisfed.org/series/BAMLC0A0CM", None],
-                "Source": ["🔗 Yahoo Finance (^TNX)", "🔗 FRED (ICE BofA BBB)", "User Input"],
+                "Source URL": ["https://fred.stlouisfed.org/series/DGS10", "https://fred.stlouisfed.org/series/BAMLC0A0CM", None],
+                "Source": ["🔗 FRED (DGS10)", "🔗 FRED (ICE BofA BBB)", "User Input"],
                 "Logic": ["Base rate for debt pricing", "Proxy: US Corp BBB Option-Adjusted Spread", "Corporate Tax Shield"]
             }
             st.dataframe(pd.DataFrame(kd_data), hide_index=True, use_container_width=True, 
@@ -504,7 +536,7 @@ if btn:
             "Value": [f"{div_yield_in:.2f}%", f"{buyback:.2f}%", f"{growth:.2f}%"],
             "Source URL": ["https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://fred.stlouisfed.org/series/A191RP1A027NBEA"],
             "Source": ["🔗 NYU Stern (Damodaran)", "🔗 NYU Stern (Damodaran)", "🔗 FRED (GDP Growth)"],
-            "Logic": [f"5Y Avg (Live Data: {sp_avg_div_yield:.2f}%)", f"5Y Avg (Live Data: {sp_avg_bb_yield:.2f}%)", f"5Y Avg (Live Data: {gdp_avg_growth:.2f}%)"]
+            "Logic": [f"5Y Avg (Live Data: {sp_avg_div_yield:.2f}%)", f"5Y Avg (Live Data: {sp_avg_bb_yield:.2f}%)", f"Latest (Live Data: {gdp_latest_growth:.2f}%)"]
         }
         st.dataframe(pd.DataFrame(rm_data), hide_index=True, use_container_width=True, 
                      column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
@@ -532,8 +564,23 @@ if btn:
         st.divider()
         st.subheader("📉 Market Data Reference")
         
-        tab_sp, tab_gdp = st.tabs(["📊 S&P 500 Buyback & Dividend", "📈 US GDP Growth (Annual)"])
+        # 에러 발생 시 안내
+        if sp_df is None and sp_logs:
+            st.error(f"NYU Stern 데이터 로드 실패: {sp_logs[0]}")
+        if gdp_df is None and gdp_logs:
+            st.error(f"FRED 데이터 로드 실패: {gdp_logs[0]}")
+        if rf_trend_df is None and rf_logs:
+            st.error(f"FRED RF 데이터 로드 실패: {rf_logs[0]}")
+
+        tab_rf, tab_sp, tab_gdp = st.tabs(["📉 Risk Free Rate (5Y Trend)", "📊 S&P 500 Buyback & Dividend", "📈 US GDP Growth"])
         
+        with tab_rf:
+            if rf_trend_df is not None:
+                st.caption(f"**10-Year Treasury Constant Maturity Rate (DGS10)** | Latest: {latest_rf:.2f}% | Source: FRED")
+                st.line_chart(rf_trend_df.set_index("Date")["Rate"], color="#FF4B4B")
+            else:
+                st.warning("데이터가 없습니다.")
+
         with tab_sp:
             if sp_df is not None:
                 st.dataframe(
@@ -552,7 +599,7 @@ if btn:
                 )
                 st.caption(f"Source: Aswath Damodaran (NYU Stern) | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             else:
-                st.error("Buyback 데이터를 불러오지 못했습니다.")
+                st.warning("데이터가 없습니다.")
 
         with tab_gdp:
             if gdp_df is not None:
@@ -567,4 +614,4 @@ if btn:
                 )
                 st.caption(f"Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
             else:
-                st.error("GDP 데이터를 불러오지 못했습니다.")
+                st.warning("데이터가 없습니다.")
