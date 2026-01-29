@@ -93,7 +93,7 @@ def get_sp_buyback_data():
 def get_fred_gdp_data():
     """
     FRED (St. Louis Fed) GDP Growth Data (Annual)
-    Series ID: A191RP1A027NBEA (Gross Domestic Product, Percent Change from Preceding Period, Annual)
+    Series ID: A191RP1A027NBEA
     """
     url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=A191RP1A027NBEA"
     default_gdp_growth = 2.0
