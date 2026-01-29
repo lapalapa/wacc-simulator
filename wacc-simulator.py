@@ -23,6 +23,7 @@ def get_sp_buyback_data():
     default_bb_yield = 2.0 
     default_div_yield = 1.5
     
+    # 직접 requests를 쓰는 곳은 헤더 유지 (NYU 서버 차단 방지)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
@@ -114,9 +115,7 @@ def get_fred_gdp_data():
         df["Year"] = df["Date"].dt.year
         df = df.sort_values(by="Date", ascending=False)
         
-        # Latest Value
         latest_gdp_growth = df["GDP Growth %"].iloc[0]
-        
         display_df = df[["Year", "GDP Growth %"]].head(10).copy()
         
         return latest_gdp_growth, display_df, []
@@ -162,20 +161,14 @@ def get_fred_risk_free_rate():
         return default_rf, None, [f"⚠️ FRED RF 접속 실패: {str(e)}"]
 
 # ==============================================================================
-# [MODULE] Peer Recommender (Anti-Ban Enhanced)
+# [MODULE] Peer Recommender (Fixed: Remove Manual Session)
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
         try:
-            # 세션 사용으로 브라우저처럼 위장
-            session = requests.Session()
-            session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            })
-            
-            t = yf.Ticker(ticker, session=session)
+            # [FIX] 세션을 수동으로 주입하지 않고 yfinance 기본 동작 사용 (에러 해결)
+            t = yf.Ticker(ticker)
             rev = t.info.get('totalRevenue')
-            
             if rev is None:
                 fin = t.financials
                 if not fin.empty and 'Total Revenue' in fin.index:
@@ -186,12 +179,8 @@ class PeerRecommender:
     def recommend(self, target_ticker, progress_bar=None):
         logs = []
         try:
-            session = requests.Session()
-            session.headers.update({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            })
-            
-            t = yf.Ticker(target_ticker, session=session)
+            # [FIX] 세션 제거
+            t = yf.Ticker(target_ticker)
             info = t.info
             ind_key = info.get('industryKey')
             sec_key = info.get('sectorKey')
@@ -214,7 +203,7 @@ class PeerRecommender:
                 elif 'Symbol' in top_df.columns: raw_list = top_df['Symbol'].tolist()
                 else: raw_list = top_df.index.tolist()
                 
-                # 검색 대상 5개로 제한 (차단 방지)
+                # 5개 제한 유지
                 candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
             else:
                 return None, group_name, logs
@@ -224,7 +213,7 @@ class PeerRecommender:
             revenue_map = []
             total_cand = len(candidates)
             for idx, ticker in enumerate(candidates):
-                # 랜덤 딜레이 (2~4초)
+                # 딜레이는 유지 (차단 방지)
                 sleep_time = random.uniform(2.0, 4.0)
                 time.sleep(sleep_time)
                 
@@ -445,7 +434,6 @@ with st.sidebar:
     target = st.text_input("Target Ticker", "WOLF")
     
     col1, col2 = st.columns([1,1])
-    # [FIX] 버튼 이름: (Top 10) -> (Top 5)
     if col1.button("🤖 경쟁사 자동 추천 (Top 5)", type="secondary"):
         prog_bar = st.progress(0, text="산업 데이터 수집 중...")
         rec_engine = PeerRecommender()
