@@ -113,7 +113,7 @@ def get_fred_gdp_data():
         df["Year"] = df["Date"].dt.year
         df = df.sort_values(by="Date", ascending=False)
         
-        # [CHANGE] Use Latest Value instead of Average
+        # Latest Value
         latest_gdp_growth = df["GDP Growth %"].iloc[0]
         
         display_df = df[["Year", "GDP Growth %"]].head(10).copy()
@@ -351,9 +351,9 @@ class DetailWACCModel:
         except: return np.nan
 
     def run(self):
-        rf = self.get_risk_free_rate()
+        # [FIX] self.rf (initialized in __init__) 사용
         rm, div_yield = self.get_implied_market_return()
-        mrp = rm - rf
+        mrp = rm - self.rf
         peer_results = []
         betas = []
         des = []
