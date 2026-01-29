@@ -6,6 +6,7 @@ import requests
 from datetime import datetime, timedelta
 import io
 import time
+import random
 
 # 페이지 설정
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
@@ -161,13 +162,20 @@ def get_fred_risk_free_rate():
         return default_rf, None, [f"⚠️ FRED RF 접속 실패: {str(e)}"]
 
 # ==============================================================================
-# [MODULE] Peer Recommender (Rate Limit 방지)
+# [MODULE] Peer Recommender (Anti-Ban Enhanced)
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
         try:
-            t = yf.Ticker(ticker)
+            # 세션 사용으로 브라우저처럼 위장
+            session = requests.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            })
+            
+            t = yf.Ticker(ticker, session=session)
             rev = t.info.get('totalRevenue')
+            
             if rev is None:
                 fin = t.financials
                 if not fin.empty and 'Total Revenue' in fin.index:
@@ -178,7 +186,12 @@ class PeerRecommender:
     def recommend(self, target_ticker, progress_bar=None):
         logs = []
         try:
-            t = yf.Ticker(target_ticker)
+            session = requests.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            })
+            
+            t = yf.Ticker(target_ticker, session=session)
             info = t.info
             ind_key = info.get('industryKey')
             sec_key = info.get('sectorKey')
@@ -200,7 +213,9 @@ class PeerRecommender:
                 if 'symbol' in top_df.columns: raw_list = top_df['symbol'].tolist()
                 elif 'Symbol' in top_df.columns: raw_list = top_df['Symbol'].tolist()
                 else: raw_list = top_df.index.tolist()
-                candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:10]
+                
+                # 검색 대상 5개로 제한 (차단 방지)
+                candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
             else:
                 return None, group_name, logs
 
@@ -209,17 +224,20 @@ class PeerRecommender:
             revenue_map = []
             total_cand = len(candidates)
             for idx, ticker in enumerate(candidates):
-                time.sleep(1.0)
+                # 랜덤 딜레이 (2~4초)
+                sleep_time = random.uniform(2.0, 4.0)
+                time.sleep(sleep_time)
+                
                 rev = self.get_revenue(ticker)
                 revenue_map.append((ticker, rev))
                 
                 if progress_bar: 
-                    progress_bar.progress(0.3 + (0.4 * (idx / total_cand)), text=f"Scanning: {ticker} (Safety Delay...)")
+                    progress_bar.progress(0.3 + (0.4 * (idx / total_cand)), text=f"Scanning: {ticker} (Waiting {sleep_time:.1f}s...)")
             
             revenue_map.sort(key=lambda x: x[1], reverse=True)
-            top_10 = [item[0] for item in revenue_map][:10]
+            top_5 = [item[0] for item in revenue_map][:5]
             
-            return ", ".join(top_10), group_name, logs
+            return ", ".join(top_5), group_name, logs
 
         except Exception as e:
             logs.append(f"❌ Error: {str(e)}")
@@ -351,7 +369,6 @@ class DetailWACCModel:
         except: return np.nan
 
     def run(self):
-        # [FIX] self.rf (initialized in __init__) 사용
         rm, div_yield = self.get_implied_market_return()
         mrp = rm - self.rf
         peer_results = []
@@ -475,7 +492,8 @@ if btn:
         res = model.run()
         
     if res:
-        with st.expander("📘 WACC 가이드 (처음 사용자용)", expanded=False):
+        # [FIX] UI 수정: 'WACC Guide' -> 'WACC Formula', expanded=True
+        with st.expander("📘 WACC Formula", expanded=True):
             st.markdown(f"$$ WACC = (\\text{{Equity Ratio}} \\times \\text{{Cost of Equity}}) + (\\text{{Debt Ratio}} \\times \\text{{Cost of Debt}} \\times (1 - \\text{{Tax}})) $$")
 
         t = res['target']
