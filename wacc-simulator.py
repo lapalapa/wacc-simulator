@@ -445,7 +445,8 @@ with st.sidebar:
     target = st.text_input("Target Ticker", "WOLF")
     
     col1, col2 = st.columns([1,1])
-    if col1.button("🤖 경쟁사 자동 추천 (Top 10)", type="secondary"):
+    # [FIX] 버튼 이름: (Top 10) -> (Top 5)
+    if col1.button("🤖 경쟁사 자동 추천 (Top 5)", type="secondary"):
         prog_bar = st.progress(0, text="산업 데이터 수집 중...")
         rec_engine = PeerRecommender()
         rec_peers, industry_name, logs = rec_engine.recommend(target, prog_bar)
@@ -492,7 +493,6 @@ if btn:
         res = model.run()
         
     if res:
-        # [FIX] UI 수정: 'WACC Guide' -> 'WACC Formula', expanded=True
         with st.expander("📘 WACC Formula", expanded=True):
             st.markdown(f"$$ WACC = (\\text{{Equity Ratio}} \\times \\text{{Cost of Equity}}) + (\\text{{Debt Ratio}} \\times \\text{{Cost of Debt}} \\times (1 - \\text{{Tax}})) $$")
 
