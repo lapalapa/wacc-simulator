@@ -165,7 +165,6 @@ def get_fred_risk_free_rate():
 class PeerRecommender:
     def get_revenue(self, ticker):
         try:
-            # yfinance 기본 세션 사용 (수동 세션 주입 제거)
             t = yf.Ticker(ticker)
             rev = t.info.get('totalRevenue')
             if rev is None:
@@ -201,7 +200,6 @@ class PeerRecommender:
                 elif 'Symbol' in top_df.columns: raw_list = top_df['Symbol'].tolist()
                 else: raw_list = top_df.index.tolist()
                 
-                # 차단 방지를 위해 5개로 제한
                 candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
             else:
                 return None, group_name, logs
@@ -211,7 +209,6 @@ class PeerRecommender:
             revenue_map = []
             total_cand = len(candidates)
             for idx, ticker in enumerate(candidates):
-                # 랜덤 딜레이 적용
                 sleep_time = random.uniform(2.0, 4.0)
                 time.sleep(sleep_time)
                 
@@ -355,18 +352,14 @@ class DetailWACCModel:
             return np.cov(ret['s'], ret['b'])[0, 1] / np.cov(ret['s'], ret['b'])[1, 1]
         except: return np.nan
 
-    # [FIXED & UPDATED] 5Y Monthly Beta Calculation (No Target, Handle Missing Data)
     def get_5y_monthly_beta_analysis(self):
         """
         Calculates 5-Year Monthly Adjusted Beta for Peers (excluding Target).
-        Handles missing data by keeping the timeframe of the longest ticker (Market).
         """
         try:
-            # 1. Tickers: Peers + Market (Target 제외)
             tickers = self.peers + [self.market_index]
             tickers = list(set([t.strip().upper() for t in tickers if t.strip()]))
             
-            # 2. Bulk Download
             data = yf.download(tickers, period="5y", interval="1mo", progress=False)
             
             if 'Adj Close' in data:
@@ -376,25 +369,19 @@ class DetailWACCModel:
             else:
                 return None, None, None, ["가격 데이터(Adj Close)를 찾을 수 없습니다."]
                 
-            # 3. Returns Calculation (전체 데이터 유지 - dropna() 사용 안 함)
             returns = prices.pct_change()
             
             if self.market_index not in returns.columns:
                 return None, None, None, ["시장 지수(^GSPC) 데이터 확보 실패"]
                 
-            # Market Returns (Reference)
-            market_ret_full = returns[self.market_index]
-            
             beta_list = []
-            # 순서는 원래 peers 리스트 순서대로
             check_list = [p.strip().upper() for p in self.peers]
             
             for t in check_list:
                 if t in returns.columns:
-                    # [CRITICAL FIX] Pairwise Dropna: 해당 종목과 시장지수 둘 다 있는 구간만 추출
                     pair_data = returns[[t, self.market_index]].dropna()
                     
-                    if len(pair_data) < 12: # 데이터가 너무 적으면(1년 미만) 계산 제외
+                    if len(pair_data) < 12: 
                         beta_list.append({
                             "Ticker": t, "Raw Beta (5Y)": np.nan, "Adj Beta (5Y)": np.nan, 
                             "Correlation": np.nan, "Note": "Not enough data"
@@ -404,13 +391,8 @@ class DetailWACCModel:
                     stock_ret_clean = pair_data[t]
                     market_ret_clean = pair_data[self.market_index]
                     
-                    # Calculate Variance of Market (for this specific overlapping period)
                     market_var = market_ret_clean.var()
-                    
-                    # Calculate Covariance
                     cov = stock_ret_clean.cov(market_ret_clean)
-                    
-                    # Beta Calculation
                     raw_beta = cov / market_var
                     adj_beta = (0.67 * raw_beta) + (0.33 * 1.0)
                     
@@ -422,14 +404,11 @@ class DetailWACCModel:
                         "Note": f"{len(pair_data)} months"
                     })
             
-            # 4. Formating for Display (보여줄 때는 dropna 하지 않은 전체 데이터 사용)
             prices_disp = prices.copy()
             prices_disp.index = prices_disp.index.strftime('%Y-%m-%d')
             
             returns_disp = returns.copy()
             returns_disp.index = returns_disp.index.strftime('%Y-%m-%d')
-            
-            # 정렬: 시장지수를 맨 앞으로
             cols = [self.market_index] + [c for c in returns_disp.columns if c != self.market_index]
             returns_disp = returns_disp[cols]
             
@@ -448,6 +427,7 @@ class DetailWACCModel:
         
         my_bar = st.progress(0, text="Analyzing Market & Peers...")
         
+        # 1. Main Financials & 2Y Weekly Beta (Legacy)
         for idx, p in enumerate(self.peers):
             my_bar.progress((idx + 1) / len(self.peers), text=f"Analyzing {p}...")
             beta = self.calculate_beta(p)
@@ -472,12 +452,13 @@ class DetailWACCModel:
             betas.append(unlev_beta); des.append(de)
         my_bar.empty()
         
-        # 5Y Monthly Beta (Detailed)
+        # 2. 5Y Monthly Beta (Detailed)
         beta_5y_df, beta_prices, beta_returns, beta_logs = self.get_5y_monthly_beta_analysis()
         if beta_logs: error_logs.extend(beta_logs)
 
         if not peer_results: st.error("No valid data."); return None
         
+        # Default Median Calculation (Legacy)
         median_unlev_beta = np.median(betas)
         median_de = np.median(des)
         target_we = 1 / (1 + median_de)
@@ -697,6 +678,64 @@ if btn:
                     st.dataframe(ret_disp, use_container_width=True)
                 else: st.warning("No Return Data")
                 
+            # [SENSITIVITY ANALYSIS - MOVED & FIXED]
+            st.divider()
+            st.subheader("🎛️ Sensitivity Analysis: Re-levered Beta & Structure")
+            
+            method = st.radio("Peer Group Aggregation Method", ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
+            
+            # Data from Peer Results (not Beta list) to keep consistent with D/E
+            # But wait, Unlevered Beta is calculated in run(), we should use that or 5Y Adj Beta?
+            # User asked to choose Adj Beta from Peer Ticker. 
+            # Implies we need Unlevered Beta derived from 5Y Adj Beta.
+            # Step: 5Y Adj Beta -> Unlever (using Peer D/E) -> Aggregate -> Re-lever (Target D/E)
+            
+            # Let's grab D/E from peer_results
+            peer_metrics = res['peer_df'][['Ticker', 'D/E Ratio']].copy()
+            
+            # Merge with 5Y Adj Beta
+            merged_metrics = pd.merge(peer_metrics, b_df[['Ticker', 'Adj Beta (5Y)']], on='Ticker', how='inner')
+            
+            if not merged_metrics.empty:
+                # 1. Unlever the 5Y Adj Beta for each peer
+                # Formula: Unlevered Beta = Levered Beta / (1 + (1 - Tax) * D/E)
+                # Using User's Tax Rate for unlevering? Or Peer's effective tax? 
+                # Standard convention in simple models: use marginal tax rate (User Input).
+                
+                merged_metrics['Unlevered Beta (5Y)'] = merged_metrics['Adj Beta (5Y)'] / (1 + (1 - (tax/100)) * merged_metrics['D/E Ratio'])
+                
+                # 2. Aggregate
+                if method == "Average":
+                    sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].mean()
+                    sel_de = merged_metrics['D/E Ratio'].mean()
+                elif method == "Median":
+                    sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].median()
+                    sel_de = merged_metrics['D/E Ratio'].median()
+                elif method == "Maximum":
+                    sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].max()
+                    sel_de = merged_metrics['D/E Ratio'].max()
+                else: # Minimum
+                    sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].min()
+                    sel_de = merged_metrics['D/E Ratio'].min()
+                
+                # 3. Target Weights (based on Selected D/E)
+                target_we = 1 / (1 + sel_de)
+                target_wd = sel_de / (1 + sel_de)
+                
+                # 4. Re-lever for Target
+                relevered_beta_sens = sel_unlev_beta * (1 + (1 - (tax/100)) * sel_de)
+                
+                # Display
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                col_s1.metric("Selected Unlevered Beta", f"{sel_unlev_beta:.2f}")
+                col_s2.metric("Target D/E Ratio", f"{sel_de:.2%}")
+                col_s3.metric("Implied Equity / Debt", f"{target_we:.0%} / {target_wd:.0%}")
+                col_s4.metric("Re-levered Beta", f"{relevered_beta_sens:.2f}", delta_color="normal")
+                
+                st.info(f"💡 **Logic:** 1) Unlever peers' 5Y Adj Betas. 2) Take {method} of Unlevered Beta & D/E. 3) Re-lever using Target D/E ({sel_de:.2%}).")
+            else:
+                st.warning("Insufficient data for sensitivity analysis.")
+
         else:
             st.warning("5년치 월간 베타 데이터를 불러오지 못했습니다.")
 
