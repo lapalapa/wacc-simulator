@@ -23,7 +23,6 @@ def get_sp_buyback_data():
     default_bb_yield = 2.0 
     default_div_yield = 1.5
     
-    # 직접 requests를 쓰는 곳은 헤더 유지 (NYU 서버 차단 방지)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
@@ -161,12 +160,11 @@ def get_fred_risk_free_rate():
         return default_rf, None, [f"⚠️ FRED RF 접속 실패: {str(e)}"]
 
 # ==============================================================================
-# [MODULE] Peer Recommender (Fixed: Remove Manual Session)
+# [MODULE] Peer Recommender
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
         try:
-            # [FIX] 세션을 수동으로 주입하지 않고 yfinance 기본 동작 사용 (에러 해결)
             t = yf.Ticker(ticker)
             rev = t.info.get('totalRevenue')
             if rev is None:
@@ -179,7 +177,6 @@ class PeerRecommender:
     def recommend(self, target_ticker, progress_bar=None):
         logs = []
         try:
-            # [FIX] 세션 제거
             t = yf.Ticker(target_ticker)
             info = t.info
             ind_key = info.get('industryKey')
@@ -202,8 +199,6 @@ class PeerRecommender:
                 if 'symbol' in top_df.columns: raw_list = top_df['symbol'].tolist()
                 elif 'Symbol' in top_df.columns: raw_list = top_df['Symbol'].tolist()
                 else: raw_list = top_df.index.tolist()
-                
-                # 5개 제한 유지
                 candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
             else:
                 return None, group_name, logs
@@ -213,7 +208,6 @@ class PeerRecommender:
             revenue_map = []
             total_cand = len(candidates)
             for idx, ticker in enumerate(candidates):
-                # 딜레이는 유지 (차단 방지)
                 sleep_time = random.uniform(2.0, 4.0)
                 time.sleep(sleep_time)
                 
@@ -357,6 +351,56 @@ class DetailWACCModel:
             return np.cov(ret['s'], ret['b'])[0, 1] / np.cov(ret['s'], ret['b'])[1, 1]
         except: return np.nan
 
+    # [NEW] 5Y Monthly Beta Calculation
+    def get_5y_monthly_beta_analysis(self):
+        """
+        Calculates 5-Year Monthly Beta for Target and Peers vs S&P 500
+        """
+        try:
+            tickers = [self.target] + self.peers + [self.market_index]
+            # 중복 제거 및 정리
+            tickers = list(set([t.strip().upper() for t in tickers if t.strip()]))
+            
+            # Bulk Download (5Y, Monthly)
+            data = yf.download(tickers, period="5y", interval="1mo", progress=False)
+            
+            # Close Price Handling
+            if 'Adj Close' in data:
+                prices = data['Adj Close']
+            elif 'Close' in data:
+                prices = data['Close']
+            else:
+                return None, ["가격 데이터(Adj Close)를 찾을 수 없습니다."]
+                
+            # Returns Calculation
+            returns = prices.pct_change().dropna()
+            
+            if self.market_index not in returns.columns:
+                return None, ["시장 지수(^GSPC) 데이터 확보 실패"]
+                
+            market_ret = returns[self.market_index]
+            market_var = market_ret.var()
+            
+            beta_list = []
+            # 순서 보장을 위해 원래 리스트 사용
+            check_list = [self.target] + self.peers
+            
+            for t in check_list:
+                t_upper = t.strip().upper()
+                if t_upper in returns.columns:
+                    cov = returns[t_upper].cov(market_ret)
+                    beta = cov / market_var
+                    beta_list.append({
+                        "Ticker": t_upper, 
+                        "5Y Monthly Beta": beta,
+                        "Correlation": returns[t_upper].corr(market_ret)
+                    })
+            
+            return pd.DataFrame(beta_list), []
+            
+        except Exception as e:
+            return None, [f"Beta Analysis Error: {str(e)}"]
+
     def run(self):
         rm, div_yield = self.get_implied_market_return()
         mrp = rm - self.rf
@@ -367,6 +411,7 @@ class DetailWACCModel:
         
         my_bar = st.progress(0, text="Analyzing Market & Peers...")
         
+        # 1. Main Loop (Detailed Financials & 2Y Weekly Beta)
         for idx, p in enumerate(self.peers):
             my_bar.progress((idx + 1) / len(self.peers), text=f"Analyzing {p}...")
             beta = self.calculate_beta(p)
@@ -390,7 +435,13 @@ class DetailWACCModel:
             })
             betas.append(unlev_beta); des.append(de)
         my_bar.empty()
+        
+        # 2. 5Y Monthly Beta Analysis (New Feature)
+        beta_5y_df, beta_logs = self.get_5y_monthly_beta_analysis()
+        if beta_logs: error_logs.extend(beta_logs)
+
         if not peer_results: st.error("No valid data."); return None
+        
         median_unlev_beta = np.median(betas)
         median_de = np.median(des)
         target_we = 1 / (1 + median_de)
@@ -400,9 +451,11 @@ class DetailWACCModel:
         credit_spread = 0.02
         kd = (self.rf + credit_spread) * (1 - self.tax)
         wacc = (target_we * ke) + (target_wd * kd)
+        
         return {
             "market": {"Rf": self.rf, "Rm": rm, "MRP": mrp, "Div": div_yield},
             "peer_df": pd.DataFrame(peer_results),
+            "beta_5y_df": beta_5y_df, # Result included
             "target": {"WACC": wacc, "Ke": ke, "Kd": kd, "Spread": credit_spread, 
                        "Beta": relevered_beta, "DE": median_de, "We": target_we, "Wd": target_wd},
             "errors": error_logs
@@ -566,17 +619,33 @@ if btn:
             with st.expander("⚠️ 데이터 경고"):
                 for e in res['errors']: st.write(e)
 
+        # [NEW SECTION] 5Y Monthly Beta Analysis
+        st.divider()
+        st.subheader("📊 5-Year Monthly Beta Analysis")
+        st.caption("※ Calculation: Covariance(Stock, S&P500) / Variance(S&P500) based on 5-year monthly adjusted close prices.")
+        
+        if "beta_5y_df" in res and res["beta_5y_df"] is not None:
+            b_df = res["beta_5y_df"].copy()
+            st.dataframe(
+                b_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Ticker": "Ticker",
+                    "5Y Monthly Beta": st.column_config.NumberColumn("5Y Monthly Beta", format="%.2f"),
+                    "Correlation": st.column_config.NumberColumn("Correlation vs S&P500", format="%.2f")
+                }
+            )
+        else:
+            st.warning("5년치 월간 베타 데이터를 불러오지 못했습니다.")
+
         # [MARKET DATA] Reference Tables
         st.divider()
         st.subheader("📉 Market Data Reference")
         
-        # 에러 발생 시 안내
-        if sp_df is None and sp_logs:
-            st.error(f"NYU Stern 데이터 로드 실패: {sp_logs[0]}")
-        if gdp_df is None and gdp_logs:
-            st.error(f"FRED 데이터 로드 실패: {gdp_logs[0]}")
-        if rf_trend_df is None and rf_logs:
-            st.error(f"FRED RF 데이터 로드 실패: {rf_logs[0]}")
+        if sp_df is None and sp_logs: st.error(f"NYU Stern 데이터 로드 실패: {sp_logs[0]}")
+        if gdp_df is None and gdp_logs: st.error(f"FRED 데이터 로드 실패: {gdp_logs[0]}")
+        if rf_trend_df is None and rf_logs: st.error(f"FRED RF 데이터 로드 실패: {rf_logs[0]}")
 
         tab_rf, tab_sp, tab_gdp = st.tabs(["📉 Risk Free Rate (5Y Trend)", "📊 S&P 500 Buyback & Dividend", "📈 US GDP Growth"])
         
