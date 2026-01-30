@@ -160,7 +160,7 @@ def get_fred_risk_free_rate():
         return default_rf, None, [f"⚠️ FRED RF 접속 실패: {str(e)}"]
 
 # ==============================================================================
-# [MODULE] Peer Recommender
+# [MODULE] Peer Recommender (Fixed)
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
@@ -199,6 +199,7 @@ class PeerRecommender:
                 if 'symbol' in top_df.columns: raw_list = top_df['symbol'].tolist()
                 elif 'Symbol' in top_df.columns: raw_list = top_df['Symbol'].tolist()
                 else: raw_list = top_df.index.tolist()
+                
                 candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
             else:
                 return None, group_name, logs
@@ -351,20 +352,17 @@ class DetailWACCModel:
             return np.cov(ret['s'], ret['b'])[0, 1] / np.cov(ret['s'], ret['b'])[1, 1]
         except: return np.nan
 
-    # [NEW] 5Y Monthly Beta Calculation
+    # [UPDATED] 5Y Monthly Beta with Blume Adjustment
     def get_5y_monthly_beta_analysis(self):
         """
-        Calculates 5-Year Monthly Beta for Target and Peers vs S&P 500
+        Calculates 5-Year Monthly Adjusted Beta (Blume's Method)
         """
         try:
             tickers = [self.target] + self.peers + [self.market_index]
-            # 중복 제거 및 정리
             tickers = list(set([t.strip().upper() for t in tickers if t.strip()]))
             
-            # Bulk Download (5Y, Monthly)
             data = yf.download(tickers, period="5y", interval="1mo", progress=False)
             
-            # Close Price Handling
             if 'Adj Close' in data:
                 prices = data['Adj Close']
             elif 'Close' in data:
@@ -372,7 +370,6 @@ class DetailWACCModel:
             else:
                 return None, ["가격 데이터(Adj Close)를 찾을 수 없습니다."]
                 
-            # Returns Calculation
             returns = prices.pct_change().dropna()
             
             if self.market_index not in returns.columns:
@@ -382,17 +379,21 @@ class DetailWACCModel:
             market_var = market_ret.var()
             
             beta_list = []
-            # 순서 보장을 위해 원래 리스트 사용
             check_list = [self.target] + self.peers
             
             for t in check_list:
                 t_upper = t.strip().upper()
                 if t_upper in returns.columns:
                     cov = returns[t_upper].cov(market_ret)
-                    beta = cov / market_var
+                    raw_beta = cov / market_var
+                    
+                    # [FIX] Apply Blume's Adjustment
+                    adj_beta = (0.67 * raw_beta) + (0.33 * 1.0)
+                    
                     beta_list.append({
                         "Ticker": t_upper, 
-                        "5Y Monthly Beta": beta,
+                        "Raw Beta (5Y)": raw_beta,
+                        "Adj Beta (5Y)": adj_beta,
                         "Correlation": returns[t_upper].corr(market_ret)
                     })
             
@@ -411,7 +412,6 @@ class DetailWACCModel:
         
         my_bar = st.progress(0, text="Analyzing Market & Peers...")
         
-        # 1. Main Loop (Detailed Financials & 2Y Weekly Beta)
         for idx, p in enumerate(self.peers):
             my_bar.progress((idx + 1) / len(self.peers), text=f"Analyzing {p}...")
             beta = self.calculate_beta(p)
@@ -436,7 +436,7 @@ class DetailWACCModel:
             betas.append(unlev_beta); des.append(de)
         my_bar.empty()
         
-        # 2. 5Y Monthly Beta Analysis (New Feature)
+        # 5Y Monthly Beta
         beta_5y_df, beta_logs = self.get_5y_monthly_beta_analysis()
         if beta_logs: error_logs.extend(beta_logs)
 
@@ -455,7 +455,7 @@ class DetailWACCModel:
         return {
             "market": {"Rf": self.rf, "Rm": rm, "MRP": mrp, "Div": div_yield},
             "peer_df": pd.DataFrame(peer_results),
-            "beta_5y_df": beta_5y_df, # Result included
+            "beta_5y_df": beta_5y_df,
             "target": {"WACC": wacc, "Ke": ke, "Kd": kd, "Spread": credit_spread, 
                        "Beta": relevered_beta, "DE": median_de, "We": target_we, "Wd": target_wd},
             "errors": error_logs
@@ -472,12 +472,10 @@ if 'peers_input_val' not in st.session_state: st.session_state['peers_input_val'
 if 'rec_logs' not in st.session_state: st.session_state['rec_logs'] = []
 if 'rec_success_msg' not in st.session_state: st.session_state['rec_success_msg'] = ""
 
-# [DATA LOAD] NYU Stern, FRED GDP, FRED RF
 sp_avg_bb_yield, sp_avg_div_yield, sp_df, sp_logs = get_sp_buyback_data()
 gdp_latest_growth, gdp_df, gdp_logs = get_fred_gdp_data()
 latest_rf, rf_trend_df, rf_logs = get_fred_risk_free_rate()
 
-# 에러 로깅
 if sp_logs: st.toast(sp_logs[0], icon="⚠️")
 if gdp_logs: st.toast(gdp_logs[0], icon="⚠️")
 if rf_logs: st.toast(rf_logs[0], icon="⚠️")
@@ -515,14 +513,9 @@ with st.sidebar:
     st.header("2. Assumptions")
     tax = st.slider("Tax Rate (%)", 0.0, 40.0, 25.0, 1.0)
     
-    # [LIVE DATA] Risk Free Rate (FRED)
     rf_input = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
-
-    # [LIVE DATA] S&P 500 Buyback & Dividend (NYU Stern)
     buyback = st.number_input(f"Buyback Yield (5Y Avg: {sp_avg_bb_yield:.2f}%)", value=sp_avg_bb_yield, step=0.1)
     div_yield_in = st.number_input(f"Dividend Yield (5Y Avg: {sp_avg_div_yield:.2f}%)", value=sp_avg_div_yield, step=0.1)
-    
-    # [LIVE DATA] FRED GDP Latest
     growth = st.number_input(f"Growth Rate (Latest GDP: {gdp_latest_growth:.2f}%)", value=gdp_latest_growth, step=0.1)
     
     st.divider()
@@ -622,7 +615,7 @@ if btn:
         # [NEW SECTION] 5Y Monthly Beta Analysis
         st.divider()
         st.subheader("📊 5-Year Monthly Beta Analysis")
-        st.caption("※ Calculation: Covariance(Stock, S&P500) / Variance(S&P500) based on 5-year monthly adjusted close prices.")
+        st.caption("※ **Raw Beta**: Covariance / Variance (Monthly 5Y) | **Adj Beta**: (0.67 * Raw) + (0.33 * 1.0)")
         
         if "beta_5y_df" in res and res["beta_5y_df"] is not None:
             b_df = res["beta_5y_df"].copy()
@@ -632,7 +625,8 @@ if btn:
                 hide_index=True,
                 column_config={
                     "Ticker": "Ticker",
-                    "5Y Monthly Beta": st.column_config.NumberColumn("5Y Monthly Beta", format="%.2f"),
+                    "Raw Beta (5Y)": st.column_config.NumberColumn("Raw Beta", format="%.2f"),
+                    "Adj Beta (5Y)": st.column_config.NumberColumn("Adj Beta (Bloomberg Style)", format="%.2f"),
                     "Correlation": st.column_config.NumberColumn("Correlation vs S&P500", format="%.2f")
                 }
             )
