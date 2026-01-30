@@ -160,11 +160,12 @@ def get_fred_risk_free_rate():
         return default_rf, None, [f"⚠️ FRED RF 접속 실패: {str(e)}"]
 
 # ==============================================================================
-# [MODULE] Peer Recommender (Fixed)
+# [MODULE] Peer Recommender (Anti-Ban Enhanced)
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
         try:
+            # yfinance 기본 세션 사용 (수동 세션 주입 제거)
             t = yf.Ticker(ticker)
             rev = t.info.get('totalRevenue')
             if rev is None:
@@ -200,6 +201,7 @@ class PeerRecommender:
                 elif 'Symbol' in top_df.columns: raw_list = top_df['Symbol'].tolist()
                 else: raw_list = top_df.index.tolist()
                 
+                # 차단 방지를 위해 5개로 제한
                 candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
             else:
                 return None, group_name, logs
@@ -209,6 +211,7 @@ class PeerRecommender:
             revenue_map = []
             total_cand = len(candidates)
             for idx, ticker in enumerate(candidates):
+                # 랜덤 딜레이 적용
                 sleep_time = random.uniform(2.0, 4.0)
                 time.sleep(sleep_time)
                 
@@ -352,16 +355,18 @@ class DetailWACCModel:
             return np.cov(ret['s'], ret['b'])[0, 1] / np.cov(ret['s'], ret['b'])[1, 1]
         except: return np.nan
 
-    # [UPDATED] 5Y Monthly Beta with Detail Returns
+    # [FIXED & UPDATED] 5Y Monthly Beta Calculation (No Target, Handle Missing Data)
     def get_5y_monthly_beta_analysis(self):
         """
-        Calculates 5-Year Monthly Adjusted Beta and returns Prices & Returns Data
+        Calculates 5-Year Monthly Adjusted Beta for Peers (excluding Target).
+        Handles missing data by keeping the timeframe of the longest ticker (Market).
         """
         try:
-            tickers = [self.target] + self.peers + [self.market_index]
+            # 1. Tickers: Peers + Market (Target 제외)
+            tickers = self.peers + [self.market_index]
             tickers = list(set([t.strip().upper() for t in tickers if t.strip()]))
             
-            # Bulk Download
+            # 2. Bulk Download
             data = yf.download(tickers, period="5y", interval="1mo", progress=False)
             
             if 'Adj Close' in data:
@@ -371,37 +376,62 @@ class DetailWACCModel:
             else:
                 return None, None, None, ["가격 데이터(Adj Close)를 찾을 수 없습니다."]
                 
-            # Returns
-            returns = prices.pct_change().dropna()
+            # 3. Returns Calculation (전체 데이터 유지 - dropna() 사용 안 함)
+            returns = prices.pct_change()
             
             if self.market_index not in returns.columns:
                 return None, None, None, ["시장 지수(^GSPC) 데이터 확보 실패"]
                 
-            market_ret = returns[self.market_index]
-            market_var = market_ret.var()
+            # Market Returns (Reference)
+            market_ret_full = returns[self.market_index]
             
             beta_list = []
-            check_list = [self.target] + self.peers
+            # 순서는 원래 peers 리스트 순서대로
+            check_list = [p.strip().upper() for p in self.peers]
             
             for t in check_list:
-                t_upper = t.strip().upper()
-                if t_upper in returns.columns:
-                    cov = returns[t_upper].cov(market_ret)
+                if t in returns.columns:
+                    # [CRITICAL FIX] Pairwise Dropna: 해당 종목과 시장지수 둘 다 있는 구간만 추출
+                    pair_data = returns[[t, self.market_index]].dropna()
+                    
+                    if len(pair_data) < 12: # 데이터가 너무 적으면(1년 미만) 계산 제외
+                        beta_list.append({
+                            "Ticker": t, "Raw Beta (5Y)": np.nan, "Adj Beta (5Y)": np.nan, 
+                            "Correlation": np.nan, "Note": "Not enough data"
+                        })
+                        continue
+
+                    stock_ret_clean = pair_data[t]
+                    market_ret_clean = pair_data[self.market_index]
+                    
+                    # Calculate Variance of Market (for this specific overlapping period)
+                    market_var = market_ret_clean.var()
+                    
+                    # Calculate Covariance
+                    cov = stock_ret_clean.cov(market_ret_clean)
+                    
+                    # Beta Calculation
                     raw_beta = cov / market_var
                     adj_beta = (0.67 * raw_beta) + (0.33 * 1.0)
                     
                     beta_list.append({
-                        "Ticker": t_upper, 
+                        "Ticker": t, 
                         "Raw Beta (5Y)": raw_beta,
                         "Adj Beta (5Y)": adj_beta,
-                        "Correlation": returns[t_upper].corr(market_ret)
+                        "Correlation": stock_ret_clean.corr(market_ret_clean),
+                        "Note": f"{len(pair_data)} months"
                     })
             
-            # Formating Dates for display
+            # 4. Formating for Display (보여줄 때는 dropna 하지 않은 전체 데이터 사용)
             prices_disp = prices.copy()
             prices_disp.index = prices_disp.index.strftime('%Y-%m-%d')
+            
             returns_disp = returns.copy()
             returns_disp.index = returns_disp.index.strftime('%Y-%m-%d')
+            
+            # 정렬: 시장지수를 맨 앞으로
+            cols = [self.market_index] + [c for c in returns_disp.columns if c != self.market_index]
+            returns_disp = returns_disp[cols]
             
             return pd.DataFrame(beta_list), prices_disp, returns_disp, []
             
@@ -462,8 +492,8 @@ class DetailWACCModel:
             "market": {"Rf": self.rf, "Rm": rm, "MRP": mrp, "Div": div_yield},
             "peer_df": pd.DataFrame(peer_results),
             "beta_5y_df": beta_5y_df,
-            "beta_prices": beta_prices, # Raw Prices
-            "beta_returns": beta_returns, # Calculated Returns
+            "beta_prices": beta_prices,
+            "beta_returns": beta_returns,
             "target": {"WACC": wacc, "Ke": ke, "Kd": kd, "Spread": credit_spread, 
                        "Beta": relevered_beta, "DE": median_de, "We": target_we, "Wd": target_wd},
             "errors": error_logs
