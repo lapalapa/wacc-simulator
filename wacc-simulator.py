@@ -352,15 +352,16 @@ class DetailWACCModel:
             return np.cov(ret['s'], ret['b'])[0, 1] / np.cov(ret['s'], ret['b'])[1, 1]
         except: return np.nan
 
-    # [UPDATED] 5Y Monthly Beta with Blume Adjustment
+    # [UPDATED] 5Y Monthly Beta with Detail Returns
     def get_5y_monthly_beta_analysis(self):
         """
-        Calculates 5-Year Monthly Adjusted Beta (Blume's Method)
+        Calculates 5-Year Monthly Adjusted Beta and returns Prices & Returns Data
         """
         try:
             tickers = [self.target] + self.peers + [self.market_index]
             tickers = list(set([t.strip().upper() for t in tickers if t.strip()]))
             
+            # Bulk Download
             data = yf.download(tickers, period="5y", interval="1mo", progress=False)
             
             if 'Adj Close' in data:
@@ -368,12 +369,13 @@ class DetailWACCModel:
             elif 'Close' in data:
                 prices = data['Close']
             else:
-                return None, ["가격 데이터(Adj Close)를 찾을 수 없습니다."]
+                return None, None, None, ["가격 데이터(Adj Close)를 찾을 수 없습니다."]
                 
+            # Returns
             returns = prices.pct_change().dropna()
             
             if self.market_index not in returns.columns:
-                return None, ["시장 지수(^GSPC) 데이터 확보 실패"]
+                return None, None, None, ["시장 지수(^GSPC) 데이터 확보 실패"]
                 
             market_ret = returns[self.market_index]
             market_var = market_ret.var()
@@ -386,8 +388,6 @@ class DetailWACCModel:
                 if t_upper in returns.columns:
                     cov = returns[t_upper].cov(market_ret)
                     raw_beta = cov / market_var
-                    
-                    # [FIX] Apply Blume's Adjustment
                     adj_beta = (0.67 * raw_beta) + (0.33 * 1.0)
                     
                     beta_list.append({
@@ -397,10 +397,16 @@ class DetailWACCModel:
                         "Correlation": returns[t_upper].corr(market_ret)
                     })
             
-            return pd.DataFrame(beta_list), []
+            # Formating Dates for display
+            prices_disp = prices.copy()
+            prices_disp.index = prices_disp.index.strftime('%Y-%m-%d')
+            returns_disp = returns.copy()
+            returns_disp.index = returns_disp.index.strftime('%Y-%m-%d')
+            
+            return pd.DataFrame(beta_list), prices_disp, returns_disp, []
             
         except Exception as e:
-            return None, [f"Beta Analysis Error: {str(e)}"]
+            return None, None, None, [f"Beta Analysis Error: {str(e)}"]
 
     def run(self):
         rm, div_yield = self.get_implied_market_return()
@@ -436,8 +442,8 @@ class DetailWACCModel:
             betas.append(unlev_beta); des.append(de)
         my_bar.empty()
         
-        # 5Y Monthly Beta
-        beta_5y_df, beta_logs = self.get_5y_monthly_beta_analysis()
+        # 5Y Monthly Beta (Detailed)
+        beta_5y_df, beta_prices, beta_returns, beta_logs = self.get_5y_monthly_beta_analysis()
         if beta_logs: error_logs.extend(beta_logs)
 
         if not peer_results: st.error("No valid data."); return None
@@ -456,6 +462,8 @@ class DetailWACCModel:
             "market": {"Rf": self.rf, "Rm": rm, "MRP": mrp, "Div": div_yield},
             "peer_df": pd.DataFrame(peer_results),
             "beta_5y_df": beta_5y_df,
+            "beta_prices": beta_prices, # Raw Prices
+            "beta_returns": beta_returns, # Calculated Returns
             "target": {"WACC": wacc, "Ke": ke, "Kd": kd, "Spread": credit_spread, 
                        "Beta": relevered_beta, "DE": median_de, "We": target_we, "Wd": target_wd},
             "errors": error_logs
@@ -612,24 +620,53 @@ if btn:
             with st.expander("⚠️ 데이터 경고"):
                 for e in res['errors']: st.write(e)
 
-        # [NEW SECTION] 5Y Monthly Beta Analysis
+        # [NEW SECTION] 5Y Monthly Beta Analysis (Enhanced)
         st.divider()
         st.subheader("📊 5-Year Monthly Beta Analysis")
-        st.caption("※ **Raw Beta**: Covariance / Variance (Monthly 5Y) | **Adj Beta**: (0.67 * Raw) + (0.33 * 1.0)")
+        st.caption("Detailed Calculation & Data Verification")
         
+        # 1. Summary Table
         if "beta_5y_df" in res and res["beta_5y_df"] is not None:
             b_df = res["beta_5y_df"].copy()
-            st.dataframe(
-                b_df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Ticker": "Ticker",
-                    "Raw Beta (5Y)": st.column_config.NumberColumn("Raw Beta", format="%.2f"),
-                    "Adj Beta (5Y)": st.column_config.NumberColumn("Adj Beta (Bloomberg Style)", format="%.2f"),
-                    "Correlation": st.column_config.NumberColumn("Correlation vs S&P500", format="%.2f")
-                }
-            )
+            
+            # Formulas
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                st.markdown("**1. Monthly Returns Formula:**")
+                st.latex(r"R_t = \frac{P_t - P_{t-1}}{P_{t-1}}")
+                st.caption("*$P_t$: Adjusted Close Price at month t*")
+            with col_f2:
+                st.markdown("**2. Beta Formulas:**")
+                st.latex(r"\beta_{raw} = \frac{Cov(R_{stock}, R_{market})}{Var(R_{market})}, \quad \beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33 \cdot 1.0")
+            
+            # Tabs for Data
+            tab_sum, tab_prices, tab_rets = st.tabs(["📋 Beta Summary", "📉 Data: Adj Close Prices", "📈 Data: Monthly Returns"])
+            
+            with tab_sum:
+                st.dataframe(
+                    b_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Ticker": "Ticker",
+                        "Raw Beta (5Y)": st.column_config.NumberColumn("Raw Beta", format="%.2f"),
+                        "Adj Beta (5Y)": st.column_config.NumberColumn("Adj Beta (Bloomberg Style)", format="%.2f"),
+                        "Correlation": st.column_config.NumberColumn("Correlation vs S&P500", format="%.2f")
+                    }
+                )
+            
+            with tab_prices:
+                if "beta_prices" in res:
+                    st.dataframe(res["beta_prices"], use_container_width=True)
+                else: st.warning("No Price Data")
+            
+            with tab_rets:
+                if "beta_returns" in res:
+                    # Format as percentage for display
+                    ret_disp = res["beta_returns"].style.format("{:.2%}")
+                    st.dataframe(ret_disp, use_container_width=True)
+                else: st.warning("No Return Data")
+                
         else:
             st.warning("5년치 월간 베타 데이터를 불러오지 못했습니다.")
 
