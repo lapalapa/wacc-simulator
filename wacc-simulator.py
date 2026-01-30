@@ -353,9 +353,6 @@ class DetailWACCModel:
         except: return np.nan
 
     def get_5y_monthly_beta_analysis(self):
-        """
-        Calculates 5-Year Monthly Adjusted Beta for Peers (excluding Target).
-        """
         try:
             tickers = self.peers + [self.market_index]
             tickers = list(set([t.strip().upper() for t in tickers if t.strip()]))
@@ -427,7 +424,6 @@ class DetailWACCModel:
         
         my_bar = st.progress(0, text="Analyzing Market & Peers...")
         
-        # 1. Main Financials & 2Y Weekly Beta (Legacy)
         for idx, p in enumerate(self.peers):
             my_bar.progress((idx + 1) / len(self.peers), text=f"Analyzing {p}...")
             beta = self.calculate_beta(p)
@@ -452,13 +448,11 @@ class DetailWACCModel:
             betas.append(unlev_beta); des.append(de)
         my_bar.empty()
         
-        # 2. 5Y Monthly Beta (Detailed)
         beta_5y_df, beta_prices, beta_returns, beta_logs = self.get_5y_monthly_beta_analysis()
         if beta_logs: error_logs.extend(beta_logs)
 
         if not peer_results: st.error("No valid data."); return None
         
-        # Default Median Calculation (Legacy)
         median_unlev_beta = np.median(betas)
         median_de = np.median(des)
         target_we = 1 / (1 + median_de)
@@ -541,252 +535,242 @@ with st.sidebar:
     btn = st.button("Calculate WACC", type="primary", use_container_width=True)
 
 if btn:
-    model = DetailWACCModel(target, peers, rf_input, buyback, div_yield_in, growth, tax)
-    with st.spinner("Calculating..."):
-        res = model.run()
-        
-    if res:
-        with st.expander("📘 WACC Formula", expanded=True):
-            st.markdown(f"$$ WACC = (\\text{{Equity Ratio}} \\times \\text{{Cost of Equity}}) + (\\text{{Debt Ratio}} \\times \\text{{Cost of Debt}} \\times (1 - \\text{{Tax}})) $$")
+    # [FIX] Session State for Results (Persistence)
+    st.session_state['wacc_result'] = DetailWACCModel(target, peers, rf_input, buyback, div_yield_in, growth, tax).run()
 
-        t = res['target']
-        m = res['market']
-        st.success(f"### 🎯 Final WACC: {t['WACC']:.2%}")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Cost of Equity", f"{t['Ke']:.2%}")
-        c2.metric("Cost of Debt (After-Tax)", f"{t['Kd']:.2%}")
-        c3.metric("Target D/E Ratio", f"{t['DE']:.2%}")
-        c4.metric("Capital Structure", f"Eq {t['We']:.0%} : Dt {t['Wd']:.0%}")
-        
-        st.markdown("---")
-        st.subheader("🧮 Detailed Calculation Process (Breakdown)")
-        col_ke, col_kd = st.columns(2)
-        
-        with col_ke:
-            st.markdown("#### 1. Cost of Equity (자기자본비용)")
-            st.latex(r"\text{Cost of Equity} = \text{Risk Free Rate} + (\beta \times \text{Market Risk Premium})")
-            ke_data = {
-                "Item": ["Risk-Free Rate", "Re-levered Beta", "Market Risk Premium"],
-                "Value": [f"{m['Rf']:.2%}", f"{t['Beta']:.2f}", f"{m['MRP']:.2%}"],
-                "Source URL": ["https://fred.stlouisfed.org/series/DGS10", None, None],
-                "Source": ["🔗 FRED (DGS10)", "Peer Group Median", "Implied Return - Rf"],
-                "Logic": [f"10-Year Treasury Constant Maturity (Latest: {rf_input:.2f}%)", "Unlevered Median adjusted for Target D/E", "Expected Equity Return excess over Rf"]
-            }
-            st.dataframe(pd.DataFrame(ke_data), hide_index=True, use_container_width=True, 
-                         column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
-            st.info(f"💡 **Calculation:** {m['Rf']:.2%} + ({t['Beta']:.2f} × {m['MRP']:.2%}) = **{t['Ke']:.2%}**")
+# [DISPLAY LOGIC] Check Session State
+if 'wacc_result' in st.session_state and st.session_state['wacc_result']:
+    res = st.session_state['wacc_result']
+    t = res['target']
+    m = res['market']
 
-        with col_kd:
-            st.markdown("#### 2. Cost of Debt (타인자본비용)")
-            st.latex(r"\text{Cost of Debt} = (\text{Risk Free Rate} + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
-            kd_data = {
-                "Item": ["Risk-Free Rate", "Credit Spread", "Tax Rate"],
-                "Value": [f"{m['Rf']:.2%}", f"{t['Spread']:.2%}", f"{tax:.1f}%"],
-                "Source URL": ["https://fred.stlouisfed.org/series/DGS10", "https://fred.stlouisfed.org/series/BAMLC0A0CM", None],
-                "Source": ["🔗 FRED (DGS10)", "🔗 FRED (ICE BofA BBB)", "User Input"],
-                "Logic": ["Base rate for debt pricing", "Proxy: US Corp BBB Option-Adjusted Spread", "Corporate Tax Shield"]
-            }
-            st.dataframe(pd.DataFrame(kd_data), hide_index=True, use_container_width=True, 
-                         column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
-            st.info(f"💡 **Calculation:** ({m['Rf']:.2%} + {t['Spread']:.2%}) × (1 - {tax/100:.2f}) = **{t['Kd']:.2%}**")
+    with st.expander("📘 WACC Formula", expanded=True):
+        st.markdown(f"$$ WACC = (\\text{{Equity Ratio}} \\times \\text{{Cost of Equity}}) + (\\text{{Debt Ratio}} \\times \\text{{Cost of Debt}} \\times (1 - \\text{{Tax}})) $$")
 
-        st.markdown("#### 3. Target Capital Structure Logic (Capital Weights)")
-        col_str1, col_str2 = st.columns(2)
-        with col_str1:
-            st.markdown("**A. Target D/E Ratio**")
-            st.info(f"Logic: **Peer Group Median** D/E Ratio.\n\nMedian Value: **{t['DE']:.2%}**")
-        with col_str2:
-            st.markdown("**B. Weights Conversion**")
-            st.latex(r"W_{Equity} = \frac{1}{1 + D/E}, \quad W_{Debt} = \frac{D/E}{1 + D/E}")
-            st.write(f"- **Equity:** **{t['We']:.1%}** | **Debt:** **{t['Wd']:.1%}**")
-
-        st.markdown("#### 4. Implied Market Return Basis")
-        st.caption("Market Risk Premium 산출을 위한 시장 기대수익률($R_m$) 구성 요소")
-        rm_data = {
-            "Item": ["Dividend Yield", "Buyback Yield", "Growth Rate"],
-            "Value": [f"{div_yield_in:.2f}%", f"{buyback:.2f}%", f"{growth:.2f}%"],
-            "Source URL": ["https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://fred.stlouisfed.org/series/A191RP1A027NBEA"],
-            "Source": ["🔗 NYU Stern (Damodaran)", "🔗 NYU Stern (Damodaran)", "🔗 FRED (GDP Growth)"],
-            "Logic": [f"5Y Avg (Live Data: {sp_avg_div_yield:.2f}%)", f"5Y Avg (Live Data: {sp_avg_bb_yield:.2f}%)", f"Latest (Live Data: {gdp_latest_growth:.2f}%)"]
+    st.success(f"### 🎯 Final WACC: {t['WACC']:.2%}")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Cost of Equity", f"{t['Ke']:.2%}")
+    c2.metric("Cost of Debt (After-Tax)", f"{t['Kd']:.2%}")
+    c3.metric("Target D/E Ratio", f"{t['DE']:.2%}")
+    c4.metric("Capital Structure", f"Eq {t['We']:.0%} : Dt {t['Wd']:.0%}")
+    
+    st.markdown("---")
+    st.subheader("🧮 Detailed Calculation Process (Breakdown)")
+    col_ke, col_kd = st.columns(2)
+    
+    with col_ke:
+        st.markdown("#### 1. Cost of Equity (자기자본비용)")
+        st.latex(r"\text{Cost of Equity} = \text{Risk Free Rate} + (\beta \times \text{Market Risk Premium})")
+        ke_data = {
+            "Item": ["Risk-Free Rate", "Re-levered Beta", "Market Risk Premium"],
+            "Value": [f"{m['Rf']:.2%}", f"{t['Beta']:.2f}", f"{m['MRP']:.2%}"],
+            "Source URL": ["https://fred.stlouisfed.org/series/DGS10", None, None],
+            "Source": ["🔗 FRED (DGS10)", "Peer Group Median", "Implied Return - Rf"],
+            "Logic": [f"10-Year Treasury Constant Maturity (Latest: {rf_input:.2f}%)", "Unlevered Median adjusted for Target D/E", "Expected Equity Return excess over Rf"]
         }
-        st.dataframe(pd.DataFrame(rm_data), hide_index=True, use_container_width=True, 
+        st.dataframe(pd.DataFrame(ke_data), hide_index=True, use_container_width=True, 
                      column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
-        st.info(f"💡 **Calculation:** {div_yield_in:.2f}% + {buyback:.2f}% + {growth:.2f}% = **{m['Rm']:.2%}**")
-        
-        st.divider()
-        st.subheader("🏢 Peer Group Analysis (TTM vs FY)")
-        df = res['peer_df'].copy()
-        cols_order = ["Ticker", "Company Name", "Currency", "FY Date", "Revenue (TTM)", "Revenue (FY)", "EBIT (TTM)", "EBIT % (TTM)", "EBIT (FY)", "EBIT % (FY)", "EBITDA (TTM)", "EBITDA % (TTM)", "EBITDA (FY)", "EBITDA % (FY)", "Levered Beta", "Unlevered Beta", "D/E Ratio", "Market Cap", "Total Debt"]
-        cols_order = [c for c in cols_order if c in df.columns]
-        df = df[cols_order]
-        def fmt_usd(x): return f"${x/1e9:.2f}B" if x != 0 else "-"
-        def fmt_pct(x): return f"{x:.1%}" if x != 0 else "-"
-        df_disp = df.copy()
-        for c in ["Revenue (TTM)", "Revenue (FY)", "EBIT (TTM)", "EBIT (FY)", "EBITDA (TTM)", "EBITDA (FY)", "Market Cap", "Total Debt"]: df_disp[c] = df_disp[c].apply(fmt_usd)
-        for c in ["EBIT % (TTM)", "EBIT % (FY)", "EBITDA % (TTM)", "EBITDA % (FY)", "D/E Ratio"]: df_disp[c] = df_disp[c].apply(fmt_pct)
-        for c in ["Levered Beta", "Unlevered Beta"]: df_disp[c] = df_disp[c].apply(lambda x: f"{x:.2f}")
-        st.dataframe(df_disp, use_container_width=True, column_config={"Company Name": st.column_config.TextColumn(width="medium")})
-        
-        if res['errors']:
-            with st.expander("⚠️ 데이터 경고"):
-                for e in res['errors']: st.write(e)
+        st.info(f"💡 **Calculation:** {m['Rf']:.2%} + ({t['Beta']:.2f} × {m['MRP']:.2%}) = **{t['Ke']:.2%}**")
 
-        # [NEW SECTION] 5Y Monthly Beta Analysis (Enhanced)
-        st.divider()
-        st.subheader("📊 5-Year Monthly Beta Analysis")
-        st.caption("Detailed Calculation & Data Verification")
-        
-        # 1. Summary Table
-        if "beta_5y_df" in res and res["beta_5y_df"] is not None:
-            b_df = res["beta_5y_df"].copy()
-            
-            # Formulas
-            col_f1, col_f2 = st.columns(2)
-            with col_f1:
-                st.markdown("**1. Monthly Returns Formula:**")
-                st.latex(r"R_t = \frac{P_t - P_{t-1}}{P_{t-1}}")
-                st.caption("*$P_t$: Adjusted Close Price at month t*")
-            with col_f2:
-                st.markdown("**2. Beta Formulas:**")
-                st.latex(r"\beta_{raw} = \frac{Cov(R_{stock}, R_{market})}{Var(R_{market})}, \quad \beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33 \cdot 1.0")
-            
-            # Tabs for Data
-            tab_sum, tab_prices, tab_rets = st.tabs(["📋 Beta Summary", "📉 Data: Adj Close Prices", "📈 Data: Monthly Returns"])
-            
-            with tab_sum:
-                st.dataframe(
-                    b_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Ticker": "Ticker",
-                        "Raw Beta (5Y)": st.column_config.NumberColumn("Raw Beta", format="%.2f"),
-                        "Adj Beta (5Y)": st.column_config.NumberColumn("Adj Beta (Bloomberg Style)", format="%.2f"),
-                        "Correlation": st.column_config.NumberColumn("Correlation vs S&P500", format="%.2f")
-                    }
-                )
-            
-            with tab_prices:
-                if "beta_prices" in res:
-                    st.dataframe(res["beta_prices"], use_container_width=True)
-                else: st.warning("No Price Data")
-            
-            with tab_rets:
-                if "beta_returns" in res:
-                    # Format as percentage for display
-                    ret_disp = res["beta_returns"].style.format("{:.2%}")
-                    st.dataframe(ret_disp, use_container_width=True)
-                else: st.warning("No Return Data")
-                
-            # [SENSITIVITY ANALYSIS - MOVED & FIXED]
-            st.divider()
-            st.subheader("🎛️ Sensitivity Analysis: Re-levered Beta & Structure")
-            
-            method = st.radio("Peer Group Aggregation Method", ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
-            
-            # Data from Peer Results (not Beta list) to keep consistent with D/E
-            # But wait, Unlevered Beta is calculated in run(), we should use that or 5Y Adj Beta?
-            # User asked to choose Adj Beta from Peer Ticker. 
-            # Implies we need Unlevered Beta derived from 5Y Adj Beta.
-            # Step: 5Y Adj Beta -> Unlever (using Peer D/E) -> Aggregate -> Re-lever (Target D/E)
-            
-            # Let's grab D/E from peer_results
-            peer_metrics = res['peer_df'][['Ticker', 'D/E Ratio']].copy()
-            
-            # Merge with 5Y Adj Beta
-            merged_metrics = pd.merge(peer_metrics, b_df[['Ticker', 'Adj Beta (5Y)']], on='Ticker', how='inner')
-            
-            if not merged_metrics.empty:
-                # 1. Unlever the 5Y Adj Beta for each peer
-                # Formula: Unlevered Beta = Levered Beta / (1 + (1 - Tax) * D/E)
-                # Using User's Tax Rate for unlevering? Or Peer's effective tax? 
-                # Standard convention in simple models: use marginal tax rate (User Input).
-                
-                merged_metrics['Unlevered Beta (5Y)'] = merged_metrics['Adj Beta (5Y)'] / (1 + (1 - (tax/100)) * merged_metrics['D/E Ratio'])
-                
-                # 2. Aggregate
-                if method == "Average":
-                    sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].mean()
-                    sel_de = merged_metrics['D/E Ratio'].mean()
-                elif method == "Median":
-                    sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].median()
-                    sel_de = merged_metrics['D/E Ratio'].median()
-                elif method == "Maximum":
-                    sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].max()
-                    sel_de = merged_metrics['D/E Ratio'].max()
-                else: # Minimum
-                    sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].min()
-                    sel_de = merged_metrics['D/E Ratio'].min()
-                
-                # 3. Target Weights (based on Selected D/E)
-                target_we = 1 / (1 + sel_de)
-                target_wd = sel_de / (1 + sel_de)
-                
-                # 4. Re-lever for Target
-                relevered_beta_sens = sel_unlev_beta * (1 + (1 - (tax/100)) * sel_de)
-                
-                # Display
-                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-                col_s1.metric("Selected Unlevered Beta", f"{sel_unlev_beta:.2f}")
-                col_s2.metric("Target D/E Ratio", f"{sel_de:.2%}")
-                col_s3.metric("Implied Equity / Debt", f"{target_we:.0%} / {target_wd:.0%}")
-                col_s4.metric("Re-levered Beta", f"{relevered_beta_sens:.2f}", delta_color="normal")
-                
-                st.info(f"💡 **Logic:** 1) Unlever peers' 5Y Adj Betas. 2) Take {method} of Unlevered Beta & D/E. 3) Re-lever using Target D/E ({sel_de:.2%}).")
-            else:
-                st.warning("Insufficient data for sensitivity analysis.")
+    with col_kd:
+        st.markdown("#### 2. Cost of Debt (타인자본비용)")
+        st.latex(r"\text{Cost of Debt} = (\text{Risk Free Rate} + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
+        kd_data = {
+            "Item": ["Risk-Free Rate", "Credit Spread", "Tax Rate"],
+            "Value": [f"{m['Rf']:.2%}", f"{t['Spread']:.2%}", f"{tax:.1f}%"],
+            "Source URL": ["https://fred.stlouisfed.org/series/DGS10", "https://fred.stlouisfed.org/series/BAMLC0A0CM", None],
+            "Source": ["🔗 FRED (DGS10)", "🔗 FRED (ICE BofA BBB)", "User Input"],
+            "Logic": ["Base rate for debt pricing", "Proxy: US Corp BBB Option-Adjusted Spread", "Corporate Tax Shield"]
+        }
+        st.dataframe(pd.DataFrame(kd_data), hide_index=True, use_container_width=True, 
+                     column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
+        st.info(f"💡 **Calculation:** ({m['Rf']:.2%} + {t['Spread']:.2%}) × (1 - {tax/100:.2f}) = **{t['Kd']:.2%}**")
 
+    st.markdown("#### 3. Target Capital Structure Logic (Capital Weights)")
+    col_str1, col_str2 = st.columns(2)
+    with col_str1:
+        st.markdown("**A. Target D/E Ratio**")
+        st.info(f"Logic: **Peer Group Median** D/E Ratio.\n\nMedian Value: **{t['DE']:.2%}**")
+    with col_str2:
+        st.markdown("**B. Weights Conversion**")
+        st.latex(r"W_{Equity} = \frac{1}{1 + D/E}, \quad W_{Debt} = \frac{D/E}{1 + D/E}")
+        st.write(f"- **Equity:** **{t['We']:.1%}** | **Debt:** **{t['Wd']:.1%}**")
+
+    st.markdown("#### 4. Implied Market Return Basis")
+    st.caption("Market Risk Premium 산출을 위한 시장 기대수익률($R_m$) 구성 요소")
+    rm_data = {
+        "Item": ["Dividend Yield", "Buyback Yield", "Growth Rate"],
+        "Value": [f"{div_yield_in:.2f}%", f"{buyback:.2f}%", f"{growth:.2f}%"],
+        "Source URL": ["https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html", "https://fred.stlouisfed.org/series/A191RP1A027NBEA"],
+        "Source": ["🔗 NYU Stern (Damodaran)", "🔗 NYU Stern (Damodaran)", "🔗 FRED (GDP Growth)"],
+        "Logic": [f"5Y Avg (Live Data: {sp_avg_div_yield:.2f}%)", f"5Y Avg (Live Data: {sp_avg_bb_yield:.2f}%)", f"Latest (Live Data: {gdp_latest_growth:.2f}%)"]
+    }
+    st.dataframe(pd.DataFrame(rm_data), hide_index=True, use_container_width=True, 
+                 column_config={"Source URL": st.column_config.LinkColumn("Reference", display_text="Source")})
+    st.info(f"💡 **Calculation:** {div_yield_in:.2f}% + {buyback:.2f}% + {growth:.2f}% = **{m['Rm']:.2%}**")
+    
+    st.divider()
+    st.subheader("🏢 Peer Group Analysis (TTM vs FY)")
+    df = res['peer_df'].copy()
+    cols_order = ["Ticker", "Company Name", "Currency", "FY Date", "Revenue (TTM)", "Revenue (FY)", "EBIT (TTM)", "EBIT % (TTM)", "EBIT (FY)", "EBIT % (FY)", "EBITDA (TTM)", "EBITDA % (TTM)", "EBITDA (FY)", "EBITDA % (FY)", "Levered Beta", "Unlevered Beta", "D/E Ratio", "Market Cap", "Total Debt"]
+    cols_order = [c for c in cols_order if c in df.columns]
+    df = df[cols_order]
+    def fmt_usd(x): return f"${x/1e9:.2f}B" if x != 0 else "-"
+    def fmt_pct(x): return f"{x:.1%}" if x != 0 else "-"
+    df_disp = df.copy()
+    for c in ["Revenue (TTM)", "Revenue (FY)", "EBIT (TTM)", "EBIT (FY)", "EBITDA (TTM)", "EBITDA (FY)", "Market Cap", "Total Debt"]: df_disp[c] = df_disp[c].apply(fmt_usd)
+    for c in ["EBIT % (TTM)", "EBIT % (FY)", "EBITDA % (TTM)", "EBITDA % (FY)", "D/E Ratio"]: df_disp[c] = df_disp[c].apply(fmt_pct)
+    for c in ["Levered Beta", "Unlevered Beta"]: df_disp[c] = df_disp[c].apply(lambda x: f"{x:.2f}")
+    st.dataframe(df_disp, use_container_width=True, column_config={"Company Name": st.column_config.TextColumn(width="medium")})
+    
+    if res['errors']:
+        with st.expander("⚠️ 데이터 경고"):
+            for e in res['errors']: st.write(e)
+
+    # [NEW SECTION] 5Y Monthly Beta Analysis (Enhanced)
+    st.divider()
+    st.subheader("📊 5-Year Monthly Beta Analysis")
+    st.caption("Detailed Calculation & Data Verification")
+    
+    # 1. Summary Table
+    if "beta_5y_df" in res and res["beta_5y_df"] is not None:
+        b_df = res["beta_5y_df"].copy()
+        
+        # Formulas
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            st.markdown("**1. Monthly Returns Formula:**")
+            st.latex(r"R_t = \frac{P_t - P_{t-1}}{P_{t-1}}")
+            st.caption("*$P_t$: Adjusted Close Price at month t*")
+        with col_f2:
+            st.markdown("**2. Beta Formulas:**")
+            st.latex(r"\beta_{raw} = \frac{Cov(R_{stock}, R_{market})}{Var(R_{market})}, \quad \beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33 \cdot 1.0")
+        
+        # Tabs for Data
+        tab_sum, tab_prices, tab_rets = st.tabs(["📋 Beta Summary", "📉 Data: Adj Close Prices", "📈 Data: Monthly Returns"])
+        
+        with tab_sum:
+            st.dataframe(
+                b_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Ticker": "Ticker",
+                    "Raw Beta (5Y)": st.column_config.NumberColumn("Raw Beta", format="%.2f"),
+                    "Adj Beta (5Y)": st.column_config.NumberColumn("Adj Beta (Bloomberg Style)", format="%.2f"),
+                    "Correlation": st.column_config.NumberColumn("Correlation vs S&P500", format="%.2f")
+                }
+            )
+        
+        with tab_prices:
+            if "beta_prices" in res:
+                st.dataframe(res["beta_prices"], use_container_width=True)
+            else: st.warning("No Price Data")
+        
+        with tab_rets:
+            if "beta_returns" in res:
+                # Format as percentage for display
+                ret_disp = res["beta_returns"].style.format("{:.2%}")
+                st.dataframe(ret_disp, use_container_width=True)
+            else: st.warning("No Return Data")
+            
+        # [SENSITIVITY ANALYSIS - MOVED & FIXED]
+        st.divider()
+        st.subheader("🎛️ Sensitivity Analysis: Re-levered Beta & Structure")
+        
+        method = st.radio("Peer Group Aggregation Method", ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
+        
+        # Merge D/E and Beta
+        peer_metrics = res['peer_df'][['Ticker', 'D/E Ratio']].copy()
+        merged_metrics = pd.merge(peer_metrics, b_df[['Ticker', 'Adj Beta (5Y)']], on='Ticker', how='inner')
+        
+        if not merged_metrics.empty:
+            # 1. Unlever the 5Y Adj Beta for each peer
+            merged_metrics['Unlevered Beta (5Y)'] = merged_metrics['Adj Beta (5Y)'] / (1 + (1 - (tax/100)) * merged_metrics['D/E Ratio'])
+            
+            # 2. Aggregate
+            if method == "Average":
+                sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].mean()
+                sel_de = merged_metrics['D/E Ratio'].mean()
+            elif method == "Median":
+                sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].median()
+                sel_de = merged_metrics['D/E Ratio'].median()
+            elif method == "Maximum":
+                sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].max()
+                sel_de = merged_metrics['D/E Ratio'].max()
+            else: # Minimum
+                sel_unlev_beta = merged_metrics['Unlevered Beta (5Y)'].min()
+                sel_de = merged_metrics['D/E Ratio'].min()
+            
+            # 3. Target Weights (based on Selected D/E)
+            target_we = 1 / (1 + sel_de)
+            target_wd = sel_de / (1 + sel_de)
+            
+            # 4. Re-lever for Target
+            relevered_beta_sens = sel_unlev_beta * (1 + (1 - (tax/100)) * sel_de)
+            
+            # Display
+            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+            col_s1.metric("Selected Unlevered Beta", f"{sel_unlev_beta:.2f}")
+            col_s2.metric("Target D/E Ratio", f"{sel_de:.2%}")
+            col_s3.metric("Implied Equity / Debt", f"{target_we:.0%} / {target_wd:.0%}")
+            col_s4.metric("Re-levered Beta", f"{relevered_beta_sens:.2f}", delta_color="normal")
+            
+            st.info(f"💡 **Logic:** 1) Unlever peers' 5Y Adj Betas. 2) Take {method} of Unlevered Beta & D/E. 3) Re-lever using Target D/E ({sel_de:.2%}).")
         else:
-            st.warning("5년치 월간 베타 데이터를 불러오지 못했습니다.")
+            st.warning("Insufficient data for sensitivity analysis.")
 
-        # [MARKET DATA] Reference Tables
-        st.divider()
-        st.subheader("📉 Market Data Reference")
-        
-        if sp_df is None and sp_logs: st.error(f"NYU Stern 데이터 로드 실패: {sp_logs[0]}")
-        if gdp_df is None and gdp_logs: st.error(f"FRED 데이터 로드 실패: {gdp_logs[0]}")
-        if rf_trend_df is None and rf_logs: st.error(f"FRED RF 데이터 로드 실패: {rf_logs[0]}")
+    else:
+        st.warning("5년치 월간 베타 데이터를 불러오지 못했습니다.")
 
-        tab_rf, tab_sp, tab_gdp = st.tabs(["📉 Risk Free Rate (5Y Trend)", "📊 S&P 500 Buyback & Dividend", "📈 US GDP Growth"])
-        
-        with tab_rf:
-            if rf_trend_df is not None:
-                st.caption(f"**10-Year Treasury Constant Maturity Rate (DGS10)** | Latest: {latest_rf:.2f}% | Source: FRED")
-                st.line_chart(rf_trend_df.set_index("Date")["Rate"], color="#FF4B4B")
-            else:
-                st.warning("데이터가 없습니다.")
+    # [MARKET DATA] Reference Tables
+    st.divider()
+    st.subheader("📉 Market Data Reference")
+    
+    if sp_df is None and sp_logs: st.error(f"NYU Stern 데이터 로드 실패: {sp_logs[0]}")
+    if gdp_df is None and gdp_logs: st.error(f"FRED 데이터 로드 실패: {gdp_logs[0]}")
+    if rf_trend_df is None and rf_logs: st.error(f"FRED RF 데이터 로드 실패: {rf_logs[0]}")
 
-        with tab_sp:
-            if sp_df is not None:
-                st.dataframe(
-                    sp_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", format="%d"),
-                        "S&P 500": st.column_config.NumberColumn("S&P 500", format="%d"),
-                        "Dividends": st.column_config.NumberColumn("Dividends", format="%.2f"),
-                        "Buybacks": st.column_config.NumberColumn("Buybacks", format="%.2f"),
-                        "Dividend Yield %": st.column_config.NumberColumn("Div Yield", format="%.2f%%"),
-                        "Buyback Yield %": st.column_config.NumberColumn("Buyback Yield", format="%.2f%%"),
-                        "Total Yield %": st.column_config.NumberColumn("Total Yield", format="%.2f%%"),
-                    }
-                )
-                st.caption(f"Source: Aswath Damodaran (NYU Stern) | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-            else:
-                st.warning("데이터가 없습니다.")
+    tab_rf, tab_sp, tab_gdp = st.tabs(["📉 Risk Free Rate (5Y Trend)", "📊 S&P 500 Buyback & Dividend", "📈 US GDP Growth"])
+    
+    with tab_rf:
+        if rf_trend_df is not None:
+            st.caption(f"**10-Year Treasury Constant Maturity Rate (DGS10)** | Latest: {latest_rf:.2f}% | Source: FRED")
+            st.line_chart(rf_trend_df.set_index("Date")["Rate"], color="#FF4B4B")
+        else:
+            st.warning("데이터가 없습니다.")
 
-        with tab_gdp:
-            if gdp_df is not None:
-                st.dataframe(
-                    gdp_df,
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Year": st.column_config.NumberColumn("Year", format="%d"),
-                        "GDP Growth %": st.column_config.NumberColumn("GDP Growth (Annual)", format="%.2f%%")
-                    }
-                )
-                st.caption(f"Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-            else:
-                st.warning("데이터가 없습니다.")
+    with tab_sp:
+        if sp_df is not None:
+            st.dataframe(
+                sp_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", format="%d"),
+                    "S&P 500": st.column_config.NumberColumn("S&P 500", format="%d"),
+                    "Dividends": st.column_config.NumberColumn("Dividends", format="%.2f"),
+                    "Buybacks": st.column_config.NumberColumn("Buybacks", format="%.2f"),
+                    "Dividend Yield %": st.column_config.NumberColumn("Div Yield", format="%.2f%%"),
+                    "Buyback Yield %": st.column_config.NumberColumn("Buyback Yield", format="%.2f%%"),
+                    "Total Yield %": st.column_config.NumberColumn("Total Yield", format="%.2f%%"),
+                }
+            )
+            st.caption(f"Source: Aswath Damodaran (NYU Stern) | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        else:
+            st.warning("데이터가 없습니다.")
+
+    with tab_gdp:
+        if gdp_df is not None:
+            st.dataframe(
+                gdp_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Year": st.column_config.NumberColumn("Year", format="%d"),
+                    "GDP Growth %": st.column_config.NumberColumn("GDP Growth (Annual)", format="%.2f%%")
+                }
+            )
+            st.caption(f"Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA | Fetched at: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        else:
+            st.warning("데이터가 없습니다.")
