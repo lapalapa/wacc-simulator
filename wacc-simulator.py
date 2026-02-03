@@ -450,4 +450,125 @@ if 'result' in st.session_state:
     c3.metric("Cost of Debt (A-T)", f"{kd:.2%}")
     c4.metric("Re-levered Beta", f"{target_relevered_beta:.2f}")
     
-    st.caption(f"**Target Structure (from {sens_method}):** Debt {wd:.1%} | Equity {we:.1%} (D/E: {target_de:.2%})
+    st.caption(f"**Target Structure (from {sens_method}):** Debt {wd:.1%} | Equity {we:.1%} (D/E: {target_de:.2%})")
+
+    # -------------------------------------------------------------------------
+    # [SECTION 2] Beta Analysis (Details)
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    # Subheader already displayed above for Layout logic
+    
+    with st.expander("2-1) Target Capital Structure & Beta Summary", expanded=True):
+        st.info(f"**Method:** {sens_method} of Peers. **Target D/E:** {target_de:.2%} (derived from Debt/TIC {sel_dtic:.2%}).")
+        st.write("The Re-levered Beta column below shows what each peer's beta would be if they had the *Target's* Capital Structure.")
+
+    with st.expander("2-2) 5-Year Monthly Beta Analysis Table", expanded=True):
+        if not df.empty:
+            # Column Formatting
+            disp_df = df.copy()
+            
+            # Reorder columns as requested
+            # Ticker, Name, Total Debt, Market Cap, D/E, Debt/TIC, Raw Beta, Adj Beta, Unlev Beta, Re-lev Beta
+            cols_show = ["Ticker", "Company Name", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", 
+                         "Raw Beta", "Adj Beta", "Unlevered Beta", "Re-levered Beta"]
+            
+            # Format Numbers
+            disp_df["Total Debt"] = disp_df.apply(lambda x: f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B", axis=1)
+            disp_df["Market Cap"] = disp_df.apply(lambda x: f"{x['Currency']} {x['Market Cap']/1e9:,.2f}B", axis=1)
+            
+            st.dataframe(
+                disp_df[cols_show],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "D/E Ratio": st.column_config.NumberColumn(format="%.2f"),
+                    "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.2f"),
+                    "Raw Beta": st.column_config.NumberColumn(format="%.2f"),
+                    "Adj Beta": st.column_config.NumberColumn(format="%.2f"),
+                    "Unlevered Beta": st.column_config.NumberColumn(format="%.2f"),
+                    "Re-levered Beta": st.column_config.NumberColumn(format="%.2f", help="Unlevered Beta * (1 + (1-t)*Target D/E)"),
+                }
+            )
+            st.caption(f"* Tax Rate used for Unlevering/Re-levering: {inp['tax']}% (Global Assumption)")
+        else:
+            st.error("No Data Available")
+
+    # -------------------------------------------------------------------------
+    # [SECTION 3] Cost of Equity
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("3. Cost of Equity")
+    st.latex(r"K_e = R_f + \beta_{L} \times (R_m - R_f) + CRP + SP")
+    
+    k_col1, k_col2, k_col3, k_col4 = st.columns(4)
+    k_col1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
+    k_col2.metric("Market Risk Prem", f"{m['MRP']*100:.2f}%")
+    k_col3.metric("Country Risk Prem", f"{inp['crp']:.2f}%")
+    k_col4.metric("Size Premium", f"{inp['sp']:.2f}%")
+    
+    with st.expander("3-1) Implied Market Return Details"):
+        st.write(f"**Implied Market Return ($R_m$): {m['Rm']:.2%}**")
+        st.write(f"= Buyback Yield ({inp['bb']:.2f}%) + Dividend Yield ({inp['div']:.2f}%) + Growth Rate ({inp['g']:.2f}%)")
+
+    # -------------------------------------------------------------------------
+    # [SECTION 4] Cost of Debt
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("4. Cost of Debt")
+    st.latex(r"K_d = (R_f + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
+    
+    d_col1, d_col2 = st.columns(2)
+    d_col1.metric("Pre-tax Cost of Debt", f"{(inp['rf'] + 2.0):.2f}%", help="Rf + 2.0% Spread assumption")
+    d_col2.metric("After-tax Cost of Debt", f"{kd:.2%}")
+
+    # -------------------------------------------------------------------------
+    # [SECTION 5] Peer Group Analysis
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("5. Peer Group Analysis (Financials)")
+    if not df.empty:
+        # Columns: Ticker, Name, Revenue, EBIT, EBITDA, Total Debt, Market Cap, D/E, Debt/TIC
+        fin_cols = ["Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio"]
+        fin_df = df.copy()
+        
+        # Display as USD for comparison consistency, but note original currency in name or tooltip
+        # Instruction said: "Display in USD, show FX Rate"
+        # I calculated everything in USD in the model. Let's format it.
+        
+        for c in ["Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap"]:
+            fin_df[c] = fin_df[c] / 1e9 # Billions
+            
+        st.dataframe(
+            fin_df[fin_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Revenue": st.column_config.NumberColumn("Revenue ($B)", format="%.2f"),
+                "EBIT": st.column_config.NumberColumn("EBIT ($B)", format="%.2f"),
+                "EBITDA": st.column_config.NumberColumn("EBITDA ($B)", format="%.2f"),
+                "Total Debt": st.column_config.NumberColumn("Total Debt ($B)", format="%.2f"),
+                "Market Cap": st.column_config.NumberColumn("Market Cap ($B)", format="%.2f"),
+                "D/E Ratio": st.column_config.NumberColumn(format="%.2f"),
+                "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.2f"),
+            }
+        )
+        st.caption("Note: All financial figures are converted to USD (Billions) using the latest FX rate.")
+        # Show FX table
+        st.markdown("**Applied FX Rates (to USD):**")
+        st.dataframe(df[["Ticker", "Currency", "FX Rate"]].T, use_container_width=True)
+
+    # -------------------------------------------------------------------------
+    # [SECTION 6] Market Data Reference
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader("6. Market Data Reference")
+    t1, t2 = st.tabs(["Fred (Risk Free / GDP)", "NYU Stern (Yields)"])
+    with t1:
+        st.write("Recent Risk Free Rate Trend")
+        if res['prices'] is not None: st.line_chart(res['prices']) # Placeholder for RF trend if available
+        else: st.write("Chart data unavailable")
+    with t2:
+        st.write("S&P 500 Buyback & Dividend Yields (Damodaran)")
+        # Fetching fresh for display table (cached)
+        _, _, sp_table, _ = get_sp_buyback_data()
+        if sp_table is not None: st.dataframe(sp_table, use_container_width=True)
