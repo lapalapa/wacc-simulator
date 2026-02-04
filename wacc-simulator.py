@@ -664,12 +664,14 @@ if 'result' in st.session_state:
     
     with t1:
         st.markdown("**Recent Risk Free Rate Trend (5Y)**")
+        st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
         if res.get('rf_trend') is not None: 
             st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
         else: st.warning("Trend Chart data unavailable")
         
     with t2:
         st.markdown("**US GDP Growth (Annual)**")
+        st.caption("Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA")
         if res.get('gdp_df') is not None:
             st.dataframe(
                 res['gdp_df'],
@@ -684,5 +686,6 @@ if 'result' in st.session_state:
 
     with t3:
         st.markdown("**S&P 500 Buyback & Dividend Yields**")
+        st.caption("Source: Aswath Damodaran (NYU Stern)")
         _, _, sp_table, _ = get_sp_buyback_data()
         if sp_table is not None: st.dataframe(sp_table, use_container_width=True)
