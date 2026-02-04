@@ -389,81 +389,98 @@ if 'result' in st.session_state:
     df_init = res['full_df']
     m = res['market_params']
     
-    # 1. Create a top container for Results (Layout Requirement: Always on Top)
+    # 1. Top Container for Results (Always Visible)
     results_container = st.container()
     
+    # 2. Beta Analysis Section
     st.subheader("Beta Analysis")
+    
     sens_method = st.radio("Sensitivity Selection (Aggregation Method)", 
                            ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
 
-    # -------------------------------------------------------------------------
-    # [Interactive] Beta Analysis Controls & Calculations
-    # -------------------------------------------------------------------------
-    # Initialize variables with defaults
+    # Variables
     target_relevered_beta=0; ke=0; kd=0; wacc=0; wd=0; we=0; target_de=0; sel_dtic=0
 
     if not df_init.empty:
-        cols_base = ["Ticker", "Company Name", "Country", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta"]
-        edit_source = df_init[cols_base].copy()
+        # [NEW UI] Adjustable Tax Rate Widgets (Above Table)
+        st.markdown("##### 🛠️ Adjust Peer Tax Rates (Live)")
         
-        with st.expander("5-Year Monthly Beta Analysis Table (Editable Tax Rate)", expanded=True):
-            edited_df = st.data_editor(
-                edit_source,
+        # Grid layout for inputs
+        cols = st.columns(len(df_init))
+        user_tax_rates = {}
+        
+        for idx, row in df_init.iterrows():
+            with cols[idx % len(cols)]:
+                # Use number_input for direct input + step arrows
+                new_rate = st.number_input(
+                    f"{row['Ticker']}", 
+                    value=float(row['Tax Rate']),
+                    step=0.1,
+                    format="%.2f",
+                    key=f"tax_{row['Ticker']}"
+                )
+                user_tax_rates[row['Ticker']] = new_rate
+
+        # Update DataFrame with User Input
+        calc_df = df_init.copy()
+        calc_df["Tax Rate"] = calc_df["Ticker"].map(user_tax_rates)
+        
+        # 1. Unlever Beta (Using Individual Tax Rates)
+        calc_df["Unlevered Beta"] = calc_df["Adj Beta"] / (1 + (1 - calc_df["Tax Rate"]/100) * calc_df["D/E Ratio"])
+        
+        # 2. Aggregate
+        if sens_method == "Average":
+            sel_unlev = calc_df["Unlevered Beta"].mean(); sel_dtic = calc_df["Debt/TIC Ratio"].mean()
+        elif sens_method == "Median":
+            sel_unlev = calc_df["Unlevered Beta"].median(); sel_dtic = calc_df["Debt/TIC Ratio"].median()
+        elif sens_method == "Maximum":
+            sel_unlev = calc_df["Unlevered Beta"].max(); sel_dtic = calc_df["Debt/TIC Ratio"].max()
+        else:
+            sel_unlev = calc_df["Unlevered Beta"].min(); sel_dtic = calc_df["Debt/TIC Ratio"].min()
+            
+        target_de = sel_dtic / (1 - sel_dtic) if (1-sel_dtic) != 0 else 0
+        target_relevered_beta = sel_unlev * (1 + (1 - inp['tax']/100) * target_de)
+        
+        # 3. Re-lever per Peer (Assuming Target Structure)
+        calc_df["Re-levered Beta"] = calc_df["Unlevered Beta"] * (1 + (1 - inp['tax']/100) * target_de)
+        
+        # Table Display (Read-Only)
+        with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
+            cols_show = ["Ticker", "Company Name", "Country", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", "Unlevered Beta", "Re-levered Beta"]
+            
+            disp_df = calc_df.copy()
+            disp_df["Total Debt"] = disp_df.apply(lambda x: f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B", axis=1)
+            disp_df["Market Cap"] = disp_df.apply(lambda x: f"{x['Currency']} {x['Market Cap']/1e9:,.2f}B", axis=1)
+            
+            st.dataframe(
+                disp_df[cols_show],
+                use_container_width=True,
+                hide_index=True,
                 column_config={
-                    "Tax Rate": st.column_config.NumberColumn("Tax Rate (%)", format="%.2f", min_value=0.0, max_value=100.0, step=0.01),
-                    "Total Debt": st.column_config.NumberColumn(format="%.2e"),
-                    "Market Cap": st.column_config.NumberColumn(format="%.2e"),
+                    "Tax Rate": st.column_config.NumberColumn("Tax Rate (%)", format="%.2f"),
                     "D/E Ratio": st.column_config.NumberColumn(format="%.2f"),
                     "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.2f"),
                     "Raw Beta": st.column_config.NumberColumn(format="%.2f"),
                     "Adj Beta": st.column_config.NumberColumn(format="%.2f"),
-                },
-                disabled=["Ticker", "Company Name", "Country", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Raw Beta", "Adj Beta"],
-                use_container_width=True,
-                key="beta_editor"
-            )
-            
-            # Recalculate using edited Tax Rates
-            calc_df = edited_df.copy()
-            calc_df["Unlevered Beta"] = calc_df["Adj Beta"] / (1 + (1 - calc_df["Tax Rate"]/100) * calc_df["D/E Ratio"])
-            
-            if sens_method == "Average":
-                sel_unlev = calc_df["Unlevered Beta"].mean(); sel_dtic = calc_df["Debt/TIC Ratio"].mean()
-            elif sens_method == "Median":
-                sel_unlev = calc_df["Unlevered Beta"].median(); sel_dtic = calc_df["Debt/TIC Ratio"].median()
-            elif sens_method == "Maximum":
-                sel_unlev = calc_df["Unlevered Beta"].max(); sel_dtic = calc_df["Debt/TIC Ratio"].max()
-            else:
-                sel_unlev = calc_df["Unlevered Beta"].min(); sel_dtic = calc_df["Debt/TIC Ratio"].min()
-                
-            target_de = sel_dtic / (1 - sel_dtic) if (1-sel_dtic) != 0 else 0
-            target_relevered_beta = sel_unlev * (1 + (1 - inp['tax']/100) * target_de)
-            calc_df["Re-levered Beta"] = calc_df["Unlevered Beta"] * (1 + (1 - inp['tax']/100) * target_de)
-            
-            st.caption("👇 **Calculated Metrics based on inputs above:**")
-            st.dataframe(
-                calc_df[["Ticker", "Unlevered Beta", "Re-levered Beta"]],
-                use_container_width=True, hide_index=True,
-                column_config={"Unlevered Beta": st.column_config.NumberColumn(format="%.2f"), "Re-levered Beta": st.column_config.NumberColumn(format="%.2f")}
+                    "Unlevered Beta": st.column_config.NumberColumn(format="%.2f"),
+                    "Re-levered Beta": st.column_config.NumberColumn(format="%.2f"),
+                }
             )
             
             st.divider()
             st.markdown("##### Beta Calculation Methodologies")
             mc1, mc2, mc3 = st.columns(3)
-            with mc1:
-                st.markdown("**1. Adjusted Beta**"); st.latex(r"\beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33")
-            with mc2:
-                st.markdown("**2. Unlevered Beta**"); st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
-            with mc3:
-                st.markdown("**3. Re-levered Beta**"); st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
+            with mc1: st.markdown("**1. Adjusted Beta**"); st.latex(r"\beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33")
+            with mc2: st.markdown("**2. Unlevered Beta**"); st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
+            with mc3: st.markdown("**3. Re-levered Beta**"); st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
 
-            # Final WACC Calcs
-            ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
-            spread = 0.02
-            kd = ((inp['rf']/100) + spread) * (1 - inp['tax']/100)
-            wd = sel_dtic
-            we = 1 - sel_dtic
-            wacc = (we * ke) + (wd * kd)
+        # 4. Final WACC
+        ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
+        spread = 0.02
+        kd = ((inp['rf']/100) + spread) * (1 - inp['tax']/100)
+        wd = sel_dtic
+        we = 1 - sel_dtic
+        wacc = (we * ke) + (wd * kd)
     else:
         st.warning("No data available.")
 
@@ -550,13 +567,11 @@ if 'result' in st.session_state:
     with t1:
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
         if res.get('rf_trend') is not None: st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
-        else: st.warning("No Data")
     with t2:
         st.caption("Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA")
         if res.get('gdp_df') is not None:
             st.dataframe(res['gdp_df'], use_container_width=True, hide_index=True,
                 column_config={"Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"), "GDP Growth %": st.column_config.NumberColumn("GDP Growth (%)", format="%.2f%%")})
-        else: st.warning("No Data")
     with t3:
         st.caption("Source: Aswath Damodaran (NYU Stern)")
         _, _, sp_table, _ = get_sp_buyback_data()
