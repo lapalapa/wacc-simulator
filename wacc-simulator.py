@@ -374,6 +374,7 @@ class DetailWACCModel:
                 peer_data.append({
                     "Ticker": p,
                     "Company Name": fin['name'],
+                    "Company": fin['name'], # Alias for easier access
                     "Country": fin['country'],
                     "Tax Rate": fin['tax_rate'], 
                     "Currency": fin['currency'],
@@ -419,7 +420,7 @@ with st.sidebar:
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
     col1, col2 = st.columns([1,1])
-    if col1.button("🤖 경쟁사 자동 추천 (Top 5)", type="secondary"):
+    if col1.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary"):
         with st.spinner("Finding..."):
             rec = PeerRecommender()
             res_peers, group, logs = rec.recommend(target_ticker)
@@ -427,7 +428,7 @@ with st.sidebar:
             else: st.warning("추천 실패")
             
     peers_input = st.text_area("Peer Tickers", value=st.session_state.get('peers', "ON, STM, IFX.DE"), height=100)
-    st.caption("※ 산업 내 매출액(Revenue) 상위 5개 기업")
+    st.caption("※ Top 5 revenue companies in the industry\n(Source: Yahoo Finance Industry/Sector Data)")
     
     st.divider()
     st.header("Assumptions")
@@ -543,7 +544,6 @@ if 'result' in st.session_state:
                 with cols[idx % len(cols)]:
                     st.number_input(f"{row['Ticker']}", value=user_tax_rates[row['Ticker']], step=0.01, format="%.2f", key=f"tax_{row['Ticker']}")
             st.caption("※ Note: If the headquarter location is not available in the KPMG tax table, a default rate of 25.00% is applied.")
-
     else:
         st.warning("No valid peer data available for calculation.")
 
@@ -555,6 +555,22 @@ if 'result' in st.session_state:
         c3.metric("Cost of Debt (A-T)", f"{kd:.2%}")
         c4.metric("Re-levered Beta", f"{target_relevered_beta:.2f}")
         st.caption(f"**Target Structure ({sens_method}):** Debt {wd:.1%} | Equity {we:.1%} (Implied D/E: {target_de:.2%})")
+        
+        st.divider()
+        with st.expander("👉 WACC Calculation Details (Methodology)", expanded=False):
+            ce, cd, cw = st.columns(3)
+            with ce:
+                st.markdown("**Cost of Equity ($K_e$)**")
+                st.latex(r"K_e = R_f + \beta \times (R_m - R_f) + CRP + SP")
+                st.info(f"{inp['rf']:.2f}% + {target_relevered_beta:.2f} × {(m['MRP']*100):.2f}% + {inp['crp']:.2f}% + {inp['sp']:.2f}% = **{ke*100:.2f}%**")
+            with cd:
+                st.markdown("**Cost of Debt ($K_d$)**")
+                st.latex(r"K_d = (R_f + \text{Spread}) \times (1 - T_{target})")
+                st.info(f"({inp['rf']:.2f}% + 2.00%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**")
+            with cw:
+                st.markdown("**WACC Weighting**")
+                st.latex(r"WACC = K_e \cdot W_e + K_d \cdot W_d")
+                st.info(f"{ke*100:.2f}% × {we:.1%} + {kd*100:.2f}% × {wd:.1%} = **{wacc*100:.2f}%**")
         st.markdown("---")
 
     st.markdown("---")
