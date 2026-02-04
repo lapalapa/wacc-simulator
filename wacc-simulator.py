@@ -133,34 +133,68 @@ def get_fred_data():
     return latest_gdp, df_gdp_disp, latest_rf, df_rf_trend
 
 # ==============================================================================
-# [MODULE] Data Fetcher 4: OECD Tax Rates (Manual/Static Fallback)
+# [MODULE] Data Fetcher 4: KPMG Tax Rates (Live Scraping)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
-def get_oecd_tax_rates():
+def get_kpmg_tax_rates():
     """
-    Returns OECD Combined Corporate Income Tax Rates (2023/2024 estimates).
-    Scraping the OECD Data Explorer directly is unstable due to JS rendering.
+    Scrapes KPMG Corporate Tax Rates Table (Live).
+    Source: https://kpmg.com/dk/en/services/tax/corporate-tax/corporate-tax-rates-table.html
     """
-    # Data Source: OECD Tax Database (Combined Corporate Income Tax Rates)
-    data = {
-        "Country": [
-            "Australia", "Austria", "Belgium", "Canada", "Chile", "Colombia", "Costa Rica", "Czech Republic",
-            "Denmark", "Estonia", "Finland", "France", "Germany", "Greece", "Hungary", "Iceland",
-            "Ireland", "Israel", "Italy", "Japan", "Korea", "Latvia", "Lithuania", "Luxembourg",
-            "Mexico", "Netherlands", "New Zealand", "Norway", "Poland", "Portugal", "Slovak Republic",
-            "Slovenia", "Spain", "Sweden", "Switzerland", "Turkey", "United Kingdom", "United States"
-        ],
-        "Combined Tax Rate (%)": [
-            30.0, 23.0, 25.0, 26.2, 27.0, 35.0, 30.0, 21.0,
-            22.0, 20.0, 20.0, 25.8, 29.9, 22.0, 9.0, 20.0,
-            12.5, 23.0, 27.8, 29.7, 23.2, 20.0, 15.0, 24.9,
-            30.0, 25.8, 28.0, 22.0, 19.0, 21.0, 21.0,
-            19.0, 25.0, 20.6, 19.7, 25.0, 25.0, 25.8
-        ]
+    url = "https://kpmg.com/dk/en/services/tax/corporate-tax/corporate-tax-rates-table.html"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
-    df = pd.DataFrame(data)
-    df = df.sort_values(by="Combined Tax Rate (%)", ascending=False).reset_index(drop=True)
-    return df
+    
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        r.raise_for_status()
+        
+        # Parse HTML Table
+        dfs = pd.read_html(io.StringIO(r.text))
+        
+        # Find the correct table (Expect columns with recent years)
+        target_df = None
+        for df in dfs:
+            # Check if columns contain recent years
+            cols_str = [str(c) for c in df.columns]
+            if any("2024" in c or "2025" in c for c in cols_str):
+                target_df = df
+                break
+        
+        if target_df is None:
+            return None, "⚠️ Failed to identify tax table from KPMG."
+
+        # Clean up Data
+        # Usually first column is Country
+        target_df.rename(columns={target_df.columns[0]: "Country"}, inplace=True)
+        
+        # Find the latest available year column
+        available_years = []
+        for c in target_df.columns:
+            if str(c).isdigit():
+                available_years.append(int(c))
+        
+        if not available_years:
+            return None, "⚠️ No year columns found."
+            
+        latest_year = max(available_years)
+        col_name = str(latest_year)
+        
+        # Extract Country and Latest Rate
+        result_df = target_df[["Country", col_name]].copy()
+        result_df.columns = ["Country", f"Corporate Tax Rate {latest_year} (%)"]
+        
+        # Convert numeric
+        result_df[result_df.columns[1]] = pd.to_numeric(result_df[result_df.columns[1]], errors='coerce')
+        
+        # Drop NaNs and Sort
+        result_df = result_df.dropna().sort_values(by=result_df.columns[1], ascending=False).reset_index(drop=True)
+        
+        return result_df, f"Source: KPMG (Live Data, {latest_year} Rates)"
+
+    except Exception as e:
+        return None, f"⚠️ KPMG Scraping Failed: {str(e)}"
 
 # ==============================================================================
 # [MODULE] Peer Recommender (Anti-Ban)
@@ -693,7 +727,7 @@ if 'result' in st.session_state:
     # -------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Market Data Reference")
-    t1, t2, t3, t4 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ OECD Corp Tax"])
+    t1, t2, t3, t4 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ KPMG Corp Tax"])
     
     with t1:
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
@@ -721,13 +755,17 @@ if 'result' in st.session_state:
         if sp_table is not None: st.dataframe(sp_table, use_container_width=True)
 
     with t4:
-        st.caption("Source: OECD Data Explorer (Combined Corporate Income Tax Rates, 2023-2024 Estimates)")
-        oecd_df = get_oecd_tax_rates()
-        st.dataframe(
-            oecd_df, 
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "Combined Tax Rate (%)": st.column_config.NumberColumn(format="%.1f%%")
-            }
-        )
+        # KPMG Live Scraping Display
+        kpmg_df, kpmg_source = get_kpmg_tax_rates()
+        st.caption(kpmg_source)
+        if kpmg_df is not None:
+            st.dataframe(
+                kpmg_df, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    kpmg_df.columns[1]: st.column_config.NumberColumn(format="%.2f%%")
+                }
+            )
+        else:
+            st.warning("⚠️ Failed to load KPMG data. Please check the connection.")
