@@ -521,8 +521,8 @@ if 'result' in st.session_state:
             st.dataframe(disp_df[cols_show], use_container_width=True, hide_index=True,
                 column_config={
                     "Tax Rate": st.column_config.NumberColumn("Tax Rate (%)", format="%.2f"),
-                    "D/E Ratio": st.column_config.NumberColumn(format="%.2f"),
-                    "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.2f"),
+                    "D/E Ratio": st.column_config.NumberColumn(format="%.1f%%"),
+                    "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.1f%%"),
                     "Raw Beta": st.column_config.NumberColumn(format="%.2f"),
                     "Adj Beta": st.column_config.NumberColumn(format="%.2f"),
                     "Unlevered Beta": st.column_config.NumberColumn(format="%.2f"),
