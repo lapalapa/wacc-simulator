@@ -620,9 +620,13 @@ if 'result' in st.session_state:
     d_calc_info = f"**Calculation:** ({inp['rf']:.2f}% + {d_spread:.2f}%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**"
     st.info(d_calc_info)
 
-    d_col1, d_col2 = st.columns(2)
-    d_col1.metric("Pre-tax Cost of Debt", f"{(inp['rf'] + d_spread):.2f}%", help="Rf + 2.0% Spread Assumption")
-    d_col2.metric("After-tax Cost of Debt", f"{kd:.2%}")
+    # [UPDATED] 5 Columns Layout for Debt Factors
+    d_col1, d_col2, d_col3, d_col4, d_col5 = st.columns(5)
+    d_col1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
+    d_col2.metric("Credit Spread", f"{d_spread:.2f}%")
+    d_col3.metric("Pre-tax Cost of Debt", f"{(inp['rf'] + d_spread):.2f}%")
+    d_col4.metric("Tax Rate", f"{inp['tax']:.1f}%")
+    d_col5.metric("After-tax Cost of Debt", f"{kd:.2%}")
 
     # -------------------------------------------------------------------------
     # [SECTION 5] Peer Group Analysis (Financials)
