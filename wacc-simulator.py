@@ -133,6 +133,36 @@ def get_fred_data():
     return latest_gdp, df_gdp_disp, latest_rf, df_rf_trend
 
 # ==============================================================================
+# [MODULE] Data Fetcher 4: OECD Tax Rates (Manual/Static Fallback)
+# ==============================================================================
+@st.cache_data(ttl=3600*24)
+def get_oecd_tax_rates():
+    """
+    Returns OECD Combined Corporate Income Tax Rates (2023/2024 estimates).
+    Scraping the OECD Data Explorer directly is unstable due to JS rendering.
+    """
+    # Data Source: OECD Tax Database (Combined Corporate Income Tax Rates)
+    data = {
+        "Country": [
+            "Australia", "Austria", "Belgium", "Canada", "Chile", "Colombia", "Costa Rica", "Czech Republic",
+            "Denmark", "Estonia", "Finland", "France", "Germany", "Greece", "Hungary", "Iceland",
+            "Ireland", "Israel", "Italy", "Japan", "Korea", "Latvia", "Lithuania", "Luxembourg",
+            "Mexico", "Netherlands", "New Zealand", "Norway", "Poland", "Portugal", "Slovak Republic",
+            "Slovenia", "Spain", "Sweden", "Switzerland", "Turkey", "United Kingdom", "United States"
+        ],
+        "Combined Tax Rate (%)": [
+            30.0, 23.0, 25.0, 26.2, 27.0, 35.0, 30.0, 21.0,
+            22.0, 20.0, 20.0, 25.8, 29.9, 22.0, 9.0, 20.0,
+            12.5, 23.0, 27.8, 29.7, 23.2, 20.0, 15.0, 24.9,
+            30.0, 25.8, 28.0, 22.0, 19.0, 21.0, 21.0,
+            19.0, 25.0, 20.6, 19.7, 25.0, 25.0, 25.8
+        ]
+    }
+    df = pd.DataFrame(data)
+    df = df.sort_values(by="Combined Tax Rate (%)", ascending=False).reset_index(drop=True)
+    return df
+
+# ==============================================================================
 # [MODULE] Peer Recommender (Anti-Ban)
 # ==============================================================================
 class PeerRecommender:
@@ -620,7 +650,6 @@ if 'result' in st.session_state:
     d_calc_info = f"**Calculation:** ({inp['rf']:.2f}% + {d_spread:.2f}%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**"
     st.info(d_calc_info)
 
-    # [UPDATED] 5 Columns Layout for Debt Factors
     d_col1, d_col2, d_col3, d_col4, d_col5 = st.columns(5)
     d_col1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
     d_col2.metric("Credit Spread", f"{d_spread:.2f}%")
@@ -664,17 +693,15 @@ if 'result' in st.session_state:
     # -------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Market Data Reference")
-    t1, t2, t3 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields"])
+    t1, t2, t3, t4 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ OECD Corp Tax"])
     
     with t1:
-        st.markdown("**Recent Risk Free Rate Trend (5Y)**")
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
         if res.get('rf_trend') is not None: 
             st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
         else: st.warning("Trend Chart data unavailable")
         
     with t2:
-        st.markdown("**US GDP Growth (Annual)**")
         st.caption("Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA")
         if res.get('gdp_df') is not None:
             st.dataframe(
@@ -689,7 +716,18 @@ if 'result' in st.session_state:
         else: st.warning("GDP Data unavailable")
 
     with t3:
-        st.markdown("**S&P 500 Buyback & Dividend Yields**")
         st.caption("Source: Aswath Damodaran (NYU Stern)")
         _, _, sp_table, _ = get_sp_buyback_data()
         if sp_table is not None: st.dataframe(sp_table, use_container_width=True)
+
+    with t4:
+        st.caption("Source: OECD Data Explorer (Combined Corporate Income Tax Rates, 2023-2024 Estimates)")
+        oecd_df = get_oecd_tax_rates()
+        st.dataframe(
+            oecd_df, 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "Combined Tax Rate (%)": st.column_config.NumberColumn(format="%.1f%%")
+            }
+        )
