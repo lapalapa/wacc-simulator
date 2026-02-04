@@ -419,8 +419,8 @@ with st.sidebar:
     st.header("Target & Peers")
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
-    col1, col2 = st.columns([1,1])
-    if col1.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary"):
+    # [UI FIX] Full width button for recommendation
+    if st.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary", use_container_width=True):
         with st.spinner("Finding..."):
             rec = PeerRecommender()
             res_peers, group, logs = rec.recommend(target_ticker)
@@ -612,13 +612,13 @@ if 'result' in st.session_state:
                 "EBITDA": st.column_config.NumberColumn("EBITDA ($B)", format="%.2f"),
                 "Total Debt": st.column_config.NumberColumn("Total Debt ($B)", format="%.2f"),
                 "Market Cap": st.column_config.NumberColumn("Market Cap ($B)", format="%.2f"),
-                "D/E Ratio": st.column_config.NumberColumn(format="%.2f"),
-                "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.2f"),
+                "D/E Ratio": st.column_config.NumberColumn(format="%.3f"),
+                "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.3f"),
             }
         )
         st.caption("Note: Converted to USD Billions.")
         
-        with st.expander("💱 Applied FX Rates Details"):
+        with st.expander("Applied FX Rates Details"):
             st.dataframe(df_init[["Ticker", "Currency", "FX Rate"]].T, use_container_width=True)
 
     st.markdown("---")
