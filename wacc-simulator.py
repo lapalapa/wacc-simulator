@@ -647,6 +647,27 @@ if 'result' in st.session_state:
                 }
             )
             st.caption(f"* Tax Rate used: {inp['tax']}%")
+            
+            # [NEW] Methodology Explanation
+            st.divider()
+            st.markdown("#### 🧮 Beta Calculation Methodologies")
+            
+            mc1, mc2, mc3 = st.columns(3)
+            with mc1:
+                st.markdown("**1. Adjusted Beta (Blume's)**")
+                st.latex(r"\beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33 \cdot 1.0")
+                st.caption("Adjusts raw beta towards the market average of 1.0.")
+
+            with mc2:
+                st.markdown("**2. Unlevered Beta (Asset Beta)**")
+                st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T) \times D/E}")
+                st.caption(f"Removes financial leverage effect. (Tax Rate used: {inp['tax']}%)")
+
+            with mc3:
+                st.markdown("**3. Re-levered Beta (Target)**")
+                st.latex(r"\beta_{re} = \beta_U \times [1 + (1 - T) \times (D/E)_{target}]")
+                st.caption(f"Reflects Target Capital Structure D/E: {target_de:.2%}")
+            
         else:
             st.error("No Beta Data Available. Check Tickers.")
 
