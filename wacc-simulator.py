@@ -650,7 +650,7 @@ if 'result' in st.session_state:
             
             # [NEW] Methodology Explanation
             st.divider()
-            st.markdown("#### 🧮 Beta Calculation Methodologies")
+            st.markdown("##### Beta Calculation Methodologies")
             
             mc1, mc2, mc3 = st.columns(3)
             with mc1:
