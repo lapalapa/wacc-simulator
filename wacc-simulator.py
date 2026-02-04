@@ -281,14 +281,12 @@ class DetailWACCModel:
             except: pass
             
             # [STRICT VALIDATION]
-            # Exclude if Market Cap is missing (0)
             if mkt_cap_raw == 0: 
                 try:
                     mkt_cap_raw = t.fast_info['market_cap']
                 except:
                     return None, f"⚠️ {ticker}: Excluded (Missing Market Cap/Price Data)."
             
-            # Exclude if Revenue is 0 (Likely bad data for operating company)
             if rev_raw == 0:
                  return None, f"⚠️ {ticker}: Excluded (Missing Revenue Data)."
 
@@ -473,7 +471,7 @@ if 'result' in st.session_state:
     # 2. Beta Analysis Section
     st.subheader("Beta Analysis")
     sens_method = st.radio("Sensitivity Selection (Aggregation Method)", 
-                           ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
+                           ["Average", "Median", "Maximum", "Minimum"], horizontal=True, index=1)
 
     target_relevered_beta=0; ke=0; kd=0; wacc=0; wd=0; we=0; target_de=0; sel_dtic=0
 
@@ -545,6 +543,7 @@ if 'result' in st.session_state:
                 with cols[idx % len(cols)]:
                     st.number_input(f"{row['Ticker']}", value=user_tax_rates[row['Ticker']], step=0.01, format="%.2f", key=f"tax_{row['Ticker']}")
             st.caption("※ Note: If the headquarter location is not available in the KPMG tax table, a default rate of 25.00% is applied.")
+
     else:
         st.warning("No valid peer data available for calculation.")
 
@@ -602,8 +601,9 @@ if 'result' in st.session_state:
             }
         )
         st.caption("Note: Converted to USD Billions.")
-        st.markdown("**Applied FX Rates:**")
-        st.dataframe(df_init[["Ticker", "Currency", "FX Rate"]].T, use_container_width=True)
+        
+        with st.expander("💱 Applied FX Rates Details"):
+            st.dataframe(df_init[["Ticker", "Currency", "FX Rate"]].T, use_container_width=True)
 
     st.markdown("---")
     st.subheader("Market Data Reference")
