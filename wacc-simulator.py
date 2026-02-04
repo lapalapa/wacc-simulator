@@ -344,7 +344,7 @@ with st.sidebar:
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
     col1, col2 = st.columns([1,1])
-    if c1.button("🤖 경쟁사 자동 추천 (Top 5)", type="secondary"):
+    if col1.button("🤖 경쟁사 자동 추천 (Top 5)", type="secondary"):
         with st.spinner("Finding..."):
             rec = PeerRecommender()
             res_peers, group, logs = rec.recommend(target_ticker)
@@ -550,11 +550,13 @@ if 'result' in st.session_state:
     with t1:
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
         if res.get('rf_trend') is not None: st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
+        else: st.warning("No Data")
     with t2:
         st.caption("Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA")
         if res.get('gdp_df') is not None:
             st.dataframe(res['gdp_df'], use_container_width=True, hide_index=True,
                 column_config={"Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"), "GDP Growth %": st.column_config.NumberColumn("GDP Growth (%)", format="%.2f%%")})
+        else: st.warning("No Data")
     with t3:
         st.caption("Source: Aswath Damodaran (NYU Stern)")
         _, _, sp_table, _ = get_sp_buyback_data()
