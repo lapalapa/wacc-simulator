@@ -30,7 +30,7 @@ def get_sp_buyback_data():
             cols_str = [str(c).lower() for c in d.columns]
             if "year" in cols_str and "s&p 500" in cols_str:
                 df = d; break
-        if df is None: return default_bb_yield, default_div_yield, None, ["Error"]
+        if df is None: return default_bb_yield, default_div_yield, None, ["Error: Table not found"]
 
         cols_map = {}
         for c in df.columns:
@@ -61,7 +61,7 @@ def get_sp_buyback_data():
         avg_bb_yield = valid_rows["Buyback Yield %"].mean()
         avg_div_yield = valid_rows["Dividend Yield %"].mean()
         return avg_bb_yield, avg_div_yield, clean_df, []
-    except: return default_bb_yield, default_div_yield, None, ["Error"]
+    except Exception as e: return default_bb_yield, default_div_yield, None, [f"NYU Error: {str(e)}"]
 
 # ==============================================================================
 # [MODULE] Data Fetcher 2 & 3: FRED Data (GDP & RF)
@@ -214,14 +214,22 @@ class DetailWACCModel:
         except: return 1.0, currency
 
     def get_financials_latest(self, ticker):
+        # [IMPROVED] Robust Fetching & Error Reporting
         try:
             t = yf.Ticker(ticker)
             info = t.info
+            
+            # Basic validation
+            if not info:
+                return None, f"⚠️ {ticker}: No data found in Yahoo Finance."
+
             curr = info.get('currency', 'USD')
             country = info.get('country', 'Unknown')
             fx, curr_code = self.get_exchange_rate_to_usd(curr)
             
             mkt_cap_raw = info.get('marketCap', 0)
+            
+            # Debt Fallback Logic
             debt_raw = info.get('totalDebt', 0)
             if debt_raw == 0:
                 bs = t.balance_sheet
@@ -229,19 +237,25 @@ class DetailWACCModel:
                     for item in ['Total Debt', 'Long Term Debt', 'Total Liab']:
                         if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
             
+            # Revenue Fallback Logic
             rev_raw = info.get('totalRevenue', 0)
             ebitda_raw = info.get('ebitda', 0)
             ebit_raw = 0
+            
+            # Try Financials if info is missing items
             fin = t.financials
             if not fin.empty:
                 if 'EBIT' in fin.index: ebit_raw = fin.loc['EBIT'].iloc[0]
                 elif 'Operating Income' in fin.index: ebit_raw = fin.loc['Operating Income'].iloc[0]
                 if rev_raw == 0 and 'Total Revenue' in fin.index: rev_raw = fin.loc['Total Revenue'].iloc[0]
             
+            # If critical data is still missing, we still return what we have but log warning
+            if mkt_cap_raw == 0: return None, f"⚠️ {ticker}: Market Cap is 0 or missing."
+
             # Tax Rate Lookup (KPMG)
             tax_rate = self.kpmg_map.get(country.upper(), 25.0) 
 
-            return {
+            data = {
                 "name": info.get('longName', ticker),
                 "country": country,
                 "currency": curr_code,
@@ -255,7 +269,9 @@ class DetailWACCModel:
                     "Market Cap": mkt_cap_raw * fx
                 }
             }
-        except: return None
+            return data, None
+        except Exception as e: 
+            return None, f"⚠️ {ticker} Error: {str(e)}"
 
     def get_5y_monthly_beta_analysis(self):
         try:
@@ -264,36 +280,46 @@ class DetailWACCModel:
             data = yf.download(tickers, period="5y", interval="1mo", progress=False)
             
             prices = data['Adj Close'] if 'Adj Close' in data else data['Close'] if 'Close' in data else None
-            if prices is None: return None, None, None, ["Price Error"]
+            if prices is None: return None, None, None, ["Price Error: Failed to download price data."]
             if isinstance(prices, pd.Series): prices = prices.to_frame()
 
             returns = prices.pct_change()
-            if self.market_index not in returns.columns: return None, None, None, ["Market Index Error"]
+            if self.market_index not in returns.columns: return None, None, None, ["Market Index Error: ^GSPC not found."]
             
             beta_list = []
-            check_list = [p.strip().upper() for p in self.peers]
             
-            for t in check_list:
-                if t in returns.columns:
-                    pair = returns[[t, self.market_index]].dropna()
+            for t in self.peers: # Iterate original order
+                t_up = t.strip().upper()
+                if t_up in returns.columns:
+                    pair = returns[[t_up, self.market_index]].dropna()
                     if len(pair) < 12:
                         beta_list.append({"Ticker": t, "Raw Beta": np.nan, "Adj Beta": np.nan})
                         continue
-                    cov = pair[t].cov(pair[self.market_index])
+                    cov = pair[t_up].cov(pair[self.market_index])
                     var = pair[self.market_index].var()
                     raw = cov / var
                     adj = (0.67 * raw) + (0.33 * 1.0)
                     beta_list.append({"Ticker": t, "Raw Beta": raw, "Adj Beta": adj})
+                else:
+                    beta_list.append({"Ticker": t, "Raw Beta": np.nan, "Adj Beta": np.nan})
             
             prices_disp = prices.copy(); prices_disp.index = prices_disp.index.strftime('%Y-%m-%d')
             return pd.DataFrame(beta_list), prices_disp, None, []
         except Exception as e: return None, None, None, [str(e)]
 
     def run(self):
-        beta_df, prices, _, err = self.get_5y_monthly_beta_analysis()
+        # 1. Get Beta Data
+        beta_df, prices, _, beta_err = self.get_5y_monthly_beta_analysis()
+        error_logs = beta_err if beta_err else []
+        
+        # 2. Get Financials
         peer_data = []
         for p in self.peers:
-            fin = self.get_financials_latest(p)
+            fin, err = self.get_financials_latest(p)
+            if err:
+                error_logs.append(err)
+                continue # Skip bad peer
+            
             if fin:
                 d = fin['vals']
                 equity = d['Market Cap']
@@ -319,7 +345,13 @@ class DetailWACCModel:
                 })
         
         df_peers = pd.DataFrame(peer_data)
+        
+        # 3. Merge
         if beta_df is not None and not beta_df.empty and not df_peers.empty:
+            # Clean merge on Ticker
+            # beta_df Tickers might be uppercase, ensure consistency
+            beta_df['Ticker'] = beta_df['Ticker'].str.upper().str.strip()
+            df_peers['Ticker'] = df_peers['Ticker'].str.upper().str.strip()
             full_df = pd.merge(df_peers, beta_df, on="Ticker", how="left")
         else:
             full_df = pd.DataFrame()
@@ -333,7 +365,7 @@ class DetailWACCModel:
             "market_params": {"Rm": rm, "MRP": mrp},
             "rf_trend": self.rf_trend_df,
             "gdp_df": self.gdp_df,
-            "errors": err
+            "errors": error_logs
         }
 
 # ==============================================================================
@@ -349,6 +381,7 @@ with st.sidebar:
             rec = PeerRecommender()
             res_peers, group, logs = rec.recommend(target_ticker)
             if res_peers: st.session_state['peers'] = res_peers
+            else: st.warning("추천 실패")
             
     peers_input = st.text_area("Peer Tickers", value=st.session_state.get('peers', "ON, STM, IFX.DE"), height=100)
     st.caption("※ 산업 내 매출액(Revenue) 상위 5개 기업")
@@ -394,18 +427,23 @@ if 'result' in st.session_state:
     
     # 2. Beta Analysis Section
     st.subheader("Beta Analysis")
+    
     sens_method = st.radio("Sensitivity Selection (Aggregation Method)", 
                            ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
 
     # Variables Init
     target_relevered_beta=0; ke=0; kd=0; wacc=0; wd=0; we=0; target_de=0; sel_dtic=0
 
+    # Display Errors if any
+    if res.get('errors'):
+        with st.expander("⚠️ Data Fetching Warnings", expanded=True):
+            for e in res['errors']: st.write(e)
+
     if not df_init.empty:
         # Pre-calc: Fetch user adjustments for Tax Rate
         user_tax_rates = {}
         for idx, row in df_init.iterrows():
             key = f"tax_{row['Ticker']}"
-            # Use Session State if exists, else default from KPMG/Data
             if key in st.session_state:
                 user_tax_rates[row['Ticker']] = st.session_state[key]
             else:
@@ -415,7 +453,7 @@ if 'result' in st.session_state:
         calc_df = df_init.copy()
         calc_df["Tax Rate"] = calc_df["Ticker"].map(user_tax_rates)
         
-        # 1. Unlever Beta (Using Individual Tax Rates)
+        # 1. Unlever Beta
         calc_df["Unlevered Beta"] = calc_df["Adj Beta"] / (1 + (1 - calc_df["Tax Rate"]/100) * calc_df["D/E Ratio"])
         
         # 2. Aggregate
@@ -474,9 +512,9 @@ if 'result' in st.session_state:
             with mc2: st.markdown("**2. Unlevered Beta**"); st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
             with mc3: st.markdown("**3. Re-levered Beta**"); st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
 
-            # [UI Change] Tax Rate Adjuster moved BELOW the table
+            # [UI] Tax Rate Adjuster (Moved BELOW table)
             st.divider()
-            st.markdown("##### 🛠️ Adjust Peer Tax Rates")
+            st.markdown("##### Adjust Peer Tax Rates")
             
             cols = st.columns(len(df_init))
             for idx, row in df_init.iterrows():
