@@ -591,6 +591,10 @@ if 'result' in st.session_state:
     st.subheader("Cost of Equity")
     st.latex(r"K_e = R_f + \beta_{L} \times (R_m - R_f) + CRP + SP")
     
+    # [UPDATED] Show Numerical Breakdown
+    k_calc_info = f"**Calculation:** {inp['rf']:.2f}% + ({target_relevered_beta:.2f} × {(m['MRP']*100):.2f}%) + {inp['crp']:.2f}% + {inp['sp']:.2f}% = **{ke*100:.2f}%**"
+    st.info(k_calc_info)
+
     k_col1, k_col2, k_col3, k_col4 = st.columns(4)
     k_col1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
     k_col2.metric("Market Risk Prem", f"{m['MRP']*100:.2f}%")
@@ -608,8 +612,13 @@ if 'result' in st.session_state:
     st.subheader("Cost of Debt")
     st.latex(r"K_d = (R_f + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
     
+    # [UPDATED] Show Numerical Breakdown
+    d_spread = 2.0
+    d_calc_info = f"**Calculation:** ({inp['rf']:.2f}% + {d_spread:.2f}%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**"
+    st.info(d_calc_info)
+
     d_col1, d_col2 = st.columns(2)
-    d_col1.metric("Pre-tax Cost of Debt", f"{(inp['rf'] + 2.0):.2f}%", help="Rf + 2.0% Spread Assumption")
+    d_col1.metric("Pre-tax Cost of Debt", f"{(inp['rf'] + d_spread):.2f}%", help="Rf + 2.0% Spread Assumption")
     d_col2.metric("After-tax Cost of Debt", f"{kd:.2%}")
 
     # -------------------------------------------------------------------------
