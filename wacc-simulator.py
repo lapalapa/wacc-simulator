@@ -70,7 +70,7 @@ def get_sp_buyback_data():
         clean_df["Dividend Yield"] = clean_df["Dividends"] / clean_df["S&P 500"]
         clean_df["Buyback Yield %"] = clean_df["Buyback Yield"] * 100
         clean_df["Dividend Yield %"] = clean_df["Dividend Yield"] * 100
-        clean_df["Total Yield %"] = clean_df["Total Yield"] = (clean_df["Buyback Yield"] + clean_df["Dividend Yield"]) * 100
+        clean_df["Total Yield %"] = (clean_df["Buyback Yield"] + clean_df["Dividend Yield"]) * 100
 
         valid_rows = clean_df[clean_df["Buyback Yield"] > 0].head(5)
         avg_bb_yield = valid_rows["Buyback Yield %"].mean()
@@ -297,7 +297,6 @@ class DetailWACCModel:
             tickers = self.peers + [self.market_index]
             tickers = list(set([t.strip().upper() for t in tickers if t.strip()]))
             
-            # [FIX] yfinance download often returns MultiIndex. Handle it.
             data = yf.download(tickers, period="5y", interval="1mo", progress=False)
             
             prices = None
@@ -306,7 +305,6 @@ class DetailWACCModel:
             elif 'Close' in data:
                 prices = data['Close']
             else:
-                # If only one ticker, shape might be different, but here we have peers+market so it's a DF
                 if isinstance(data, pd.DataFrame): prices = data # Fallback
             
             if prices is None: return None, None, None, ["Failed to download price data."]
@@ -426,7 +424,7 @@ class DetailWACCModel:
 # ==============================================================================
 # Sidebar
 with st.sidebar:
-    st.header("1. Target & Peers")
+    st.header("Target & Peers")
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
     col1, col2 = st.columns([1,1])
@@ -441,21 +439,21 @@ with st.sidebar:
     st.caption("※ 산업 내 매출액(Revenue) 상위 5개 기업")
     
     st.divider()
-    st.header("2. Assumptions")
+    st.header("Assumptions")
     
-    with st.expander("2-1) Cost of Equity / Debt", expanded=True):
+    with st.expander("Cost of Equity / Debt", expanded=True):
         latest_gdp, _, latest_rf, rf_trend_df = get_fred_data()
         rf_in = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
         crp_in = st.number_input("Country Risk Premium (%)", value=0.0, step=0.1)
         size_in = st.number_input("Size Premium (%)", value=0.0, step=0.1)
     
-    with st.expander("2-2) Implied Return", expanded=True):
+    with st.expander("Implied Return", expanded=True):
         avg_bb, avg_div, _, _ = get_sp_buyback_data()
         bb_in = st.number_input(f"Buyback Yield (5Y Avg: {avg_bb:.2f}%)", value=avg_bb, step=0.1)
         div_in = st.number_input(f"Dividend Yield (5Y Avg: {avg_div:.2f}%)", value=avg_div, step=0.1)
         g_in = st.number_input(f"Growth Rate (Latest GDP: {latest_gdp:.2f}%)", value=latest_gdp, step=0.1)
         
-    with st.expander("2-3) Target Assumptions", expanded=True):
+    with st.expander("Target Assumptions", expanded=True):
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, 25.0, 1.0)
 
     st.divider()
@@ -481,7 +479,7 @@ if 'result' in st.session_state:
     # -------------------------------------------------------------------------
     # [LOGIC] Dynamic Sensitivity (Calculated BEFORE Displaying WACC)
     # -------------------------------------------------------------------------
-    st.subheader("2. Beta Analysis")
+    st.subheader("Beta Analysis")
     
     sens_method = st.radio("Sensitivity Selection (Aggregation Method)", 
                            ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
@@ -538,7 +536,7 @@ if 'result' in st.session_state:
     # [SECTION 1] WACC Results (Dynamic)
     # -------------------------------------------------------------------------
     st.markdown("---")
-    st.subheader("1. WACC Calculation & Results")
+    st.subheader("WACC Calculation & Results")
     
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Final WACC", f"{wacc:.2%}")
@@ -554,11 +552,11 @@ if 'result' in st.session_state:
     st.markdown("---")
     # Subheader 2 already displayed above
     
-    with st.expander("2-1) Target Capital Structure & Beta Summary", expanded=True):
+    with st.expander("Target Capital Structure & Beta Summary", expanded=True):
         st.info(f"**Method:** {sens_method} of Peers. **Target D/E:** {target_de:.2%}. **Unlevered Beta:** {sel_unlev_beta:.2f}")
         st.write("The 'Re-levered Beta' column below applies the Target's Capital Structure to each peer's Unlevered Beta.")
 
-    with st.expander("2-2) 5-Year Monthly Beta Analysis Table", expanded=True):
+    with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
         if not df.empty:
             disp_df = df.copy()
             # Requested Column Order
@@ -590,7 +588,7 @@ if 'result' in st.session_state:
     # [SECTION 3] Cost of Equity
     # -------------------------------------------------------------------------
     st.markdown("---")
-    st.subheader("3. Cost of Equity")
+    st.subheader("Cost of Equity")
     st.latex(r"K_e = R_f + \beta_{L} \times (R_m - R_f) + CRP + SP")
     
     k_col1, k_col2, k_col3, k_col4 = st.columns(4)
@@ -599,7 +597,7 @@ if 'result' in st.session_state:
     k_col3.metric("Country Risk Prem", f"{inp['crp']:.2f}%")
     k_col4.metric("Size Premium", f"{inp['sp']:.2f}%")
     
-    with st.expander("3-1) Implied Market Return Details"):
+    with st.expander("Implied Market Return Details"):
         st.write(f"**Implied Market Return ($R_m$): {m['Rm']:.2%}**")
         st.write(f"= Buyback Yield ({inp['bb']:.2f}%) + Dividend Yield ({inp['div']:.2f}%) + Growth Rate ({inp['g']:.2f}%)")
 
@@ -607,7 +605,7 @@ if 'result' in st.session_state:
     # [SECTION 4] Cost of Debt
     # -------------------------------------------------------------------------
     st.markdown("---")
-    st.subheader("4. Cost of Debt")
+    st.subheader("Cost of Debt")
     st.latex(r"K_d = (R_f + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
     
     d_col1, d_col2 = st.columns(2)
@@ -618,7 +616,7 @@ if 'result' in st.session_state:
     # [SECTION 5] Peer Group Analysis (Financials)
     # -------------------------------------------------------------------------
     st.markdown("---")
-    st.subheader("5. Peer Group Analysis (Financials)")
+    st.subheader("Peer Group Analysis (Financials)")
     if not df.empty:
         fin_cols = ["Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio"]
         fin_df = df.copy()
@@ -649,7 +647,7 @@ if 'result' in st.session_state:
     # [SECTION 6] Market Data Reference
     # -------------------------------------------------------------------------
     st.markdown("---")
-    st.subheader("6. Market Data Reference")
+    st.subheader("Market Data Reference")
     t1, t2 = st.tabs(["Fred (Risk Free / GDP)", "NYU Stern (Yields)"])
     with t1:
         st.markdown("**Recent Risk Free Rate Trend (5Y)**")
