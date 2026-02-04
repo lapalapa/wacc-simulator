@@ -29,8 +29,7 @@ def get_sp_buyback_data():
         for d in dfs:
             cols_str = [str(c).lower() for c in d.columns]
             if "year" in cols_str and "s&p 500" in cols_str:
-                df = d
-                break
+                df = d; break
         if df is None: return default_bb_yield, default_div_yield, None, ["Error"]
 
         cols_map = {}
@@ -109,13 +108,12 @@ def get_kpmg_tax_rates():
         for df in dfs:
             cols_str = [str(c) for c in df.columns]
             if any("2024" in c or "2025" in c for c in cols_str):
-                target_df = df
-                break
-        if target_df is None: return None, "Error"
+                target_df = df; break
+        if target_df is None: return None, {}, 2025
 
         target_df.rename(columns={target_df.columns[0]: "Country"}, inplace=True)
         available_years = [int(c) for c in target_df.columns if str(c).isdigit()]
-        if not available_years: return None, "Error"
+        if not available_years: return None, {}, 2025
         
         latest_year = max(available_years)
         col_name = str(latest_year)
@@ -125,9 +123,8 @@ def get_kpmg_tax_rates():
         result_df["Rate"] = pd.to_numeric(result_df["Rate"], errors='coerce')
         result_df = result_df.dropna().sort_values(by="Rate", ascending=False).reset_index(drop=True)
         
-        # Dictionary for easy lookup (Uppercase for matching)
+        # Mapping Dictionary
         tax_dict = dict(zip(result_df["Country"].str.upper().str.strip(), result_df["Rate"]))
-        # Manual patches for common names
         tax_dict["UNITED STATES"] = tax_dict.get("UNITED STATES OF AMERICA", 25.57)
         tax_dict["KOREA"] = tax_dict.get("KOREA (SOUTH)", 26.40)
         
@@ -197,7 +194,6 @@ class DetailWACCModel:
         self.gdp_df = gdp_df
         self.market_index = "^GSPC"
         self.fx_cache = {}
-        # Pre-load KPMG Rates
         _, self.kpmg_map, _ = get_kpmg_tax_rates()
 
     def get_exchange_rate_to_usd(self, currency):
@@ -242,8 +238,8 @@ class DetailWACCModel:
                 elif 'Operating Income' in fin.index: ebit_raw = fin.loc['Operating Income'].iloc[0]
                 if rev_raw == 0 and 'Total Revenue' in fin.index: rev_raw = fin.loc['Total Revenue'].iloc[0]
             
-            # Tax Rate Lookup
-            tax_rate = self.kpmg_map.get(country.upper(), 25.0) # Default 25% if not found
+            # Tax Rate Lookup (KPMG)
+            tax_rate = self.kpmg_map.get(country.upper(), 25.0) 
 
             return {
                 "name": info.get('longName', ticker),
@@ -269,7 +265,7 @@ class DetailWACCModel:
             
             prices = data['Adj Close'] if 'Adj Close' in data else data['Close'] if 'Close' in data else None
             if prices is None: return None, None, None, ["Price Error"]
-            if isinstance(prices, pd.Series): prices = prices.to_frame() # Handle single ticker case
+            if isinstance(prices, pd.Series): prices = prices.to_frame()
 
             returns = prices.pct_change()
             if self.market_index not in returns.columns: return None, None, None, ["Market Index Error"]
@@ -310,7 +306,7 @@ class DetailWACCModel:
                     "Ticker": p,
                     "Company Name": fin['name'],
                     "Country": fin['country'],
-                    "Tax Rate": fin['tax_rate'], # Initial tax rate from KPMG
+                    "Tax Rate": fin['tax_rate'], 
                     "Currency": fin['currency'],
                     "FX Rate": fin['fx_rate'],
                     "Revenue": d['Revenue'],
@@ -347,7 +343,7 @@ with st.sidebar:
     st.header("Target & Peers")
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
-    c1, c2 = st.columns([1,1])
+    col1, col2 = st.columns([1,1])
     if c1.button("🤖 경쟁사 자동 추천 (Top 5)", type="secondary"):
         with st.spinner("Finding..."):
             rec = PeerRecommender()
@@ -393,27 +389,28 @@ if 'result' in st.session_state:
     df_init = res['full_df']
     m = res['market_params']
     
+    # 1. Create a top container for Results (Layout Requirement: Always on Top)
+    results_container = st.container()
+    
     st.subheader("Beta Analysis")
     sens_method = st.radio("Sensitivity Selection (Aggregation Method)", 
                            ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
 
     # -------------------------------------------------------------------------
-    # [Interactive Table] Tax Rate Editing & Real-time Calculation
+    # [Interactive] Beta Analysis Controls & Calculations
     # -------------------------------------------------------------------------
+    # Initialize variables with defaults
+    target_relevered_beta=0; ke=0; kd=0; wacc=0; wd=0; we=0; target_de=0; sel_dtic=0
+
     if not df_init.empty:
-        # Prepare Data for Editor (Reorder Columns)
-        # Ticker, Company Name, Country, Total Debt, Market Cap, D/E, Debt/TIC, Tax Rate, Raw Beta, Adj Beta
         cols_base = ["Ticker", "Company Name", "Country", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta"]
-        
-        # We need a clean copy for editing
         edit_source = df_init[cols_base].copy()
         
         with st.expander("5-Year Monthly Beta Analysis Table (Editable Tax Rate)", expanded=True):
-            # Data Editor allowing Tax Rate changes
             edited_df = st.data_editor(
                 edit_source,
                 column_config={
-                    "Tax Rate": st.column_config.NumberColumn("Tax Rate (%)", format="%.2f", min_value=0.0, max_value=100.0, step=0.5),
+                    "Tax Rate": st.column_config.NumberColumn("Tax Rate (%)", format="%.2f", min_value=0.0, max_value=100.0, step=0.01),
                     "Total Debt": st.column_config.NumberColumn(format="%.2e"),
                     "Market Cap": st.column_config.NumberColumn(format="%.2e"),
                     "D/E Ratio": st.column_config.NumberColumn(format="%.2f"),
@@ -426,87 +423,62 @@ if 'result' in st.session_state:
                 key="beta_editor"
             )
             
-            # [Real-time Calculation] based on edited_df
-            # 1. Calculate Unlevered Beta for each row: Unlevered = AdjBeta / (1 + (1 - Tax/100) * D/E)
-            # Use 'Tax Rate' from edited_df
-            
+            # Recalculate using edited Tax Rates
             calc_df = edited_df.copy()
             calc_df["Unlevered Beta"] = calc_df["Adj Beta"] / (1 + (1 - calc_df["Tax Rate"]/100) * calc_df["D/E Ratio"])
             
-            # 2. Aggregation (Sensitivity)
             if sens_method == "Average":
-                sel_unlev = calc_df["Unlevered Beta"].mean()
-                sel_dtic = calc_df["Debt/TIC Ratio"].mean()
+                sel_unlev = calc_df["Unlevered Beta"].mean(); sel_dtic = calc_df["Debt/TIC Ratio"].mean()
             elif sens_method == "Median":
-                sel_unlev = calc_df["Unlevered Beta"].median()
-                sel_dtic = calc_df["Debt/TIC Ratio"].median()
+                sel_unlev = calc_df["Unlevered Beta"].median(); sel_dtic = calc_df["Debt/TIC Ratio"].median()
             elif sens_method == "Maximum":
-                sel_unlev = calc_df["Unlevered Beta"].max()
-                sel_dtic = calc_df["Debt/TIC Ratio"].max()
+                sel_unlev = calc_df["Unlevered Beta"].max(); sel_dtic = calc_df["Debt/TIC Ratio"].max()
             else:
-                sel_unlev = calc_df["Unlevered Beta"].min()
-                sel_dtic = calc_df["Debt/TIC Ratio"].min()
+                sel_unlev = calc_df["Unlevered Beta"].min(); sel_dtic = calc_df["Debt/TIC Ratio"].min()
                 
-            # 3. Re-lever for Target
-            # Target D/E
             target_de = sel_dtic / (1 - sel_dtic) if (1-sel_dtic) != 0 else 0
-            
-            # Re-levered Beta (using Target Tax Rate from Assumptions)
             target_relevered_beta = sel_unlev * (1 + (1 - inp['tax']/100) * target_de)
-            
-            # Add Re-levered Beta column to table (What if Peers had Target Structure?)
-            # Usually Re-levered column in peer table implies re-levering to Target's structure
             calc_df["Re-levered Beta"] = calc_df["Unlevered Beta"] * (1 + (1 - inp['tax']/100) * target_de)
             
-            # Display the Calculated Columns (Read-only view of the effects)
             st.caption("👇 **Calculated Metrics based on inputs above:**")
             st.dataframe(
                 calc_df[["Ticker", "Unlevered Beta", "Re-levered Beta"]],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Unlevered Beta": st.column_config.NumberColumn(format="%.2f"),
-                    "Re-levered Beta": st.column_config.NumberColumn(format="%.2f"),
-                }
+                use_container_width=True, hide_index=True,
+                column_config={"Unlevered Beta": st.column_config.NumberColumn(format="%.2f"), "Re-levered Beta": st.column_config.NumberColumn(format="%.2f")}
             )
             
             st.divider()
             st.markdown("##### Beta Calculation Methodologies")
             mc1, mc2, mc3 = st.columns(3)
             with mc1:
-                st.markdown("**1. Adjusted Beta**")
-                st.latex(r"\beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33")
+                st.markdown("**1. Adjusted Beta**"); st.latex(r"\beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33")
             with mc2:
-                st.markdown("**2. Unlevered Beta**")
-                st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
+                st.markdown("**2. Unlevered Beta**"); st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
             with mc3:
-                st.markdown("**3. Re-levered Beta**")
-                st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
+                st.markdown("**3. Re-levered Beta**"); st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
 
-            # 4. Final WACC Calculation
+            # Final WACC Calcs
             ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
             spread = 0.02
             kd = ((inp['rf']/100) + spread) * (1 - inp['tax']/100)
             wd = sel_dtic
             we = 1 - sel_dtic
             wacc = (we * ke) + (wd * kd)
-
     else:
         st.warning("No data available.")
-        target_relevered_beta=0; ke=0; kd=0; wacc=0; wd=0; we=0; target_de=0; sel_dtic=0
 
     # -------------------------------------------------------------------------
-    # [SECTION 1] WACC Results (Dynamic Updated)
+    # [SECTION 1] WACC Results (Populate Top Container)
     # -------------------------------------------------------------------------
-    st.markdown("---")
-    st.subheader("WACC Calculation & Results")
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Final WACC", f"{wacc:.2%}")
-    c2.metric("Cost of Equity", f"{ke:.2%}")
-    c3.metric("Cost of Debt (A-T)", f"{kd:.2%}")
-    c4.metric("Re-levered Beta", f"{target_relevered_beta:.2f}")
-    st.caption(f"**Target Structure ({sens_method}):** Debt {wd:.1%} | Equity {we:.1%} (Implied D/E: {target_de:.2%})")
+    with results_container:
+        st.subheader("WACC Calculation & Results")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Final WACC", f"{wacc:.2%}")
+        c2.metric("Cost of Equity", f"{ke:.2%}")
+        c3.metric("Cost of Debt (A-T)", f"{kd:.2%}")
+        c4.metric("Re-levered Beta", f"{target_relevered_beta:.2f}")
+        st.caption(f"**Target Structure ({sens_method}):** Debt {wd:.1%} | Equity {we:.1%} (Implied D/E: {target_de:.2%})")
+        st.markdown("---")
 
     # -------------------------------------------------------------------------
     # [SECTION 3] Cost of Equity
@@ -578,13 +550,11 @@ if 'result' in st.session_state:
     with t1:
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
         if res.get('rf_trend') is not None: st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
-        else: st.warning("No Data")
     with t2:
         st.caption("Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA")
         if res.get('gdp_df') is not None:
             st.dataframe(res['gdp_df'], use_container_width=True, hide_index=True,
                 column_config={"Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"), "GDP Growth %": st.column_config.NumberColumn("GDP Growth (%)", format="%.2f%%")})
-        else: st.warning("No Data")
     with t3:
         st.caption("Source: Aswath Damodaran (NYU Stern)")
         _, _, sp_table, _ = get_sp_buyback_data()
