@@ -394,34 +394,24 @@ if 'result' in st.session_state:
     
     # 2. Beta Analysis Section
     st.subheader("Beta Analysis")
-    
     sens_method = st.radio("Sensitivity Selection (Aggregation Method)", 
                            ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
 
-    # Variables
+    # Variables Init
     target_relevered_beta=0; ke=0; kd=0; wacc=0; wd=0; we=0; target_de=0; sel_dtic=0
 
     if not df_init.empty:
-        # [NEW UI] Adjustable Tax Rate Widgets (Above Table)
-        st.markdown("##### 🛠️ Adjust Peer Tax Rates (Live)")
-        
-        # Grid layout for inputs
-        cols = st.columns(len(df_init))
+        # Pre-calc: Fetch user adjustments for Tax Rate
         user_tax_rates = {}
-        
         for idx, row in df_init.iterrows():
-            with cols[idx % len(cols)]:
-                # Use number_input for direct input + step arrows
-                new_rate = st.number_input(
-                    f"{row['Ticker']}", 
-                    value=float(row['Tax Rate']),
-                    step=0.1,
-                    format="%.2f",
-                    key=f"tax_{row['Ticker']}"
-                )
-                user_tax_rates[row['Ticker']] = new_rate
+            key = f"tax_{row['Ticker']}"
+            # Use Session State if exists, else default from KPMG/Data
+            if key in st.session_state:
+                user_tax_rates[row['Ticker']] = st.session_state[key]
+            else:
+                user_tax_rates[row['Ticker']] = float(row['Tax Rate'])
 
-        # Update DataFrame with User Input
+        # Apply Tax Rates for Calc
         calc_df = df_init.copy()
         calc_df["Tax Rate"] = calc_df["Ticker"].map(user_tax_rates)
         
@@ -439,12 +429,22 @@ if 'result' in st.session_state:
             sel_unlev = calc_df["Unlevered Beta"].min(); sel_dtic = calc_df["Debt/TIC Ratio"].min()
             
         target_de = sel_dtic / (1 - sel_dtic) if (1-sel_dtic) != 0 else 0
-        target_relevered_beta = sel_unlev * (1 + (1 - inp['tax']/100) * target_de)
         
-        # 3. Re-lever per Peer (Assuming Target Structure)
+        # 3. Re-lever for Target
+        target_relevered_beta = sel_unlev * (1 + (1 - inp['tax']/100) * target_de)
         calc_df["Re-levered Beta"] = calc_df["Unlevered Beta"] * (1 + (1 - inp['tax']/100) * target_de)
         
-        # Table Display (Read-Only)
+        # 4. Final WACC
+        ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
+        spread = 0.02
+        kd = ((inp['rf']/100) + spread) * (1 - inp['tax']/100)
+        wd = sel_dtic
+        we = 1 - sel_dtic
+        wacc = (we * ke) + (wd * kd)
+
+        # ---------------------------------------------------------------------
+        # Render Table Section
+        # ---------------------------------------------------------------------
         with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
             cols_show = ["Ticker", "Company Name", "Country", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", "Unlevered Beta", "Re-levered Beta"]
             
@@ -474,18 +474,27 @@ if 'result' in st.session_state:
             with mc2: st.markdown("**2. Unlevered Beta**"); st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
             with mc3: st.markdown("**3. Re-levered Beta**"); st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
 
-        # 4. Final WACC
-        ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
-        spread = 0.02
-        kd = ((inp['rf']/100) + spread) * (1 - inp['tax']/100)
-        wd = sel_dtic
-        we = 1 - sel_dtic
-        wacc = (we * ke) + (wd * kd)
+            # [UI Change] Tax Rate Adjuster moved BELOW the table
+            st.divider()
+            st.markdown("##### 🛠️ Adjust Peer Tax Rates")
+            
+            cols = st.columns(len(df_init))
+            for idx, row in df_init.iterrows():
+                with cols[idx % len(cols)]:
+                    st.number_input(
+                        f"{row['Ticker']}", 
+                        value=user_tax_rates[row['Ticker']],
+                        step=0.01, # Precise step
+                        format="%.2f",
+                        key=f"tax_{row['Ticker']}"
+                    )
+            st.caption("※ Note: If the headquarter location is not available in the KPMG tax table, a default rate of 25.00% is applied.")
+
     else:
         st.warning("No data available.")
 
     # -------------------------------------------------------------------------
-    # [SECTION 1] WACC Results (Populate Top Container)
+    # [SECTION 1] WACC Results (Populate Top Container - Always Visible)
     # -------------------------------------------------------------------------
     with results_container:
         st.subheader("WACC Calculation & Results")
