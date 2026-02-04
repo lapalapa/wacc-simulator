@@ -12,6 +12,26 @@ import random
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # ==============================================================================
+# [MODULE] Helper: Safe Fetcher with Retry
+# ==============================================================================
+def safe_yf_info(ticker_obj, max_retries=3):
+    """
+    yfinance info fetching with retry logic to handle Rate Limiting (429).
+    """
+    for i in range(max_retries):
+        try:
+            return ticker_obj.info
+        except Exception as e:
+            if "429" in str(e) or "Too Many Requests" in str(e):
+                wait = (2 ** (i + 1)) + random.uniform(0.5, 1.5)
+                time.sleep(wait)
+                continue
+            else:
+                if i == max_retries - 1: return {}
+                time.sleep(1)
+    return {}
+
+# ==============================================================================
 # [MODULE] Data Fetcher 1: NYU Stern (Buyback & Dividend)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
@@ -30,7 +50,7 @@ def get_sp_buyback_data():
             cols_str = [str(c).lower() for c in d.columns]
             if "year" in cols_str and "s&p 500" in cols_str:
                 df = d; break
-        if df is None: return default_bb_yield, default_div_yield, None, ["Error: Table not found"]
+        if df is None: return default_bb_yield, default_div_yield, None, ["Error"]
 
         cols_map = {}
         for c in df.columns:
@@ -61,7 +81,7 @@ def get_sp_buyback_data():
         avg_bb_yield = valid_rows["Buyback Yield %"].mean()
         avg_div_yield = valid_rows["Dividend Yield %"].mean()
         return avg_bb_yield, avg_div_yield, clean_df, []
-    except Exception as e: return default_bb_yield, default_div_yield, None, [f"NYU Error: {str(e)}"]
+    except: return default_bb_yield, default_div_yield, None, ["Error"]
 
 # ==============================================================================
 # [MODULE] Data Fetcher 2 & 3: FRED Data (GDP & RF)
@@ -138,7 +158,8 @@ class PeerRecommender:
     def get_revenue(self, ticker):
         try:
             t = yf.Ticker(ticker)
-            rev = t.info.get('totalRevenue')
+            info = safe_yf_info(t)
+            rev = info.get('totalRevenue')
             if not rev:
                 fin = t.financials
                 if not fin.empty and 'Total Revenue' in fin.index:
@@ -149,7 +170,7 @@ class PeerRecommender:
     def recommend(self, target_ticker, progress_bar=None):
         try:
             t = yf.Ticker(target_ticker)
-            info = t.info
+            info = safe_yf_info(t)
             ind_key = info.get('industryKey')
             sec_key = info.get('sectorKey')
             group_name = "Unknown"
@@ -201,25 +222,32 @@ class DetailWACCModel:
         if currency == 'USD': return 1.0, "USD"
         if currency in self.fx_cache: return self.fx_cache[currency], currency
         try:
-            t = yf.Ticker(f"{currency}USD=X")
-            hist = t.history(period="1d")
-            if not hist.empty: rate = hist['Close'].iloc[-1]
-            else:
-                t = yf.Ticker(f"USD{currency}=X")
-                hist = t.history(period="1d")
-                if not hist.empty: rate = 1 / hist['Close'].iloc[-1]
-                else: rate = 1.0
-            self.fx_cache[currency] = rate
-            return rate, currency
+            for i in range(2):
+                try:
+                    t = yf.Ticker(f"{currency}USD=X")
+                    hist = t.history(period="1d")
+                    if not hist.empty: 
+                        rate = hist['Close'].iloc[-1]
+                        self.fx_cache[currency] = rate
+                        return rate, currency
+                    else:
+                        t = yf.Ticker(f"USD{currency}=X")
+                        hist = t.history(period="1d")
+                        if not hist.empty: 
+                            rate = 1 / hist['Close'].iloc[-1]
+                            self.fx_cache[currency] = rate
+                            return rate, currency
+                except:
+                    time.sleep(1)
+            return 1.0, currency
         except: return 1.0, currency
 
     def get_financials_latest(self, ticker):
-        # [IMPROVED] Robust Fetching & Error Reporting
+        # [STRICT MODE] Fail if critical data is missing
         try:
             t = yf.Ticker(ticker)
-            info = t.info
+            info = safe_yf_info(t)
             
-            # Basic validation
             if not info:
                 return None, f"⚠️ {ticker}: No data found in Yahoo Finance."
 
@@ -232,25 +260,37 @@ class DetailWACCModel:
             # Debt Fallback Logic
             debt_raw = info.get('totalDebt', 0)
             if debt_raw == 0:
-                bs = t.balance_sheet
-                if not bs.empty:
-                    for item in ['Total Debt', 'Long Term Debt', 'Total Liab']:
-                        if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
+                try:
+                    bs = t.balance_sheet
+                    if not bs.empty:
+                        for item in ['Total Debt', 'Long Term Debt', 'Total Liab']:
+                            if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
+                except: pass
             
             # Revenue Fallback Logic
             rev_raw = info.get('totalRevenue', 0)
             ebitda_raw = info.get('ebitda', 0)
             ebit_raw = 0
             
-            # Try Financials if info is missing items
-            fin = t.financials
-            if not fin.empty:
-                if 'EBIT' in fin.index: ebit_raw = fin.loc['EBIT'].iloc[0]
-                elif 'Operating Income' in fin.index: ebit_raw = fin.loc['Operating Income'].iloc[0]
-                if rev_raw == 0 and 'Total Revenue' in fin.index: rev_raw = fin.loc['Total Revenue'].iloc[0]
+            try:
+                fin = t.financials
+                if not fin.empty:
+                    if 'EBIT' in fin.index: ebit_raw = fin.loc['EBIT'].iloc[0]
+                    elif 'Operating Income' in fin.index: ebit_raw = fin.loc['Operating Income'].iloc[0]
+                    if rev_raw == 0 and 'Total Revenue' in fin.index: rev_raw = fin.loc['Total Revenue'].iloc[0]
+            except: pass
             
-            # If critical data is still missing, we still return what we have but log warning
-            if mkt_cap_raw == 0: return None, f"⚠️ {ticker}: Market Cap is 0 or missing."
+            # [STRICT VALIDATION]
+            # Exclude if Market Cap is missing (0)
+            if mkt_cap_raw == 0: 
+                try:
+                    mkt_cap_raw = t.fast_info['market_cap']
+                except:
+                    return None, f"⚠️ {ticker}: Excluded (Missing Market Cap/Price Data)."
+            
+            # Exclude if Revenue is 0 (Likely bad data for operating company)
+            if rev_raw == 0:
+                 return None, f"⚠️ {ticker}: Excluded (Missing Revenue Data)."
 
             # Tax Rate Lookup (KPMG)
             tax_rate = self.kpmg_map.get(country.upper(), 25.0) 
@@ -271,7 +311,7 @@ class DetailWACCModel:
             }
             return data, None
         except Exception as e: 
-            return None, f"⚠️ {ticker} Error: {str(e)}"
+            return None, f"⚠️ {ticker}: Excluded (API Error: {str(e)})"
 
     def get_5y_monthly_beta_analysis(self):
         try:
@@ -288,7 +328,7 @@ class DetailWACCModel:
             
             beta_list = []
             
-            for t in self.peers: # Iterate original order
+            for t in self.peers:
                 t_up = t.strip().upper()
                 if t_up in returns.columns:
                     pair = returns[[t_up, self.market_index]].dropna()
@@ -312,9 +352,14 @@ class DetailWACCModel:
         beta_df, prices, _, beta_err = self.get_5y_monthly_beta_analysis()
         error_logs = beta_err if beta_err else []
         
-        # 2. Get Financials
+        # 2. Get Financials with Throttling & Strict Filtering
         peer_data = []
-        for p in self.peers:
+        progress_text = st.empty()
+        
+        for idx, p in enumerate(self.peers):
+            progress_text.text(f"⏳ Analyzing {p} ({idx+1}/{len(self.peers)})...")
+            time.sleep(random.uniform(1.5, 3.0)) 
+            
             fin, err = self.get_financials_latest(p)
             if err:
                 error_logs.append(err)
@@ -344,12 +389,12 @@ class DetailWACCModel:
                     "Debt/TIC Ratio": dtic_ratio
                 })
         
+        progress_text.empty()
+        
         df_peers = pd.DataFrame(peer_data)
         
         # 3. Merge
         if beta_df is not None and not beta_df.empty and not df_peers.empty:
-            # Clean merge on Ticker
-            # beta_df Tickers might be uppercase, ensure consistency
             beta_df['Ticker'] = beta_df['Ticker'].str.upper().str.strip()
             df_peers['Ticker'] = df_peers['Ticker'].str.upper().str.strip()
             full_df = pd.merge(df_peers, beta_df, on="Ticker", how="left")
@@ -422,41 +467,32 @@ if 'result' in st.session_state:
     df_init = res['full_df']
     m = res['market_params']
     
-    # 1. Top Container for Results (Always Visible)
+    # 1. Top Container for Results
     results_container = st.container()
     
     # 2. Beta Analysis Section
     st.subheader("Beta Analysis")
-    
     sens_method = st.radio("Sensitivity Selection (Aggregation Method)", 
                            ["Average", "Median", "Maximum", "Minimum"], horizontal=True)
 
-    # Variables Init
     target_relevered_beta=0; ke=0; kd=0; wacc=0; wd=0; we=0; target_de=0; sel_dtic=0
 
-    # Display Errors if any
+    # Display Excluded Peers (Transparency)
     if res.get('errors'):
-        with st.expander("⚠️ Data Fetching Warnings", expanded=True):
-            for e in res['errors']: st.write(e)
+        st.error("⚠️ The following peers were excluded due to missing critical data (Strict Validation):")
+        for e in res['errors']: st.write(f"- {e}")
 
     if not df_init.empty:
-        # Pre-calc: Fetch user adjustments for Tax Rate
         user_tax_rates = {}
         for idx, row in df_init.iterrows():
             key = f"tax_{row['Ticker']}"
-            if key in st.session_state:
-                user_tax_rates[row['Ticker']] = st.session_state[key]
-            else:
-                user_tax_rates[row['Ticker']] = float(row['Tax Rate'])
+            if key in st.session_state: user_tax_rates[row['Ticker']] = st.session_state[key]
+            else: user_tax_rates[row['Ticker']] = float(row['Tax Rate'])
 
-        # Apply Tax Rates for Calc
         calc_df = df_init.copy()
         calc_df["Tax Rate"] = calc_df["Ticker"].map(user_tax_rates)
-        
-        # 1. Unlever Beta
         calc_df["Unlevered Beta"] = calc_df["Adj Beta"] / (1 + (1 - calc_df["Tax Rate"]/100) * calc_df["D/E Ratio"])
         
-        # 2. Aggregate
         if sens_method == "Average":
             sel_unlev = calc_df["Unlevered Beta"].mean(); sel_dtic = calc_df["Debt/TIC Ratio"].mean()
         elif sens_method == "Median":
@@ -467,12 +503,9 @@ if 'result' in st.session_state:
             sel_unlev = calc_df["Unlevered Beta"].min(); sel_dtic = calc_df["Debt/TIC Ratio"].min()
             
         target_de = sel_dtic / (1 - sel_dtic) if (1-sel_dtic) != 0 else 0
-        
-        # 3. Re-lever for Target
         target_relevered_beta = sel_unlev * (1 + (1 - inp['tax']/100) * target_de)
         calc_df["Re-levered Beta"] = calc_df["Unlevered Beta"] * (1 + (1 - inp['tax']/100) * target_de)
         
-        # 4. Final WACC
         ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
         spread = 0.02
         kd = ((inp['rf']/100) + spread) * (1 - inp['tax']/100)
@@ -480,20 +513,13 @@ if 'result' in st.session_state:
         we = 1 - sel_dtic
         wacc = (we * ke) + (wd * kd)
 
-        # ---------------------------------------------------------------------
-        # Render Table Section
-        # ---------------------------------------------------------------------
         with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
             cols_show = ["Ticker", "Company Name", "Country", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", "Unlevered Beta", "Re-levered Beta"]
-            
             disp_df = calc_df.copy()
             disp_df["Total Debt"] = disp_df.apply(lambda x: f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B", axis=1)
             disp_df["Market Cap"] = disp_df.apply(lambda x: f"{x['Currency']} {x['Market Cap']/1e9:,.2f}B", axis=1)
             
-            st.dataframe(
-                disp_df[cols_show],
-                use_container_width=True,
-                hide_index=True,
+            st.dataframe(disp_df[cols_show], use_container_width=True, hide_index=True,
                 column_config={
                     "Tax Rate": st.column_config.NumberColumn("Tax Rate (%)", format="%.2f"),
                     "D/E Ratio": st.column_config.NumberColumn(format="%.2f"),
@@ -512,28 +538,16 @@ if 'result' in st.session_state:
             with mc2: st.markdown("**2. Unlevered Beta**"); st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
             with mc3: st.markdown("**3. Re-levered Beta**"); st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
 
-            # [UI] Tax Rate Adjuster (Moved BELOW table)
             st.divider()
             st.markdown("##### Adjust Peer Tax Rates")
-            
             cols = st.columns(len(df_init))
             for idx, row in df_init.iterrows():
                 with cols[idx % len(cols)]:
-                    st.number_input(
-                        f"{row['Ticker']}", 
-                        value=user_tax_rates[row['Ticker']],
-                        step=0.01, # Precise step
-                        format="%.2f",
-                        key=f"tax_{row['Ticker']}"
-                    )
+                    st.number_input(f"{row['Ticker']}", value=user_tax_rates[row['Ticker']], step=0.01, format="%.2f", key=f"tax_{row['Ticker']}")
             st.caption("※ Note: If the headquarter location is not available in the KPMG tax table, a default rate of 25.00% is applied.")
-
     else:
-        st.warning("No data available.")
+        st.warning("No valid peer data available for calculation.")
 
-    # -------------------------------------------------------------------------
-    # [SECTION 1] WACC Results (Populate Top Container - Always Visible)
-    # -------------------------------------------------------------------------
     with results_container:
         st.subheader("WACC Calculation & Results")
         c1, c2, c3, c4 = st.columns(4)
@@ -544,34 +558,25 @@ if 'result' in st.session_state:
         st.caption(f"**Target Structure ({sens_method}):** Debt {wd:.1%} | Equity {we:.1%} (Implied D/E: {target_de:.2%})")
         st.markdown("---")
 
-    # -------------------------------------------------------------------------
-    # [SECTION 3] Cost of Equity
-    # -------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Cost of Equity")
     st.latex(r"K_e = R_f + \beta_{L} \times (R_m - R_f) + CRP + SP")
     st.info(f"**Calculation:** {inp['rf']:.2f}% + ({target_relevered_beta:.2f} × {(m['MRP']*100):.2f}%) + {inp['crp']:.2f}% + {inp['sp']:.2f}% = **{ke*100:.2f}%**")
-    
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
     k2.metric("Beta (Re-levered)", f"{target_relevered_beta:.2f}")
     k3.metric("Market Risk Prem", f"{m['MRP']*100:.2f}%")
     k4.metric("Country Risk Prem", f"{inp['crp']:.2f}%")
     k5.metric("Size Premium", f"{inp['sp']:.2f}%")
-
     with st.expander("Implied Market Return Details"):
         st.write(f"**Implied Market Return ($R_m$): {m['Rm']:.2%}**")
         st.write(f"= Buyback Yield ({inp['bb']:.2f}%) + Dividend Yield ({inp['div']:.2f}%) + Growth Rate ({inp['g']:.2f}%)")
 
-    # -------------------------------------------------------------------------
-    # [SECTION 4] Cost of Debt
-    # -------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Cost of Debt")
     st.latex(r"K_d = (R_f + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
     spread = 2.0
     st.info(f"**Calculation:** ({inp['rf']:.2f}% + {spread:.2f}%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**")
-    
     d1, d2, d3, d4, d5 = st.columns(5)
     d1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
     d2.metric("Credit Spread", f"{spread:.2f}%")
@@ -579,16 +584,12 @@ if 'result' in st.session_state:
     d4.metric("Tax Rate", f"{inp['tax']:.1f}%")
     d5.metric("After-tax Cost of Debt", f"{kd:.2%}")
 
-    # -------------------------------------------------------------------------
-    # [SECTION 5] Peer Group Analysis
-    # -------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Peer Group Analysis (Financials)")
     if not df_init.empty:
         fin_cols = ["Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio"]
         fin_df = df_init.copy()
         for c in ["Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap"]: fin_df[c] = fin_df[c] / 1e9 
-        
         st.dataframe(fin_df[fin_cols], use_container_width=True, hide_index=True,
             column_config={
                 "Revenue": st.column_config.NumberColumn("Revenue ($B)", format="%.2f"),
@@ -604,13 +605,9 @@ if 'result' in st.session_state:
         st.markdown("**Applied FX Rates:**")
         st.dataframe(df_init[["Ticker", "Currency", "FX Rate"]].T, use_container_width=True)
 
-    # -------------------------------------------------------------------------
-    # [SECTION 6] Market Data
-    # -------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Market Data Reference")
     t1, t2, t3, t4 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ KPMG Corp Tax"])
-    
     with t1:
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
         if res.get('rf_trend') is not None: st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
