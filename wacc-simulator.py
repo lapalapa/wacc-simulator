@@ -201,7 +201,7 @@ class PeerRecommender:
 # [LOGIC] WACC Engine
 # ==============================================================================
 class DetailWACCModel:
-    def __init__(self, target, peers, rf_rate, crp, size_prem, buyback, div_yield, growth, tax, rf_trend_df):
+    def __init__(self, target, peers, rf_rate, crp, size_prem, buyback, div_yield, growth, tax, rf_trend_df, gdp_df):
         self.target = target
         self.peers = [p.strip() for p in peers.split(',') if p.strip()]
         self.rf = rf_rate / 100
@@ -211,7 +211,8 @@ class DetailWACCModel:
         self.div_yield = div_yield / 100
         self.growth_rate = growth / 100
         self.tax = tax / 100
-        self.rf_trend_df = rf_trend_df # For passing to result
+        self.rf_trend_df = rf_trend_df 
+        self.gdp_df = gdp_df # For passing to result
         self.market_index = "^GSPC"
         self.fx_cache = {}
 
@@ -416,6 +417,7 @@ class DetailWACCModel:
             "returns": rets,
             "market_params": {"Rm": rm, "MRP": mrp},
             "rf_trend": self.rf_trend_df, # Pass for graphing
+            "gdp_df": self.gdp_df, # Pass for Table
             "errors": error_logs
         }
 
@@ -442,7 +444,7 @@ with st.sidebar:
     st.header("Assumptions")
     
     with st.expander("Cost of Equity / Debt", expanded=True):
-        latest_gdp, _, latest_rf, rf_trend_df = get_fred_data()
+        latest_gdp, df_gdp_disp, latest_rf, rf_trend_df = get_fred_data()
         rf_in = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
         crp_in = st.number_input("Country Risk Premium (%)", value=0.0, step=0.1)
         size_in = st.number_input("Size Premium (%)", value=0.0, step=0.1)
@@ -460,7 +462,7 @@ with st.sidebar:
     if st.button("Calculate WACC", type="primary", use_container_width=True):
         model = DetailWACCModel(
             target_ticker, peers_input, rf_in, crp_in, size_in, 
-            bb_in, div_in, g_in, tax_in, rf_trend_df
+            bb_in, div_in, g_in, tax_in, rf_trend_df, df_gdp_disp
         )
         with st.spinner("Calculating..."):
             st.session_state['result'] = model.run()
@@ -658,13 +660,29 @@ if 'result' in st.session_state:
     # -------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("Market Data Reference")
-    t1, t2 = st.tabs(["Fred (Risk Free / GDP)", "NYU Stern (Yields)"])
+    t1, t2, t3 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields"])
+    
     with t1:
         st.markdown("**Recent Risk Free Rate Trend (5Y)**")
         if res.get('rf_trend') is not None: 
             st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
         else: st.warning("Trend Chart data unavailable")
+        
     with t2:
+        st.markdown("**US GDP Growth (Annual)**")
+        if res.get('gdp_df') is not None:
+            st.dataframe(
+                res['gdp_df'],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+                    "GDP Growth %": st.column_config.NumberColumn("GDP Growth (%)", format="%.2f%%")
+                }
+            )
+        else: st.warning("GDP Data unavailable")
+
+    with t3:
         st.markdown("**S&P 500 Buyback & Dividend Yields**")
         _, _, sp_table, _ = get_sp_buyback_data()
         if sp_table is not None: st.dataframe(sp_table, use_container_width=True)
