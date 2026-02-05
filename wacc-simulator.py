@@ -196,47 +196,17 @@ def get_damodaran_spreads():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # Define Fallback Data
+    # Fallback Data
     fallback_large = [
         {">": 8.5, "≤ to": 100000, "Rating": "Aaa/AAA", "Spread": "0.40%"},
         {">": 6.5, "≤ to": 8.49, "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {">": 5.5, "≤ to": 6.49, "Rating": "A1/A+", "Spread": "0.70%"},
-        {">": 4.25, "≤ to": 5.49, "Rating": "A2/A", "Spread": "0.78%"},
-        {">": 3.0, "≤ to": 4.24, "Rating": "A3/A-", "Spread": "0.89%"},
-        {">": 2.5, "≤ to": 2.99, "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {">": 2.25, "≤ to": 2.49, "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {">": 2.0, "≤ to": 2.24, "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {">": 1.75, "≤ to": 1.99, "Rating": "B1/B+", "Spread": "2.75%"},
-        {">": 1.5, "≤ to": 1.74, "Rating": "B2/B", "Spread": "3.21%"},
-        {">": 1.25, "≤ to": 1.49, "Rating": "B3/B-", "Spread": "5.09%"},
-        {">": 0.8, "≤ to": 1.24, "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {">": 0.65, "≤ to": 0.79, "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {">": 0.2, "≤ to": 0.64, "Rating": "C2/C", "Spread": "16.00%"},
         {">": -100000, "≤ to": 0.19, "Rating": "D2/D", "Spread": "19.00%"}
     ]
     
-    fallback_small = [
-        {">": 12.5, "≤ to": 100000, "Rating": "Aaa/AAA", "Spread": "0.40%"},
-        {">": 9.5, "≤ to": 12.49, "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {">": 7.5, "≤ to": 9.49, "Rating": "A1/A+", "Spread": "0.70%"},
-        {">": 6.0, "≤ to": 7.49, "Rating": "A2/A", "Spread": "0.78%"},
-        {">": 4.5, "≤ to": 5.99, "Rating": "A3/A-", "Spread": "0.89%"},
-        {">": 4.0, "≤ to": 4.49, "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {">": 3.5, "≤ to": 3.99, "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {">": 3.0, "≤ to": 3.49, "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {">": 2.5, "≤ to": 2.99, "Rating": "B1/B+", "Spread": "2.75%"},
-        {">": 2.0, "≤ to": 2.49, "Rating": "B2/B", "Spread": "3.21%"},
-        {">": 1.5, "≤ to": 1.99, "Rating": "B3/B-", "Spread": "5.09%"},
-        {">": 1.25, "≤ to": 1.49, "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {">": 0.8, "≤ to": 1.24, "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {">": 0.5, "≤ to": 0.79, "Rating": "C2/C", "Spread": "16.00%"},
-        {">": -100000, "≤ to": 0.49, "Rating": "D2/D", "Spread": "19.00%"}
-    ]
-
     result_dict = {
         "Large Firms": (pd.DataFrame(fallback_large), "Fallback Data"),
-        "Small/Risky Firms": (pd.DataFrame(fallback_small), "Fallback Data"),
-        "Financial Firms": (None, "Fallback: Ratios not applicable")
+        "Small/Risky Firms": (None, "No Data"),
+        "Financial Firms": (None, "No Data")
     }
 
     try:
@@ -269,7 +239,7 @@ def get_damodaran_spreads():
             data_rows = []
             for i in range(header_row + 1, len(df)):
                 row = df.iloc[i]
-                if pd.isna(row[2]) or pd.isna(row[3]): break # Stop at empty
+                if pd.isna(row[2]) or pd.isna(row[3]): break 
                 try:
                     val_spread = row[3]
                     spread_fmt = f"{val_spread * 100:.2f}%" if isinstance(val_spread, (int, float)) else str(val_spread)
@@ -288,16 +258,15 @@ def get_damodaran_spreads():
         df_small = extract_table("smaller and riskier firms")
         if df_small is not None: result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live)")
         
-        # 3. Financial Firms (Check if exists)
+        # 3. Financial Firms (Explicit Search)
         df_fin = extract_table("financial service firms")
         if df_fin is not None: 
             result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live)")
         else:
-            # Financials usually don't have ratio tables in this file
-            result_dict["Financial Firms"] = (None, "Note: Interest Coverage Ratios are typically not used for rating Financial Firms.")
+            result_dict["Financial Firms"] = (None, "Table not found in source file.")
 
     except Exception:
-        pass # Keep fallback
+        pass 
 
     return result_dict
 
@@ -393,6 +362,7 @@ class DetailWACCModel:
         except: return 1.0, currency
 
     def get_financials_latest(self, ticker):
+        # [STRICT MODE] Fail if critical data is missing
         try:
             t = yf.Ticker(ticker)
             info = safe_yf_info(t)
@@ -406,6 +376,7 @@ class DetailWACCModel:
             
             mkt_cap_raw = info.get('marketCap', 0)
             
+            # Debt Fallback Logic
             debt_raw = info.get('totalDebt', 0)
             if debt_raw == 0:
                 try:
@@ -415,9 +386,11 @@ class DetailWACCModel:
                             if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
                 except: pass
             
+            # Revenue Fallback Logic
             rev_raw = info.get('totalRevenue', 0)
             ebitda_raw = info.get('ebitda', 0)
             ebit_raw = 0
+            
             try:
                 fin = t.financials
                 if not fin.empty:
