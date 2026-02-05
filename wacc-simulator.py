@@ -195,10 +195,9 @@ def get_kpmg_tax_rates():
         result_df.columns = ["Country", f"Rate"]
         result_df["Rate"] = pd.to_numeric(result_df["Rate"], errors='coerce')
         result_df = result_df.dropna().sort_values(by="Rate", ascending=False).reset_index(drop=True)
-        # Normalize Country Keys
         tax_dict = dict(zip(result_df["Country"].str.upper().str.strip(), result_df["Rate"]))
         
-        # Enhanced Mapping for Common Mismatches
+        # Enhanced Mapping
         tax_dict["UNITED STATES"] = tax_dict.get("UNITED STATES OF AMERICA", 25.57)
         tax_dict["USA"] = tax_dict.get("UNITED STATES OF AMERICA", 25.57)
         tax_dict["KOREA"] = tax_dict.get("KOREA (SOUTH)", 26.40)
@@ -387,53 +386,63 @@ def get_target_financials(ticker):
         t = yf.Ticker(ticker)
         info = safe_yf_info(t)
         
-        # [Corrected Country Logic]
-        country_raw = info.get('country', 'Unknown')
-        country_norm = country_raw.upper().strip()
+        country = info.get('country', 'Unknown')
+        country_norm = country.upper().strip()
         
-        # Try exact match, then United States fallback
+        # Enhanced Tax Mapping
         target_tax = tax_map.get(country_norm)
         if target_tax is None:
-            # Handle common variations if not in map
-            if "UNITED STATES" in country_norm: target_tax = 25.57
+            if "UNITED STATES" in country_norm or "USA" in country_norm: target_tax = 25.57
             elif "KOREA" in country_norm: target_tax = 26.40
-            else: target_tax = 25.0 # Default fallback
+            else: target_tax = 25.0 # Default
         
         # Financials Init
         int_exp = 0; ebit = 0; date_str = "N/A"
         category = "Small/Risky Firms"
         
-        # --- Priority 1: Annual Data ---
+        # --- Priority 1: Annual Data (Strictly Latest) ---
         a_fin = t.income_stmt
         if a_fin.empty: a_fin = t.financials
         
+        valid_annual = False
         if not a_fin.empty:
             cols = a_fin.columns
             if len(cols) > 0:
-                date_str = cols[0].strftime('%Y-%m-%d (Annual)')
+                # Try to extract from the very first column (Latest Annual)
+                temp_date_str = cols[0].strftime('%Y-%m-%d (Annual)')
+                temp_int_exp = 0
+                temp_ebit = 0
                 
-                # Interest Expense
-                if 'Interest Expense' in a_fin.index: int_exp = a_fin.loc['Interest Expense'].iloc[0]
-                elif 'Interest Expense Non Operating' in a_fin.index: int_exp = a_fin.loc['Interest Expense Non Operating'].iloc[0]
+                if 'Interest Expense' in a_fin.index: temp_int_exp = a_fin.loc['Interest Expense'].iloc[0]
+                elif 'Interest Expense Non Operating' in a_fin.index: temp_int_exp = a_fin.loc['Interest Expense Non Operating'].iloc[0]
                 
-                # EBIT
-                if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
-                elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
+                if 'EBIT' in a_fin.index: temp_ebit = a_fin.loc['EBIT'].iloc[0]
+                elif 'Operating Income' in a_fin.index: temp_ebit = a_fin.loc['Operating Income'].iloc[0]
                 
-                # Fill NaN with 0
-                if pd.isna(int_exp): int_exp = 0
-                if pd.isna(ebit): ebit = 0
+                # Validation: If both are 0 or NaN, consider it invalid/empty year
+                if (pd.notna(temp_int_exp) and temp_int_exp != 0) or (pd.notna(temp_ebit) and temp_ebit != 0):
+                    int_exp = temp_int_exp
+                    ebit = temp_ebit
+                    date_str = temp_date_str
+                    valid_annual = True
         
-        # --- Priority 2: Yahoo Info (TTM) - No Calc ---
-        # Only if Annual data is missing or zero
-        if int_exp == 0 and ebit == 0:
-            date_str = "TTM (Yahoo Info)"
-            # Info usually lacks Interest Expense, so we keep it 0.
-            # Info usually has EBITDA, we use it as best proxy if EBIT missing
-            ebitda_ttm = info.get('ebitda', 0)
-            if ebitda_ttm > 0:
-                ebit = ebitda_ttm # Best available from info
-            
+        # --- Priority 2: Calculated TTM (Quarterly Sum) ---
+        if not valid_annual:
+            q_fin = t.quarterly_income_stmt
+            if not q_fin.empty and q_fin.shape[1] >= 4:
+                date_str = "TTM (4Q Sum)"
+                recent_4 = q_fin.iloc[:, :4]
+                
+                if 'Interest Expense' in recent_4.index: int_exp = recent_4.loc['Interest Expense'].sum()
+                elif 'Interest Expense Non Operating' in recent_4.index: int_exp = recent_4.loc['Interest Expense Non Operating'].sum()
+                
+                if 'EBIT' in recent_4.index: ebit = recent_4.loc['EBIT'].sum()
+                elif 'Operating Income' in recent_4.index: ebit = recent_4.loc['Operating Income'].sum()
+        
+        # Cleanup
+        if pd.isna(int_exp): int_exp = 0
+        if pd.isna(ebit): ebit = 0
+        
         # Category Detection
         mkt_cap = info.get('marketCap', 0)
         sector = info.get('sector', '')
@@ -447,7 +456,7 @@ def get_target_financials(ticker):
             "date": date_str,
             "category": category,
             "tax_rate": target_tax,
-            "country_name": country_raw
+            "country_name": country
         }
     except: pass
     return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": 25.0, "country_name": "Unknown"}
@@ -517,32 +526,37 @@ class DetailWACCModel:
             a_fin = t.income_stmt
             if a_fin.empty: a_fin = t.financials
             
+            valid_annual = False
             if not a_fin.empty:
-                period_label = a_fin.columns[0].strftime('%Y-%m-%d (Annual)')
-                if 'Total Revenue' in a_fin.index: rev = a_fin.loc['Total Revenue'].iloc[0]
-                
-                if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
-                elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
-                
-                if 'EBITDA' in a_fin.index: ebitda = a_fin.loc['EBITDA'].iloc[0]
-                elif 'Normalized EBITDA' in a_fin.index: ebitda = a_fin.loc['Normalized EBITDA'].iloc[0]
-                
-                # Check for NaNs
-                if pd.isna(rev): rev = 0
-                if pd.isna(ebit): ebit = 0
-                if pd.isna(ebitda): ebitda = 0
+                cols = a_fin.columns
+                if len(cols) > 0:
+                    period_label = cols[0].strftime('%Y-%m-%d (Annual)')
+                    if 'Total Revenue' in a_fin.index: rev = a_fin.loc['Total Revenue'].iloc[0]
+                    
+                    if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
+                    elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
+                    
+                    if 'EBITDA' in a_fin.index: ebitda = a_fin.loc['EBITDA'].iloc[0]
+                    elif 'Normalized EBITDA' in a_fin.index: ebitda = a_fin.loc['Normalized EBITDA'].iloc[0]
+                    
+                    # Validate: If Revenue is 0 or NaN, consider invalid
+                    if pd.notna(rev) and rev != 0:
+                        valid_annual = True
             
-            # --- Priority 2: Yahoo Info (TTM) ---
-            if rev == 0 or ebit == 0:
-                period_label = "TTM (Yahoo Info)"
-                rev_ttm = info.get('totalRevenue', 0)
-                ebitda_ttm = info.get('ebitda', 0)
-                
-                if rev_ttm is not None and rev_ttm > 0:
-                    rev = rev_ttm
-                    if ebitda_ttm is not None: ebitda = ebitda_ttm
-                    # EBIT Proxy from info
-                    if ebit == 0 and ebitda > 0: ebit = ebitda
+            # --- Priority 2: Calculated TTM (Quarterly Sum) ---
+            if not valid_annual:
+                q_fin = t.quarterly_income_stmt
+                if not q_fin.empty and q_fin.shape[1] >= 4:
+                    period_label = "TTM (Calc)"
+                    recent_4 = q_fin.iloc[:, :4]
+                    if 'Total Revenue' in recent_4.index: rev = recent_4.loc['Total Revenue'].sum()
+                    
+                    if 'EBIT' in recent_4.index: ebit = recent_4.loc['EBIT'].sum()
+                    elif 'Operating Income' in recent_4.index: ebit = recent_4.loc['Operating Income'].sum()
+                    
+                    if 'EBITDA' in recent_4.index: ebitda = recent_4.loc['EBITDA'].sum()
+                    # Approx EBITDA if missing
+                    if ebitda == 0 and ebit != 0: ebitda = ebit 
 
             if mkt_cap == 0: 
                 try: mkt_cap = t.fast_info['market_cap']
@@ -550,7 +564,15 @@ class DetailWACCModel:
             
             if rev == 0: return None, f"⚠️ {ticker}: Excluded (Missing Revenue)."
 
-            tax_rate = self.kpmg_map.get(country.upper(), 25.0) 
+            # Use Normalized Country for Peer Tax as well
+            tax_rate = 25.0
+            if country:
+                country_norm = country.upper().strip()
+                tax_rate = self.kpmg_map.get(country_norm, 25.0)
+                if tax_rate == 25.0: # Double check logic
+                     if "UNITED STATES" in country_norm: tax_rate = 25.57
+                     elif "KOREA" in country_norm: tax_rate = 26.40
+
             data = {
                 "name": info.get('longName', ticker), "country": country, "currency": curr_code, "fx_rate": fx, "tax_rate": tax_rate,
                 "vals": { "Revenue": rev * fx, "EBIT": ebit * fx, "EBITDA": ebitda * fx, "Total Debt": debt * fx, "Market Cap": mkt_cap * fx },
@@ -645,9 +667,8 @@ with st.sidebar:
         
         tf = st.session_state['target_fin']
         
-        # Tax Rate Slider
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, float(tf.get('tax_rate', 25.0)), 0.1)
-        st.caption(f"📍 Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown')}**")
+        st.caption(f"📍 Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
         
         st.divider()
         st.markdown("**Target Financials** (for Credit Spread)")
