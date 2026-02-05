@@ -81,7 +81,7 @@ def get_sp_buyback_data():
     except: return default_bb_yield, default_div_yield, None, ["Error"]
 
 # ==============================================================================
-# [MODULE] Data Fetcher 2 & 3: FRED Data (GDP & RF) + OAS Spreads
+# [MODULE] Data Fetcher 2 & 3: FRED Data (GDP & RF) + [FIXED] OAS Spreads
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_fred_data():
@@ -124,31 +124,64 @@ def get_fred_oas_data():
         "Single-B US High Yield": "BAMLH0A2HYB",
         "CCC & Lower US High Yield": "BAMLH0A3HYC"
     }
+    
+    # [SAFETY NET] Hardcoded recent values (Jan 2025 approx) to use if live fetch fails
+    fallback_map = {
+        "AAA US Corporate": 0.45,
+        "AA US Corporate": 0.55,
+        "Single-A US Corporate": 0.75,
+        "BBB US Corporate": 1.05,
+        "BB US High Yield": 1.95,
+        "Single-B US High Yield": 3.10,
+        "CCC & Lower US High Yield": 8.50
+    }
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://fred.stlouisfed.org/"
     }
+    
     data_list = []
+    
     for name, series_id in series_map.items():
+        # [DELAY] Sleep to prevent rate limiting (especially for the first request)
+        time.sleep(random.uniform(0.8, 1.5))
+        
+        fetched = False
         try:
             url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
             r = requests.get(url, headers=headers, timeout=10)
             r.raise_for_status()
+            
             df = pd.read_csv(io.StringIO(r.text))
             df.columns = ["DATE", "VALUE"]
             df["DATE"] = pd.to_datetime(df["DATE"])
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors='coerce')
             df = df.dropna().sort_values(by="DATE", ascending=True)
+            
             if not df.empty:
                 latest_val = df["VALUE"].iloc[-1]
                 latest_date = df["DATE"].iloc[-1].strftime('%Y-%m-%d')
-                data_list.append({"OAS Name": name, "Latest Spread (%)": float(latest_val), "Date": latest_date, "Link": f"https://fred.stlouisfed.org/series/{series_id}"})
-            else:
-                raise ValueError("Empty Data")
+                data_list.append({
+                    "OAS Name": name,
+                    "Latest Spread (%)": float(latest_val),
+                    "Date": latest_date,
+                    "Link": f"https://fred.stlouisfed.org/series/{series_id}"
+                })
+                fetched = True
         except:
-            data_list.append({"OAS Name": name, "Latest Spread (%)": None, "Date": "Error", "Link": f"https://fred.stlouisfed.org/series/{series_id}"})
+            pass # Fail silently and use fallback
+        
+        if not fetched:
+            # Use Fallback so user sees data
+            data_list.append({
+                "OAS Name": name,
+                "Latest Spread (%)": fallback_map.get(name, 0.0),
+                "Date": "Fallback (Live N/A)",
+                "Link": f"https://fred.stlouisfed.org/series/{series_id}"
+            })
+            
     return pd.DataFrame(data_list)
 
 # ==============================================================================
@@ -184,7 +217,7 @@ def get_kpmg_tax_rates():
     except: return None, {}, 2025
 
 # ==============================================================================
-# [MODULE] Data Fetcher 5: Damodaran Ratings (Robust with Fallback)
+# [MODULE] Data Fetcher 5: Damodaran Ratings (Robust with Fallback & N/A Handling)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
@@ -197,8 +230,7 @@ def get_damodaran_spreads():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # [FALLBACK DATA] - 2025 Updated Estimates from Damodaran
-    # Used if live fetch fails.
+    # [FALLBACK DATA]
     fallback_large = pd.DataFrame([
         {"greater than": "8.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
         {"greater than": "6.5", "≤ to": "8.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
@@ -260,17 +292,15 @@ def get_damodaran_spreads():
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         
-        # Try finding the 'Start here Ratings sheet'
         try:
             df = pd.read_excel(io.BytesIO(response.content), sheet_name="Start here Ratings sheet", header=None)
         except:
             df = pd.read_excel(io.BytesIO(response.content), sheet_name=0, header=None)
 
         def extract_block(keyword, has_bounds=True):
-            # 1. Find Title Row
             start_row = -1
             for idx, row in df.iterrows():
                 row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
@@ -280,8 +310,6 @@ def get_damodaran_spreads():
             
             if start_row == -1: return None
             
-            # 2. Find Data Header
-            # Look for ">" or "greater" in next 20 rows
             data_start_row = -1
             marker_col_idx = 0
             
@@ -296,24 +324,44 @@ def get_damodaran_spreads():
                         break
                 if data_start_row != -1: break
             
+            if data_start_row == -1: 
+                # Financials might not have ">" symbol immediately.
+                # If has_bounds is False or specialized, we try finding "Aaa/AAA"
+                if not has_bounds:
+                    for i in range(start_row + 1, start_row + 20):
+                        row_str = " ".join([str(x) for x in df.iloc[i].values]).lower()
+                        if "aaa" in row_str:
+                            data_start_row = i
+                            # Guess col index: find Aaa
+                            for c_idx, cell in enumerate(df.iloc[i]):
+                                if "aaa" in str(cell).lower():
+                                    marker_col_idx = c_idx # This is rating col
+                                    break
+                            break
+            
             if data_start_row == -1: return None
             
-            # 3. Extract Data
             data_rows = []
             for i in range(data_start_row, data_start_row + 20):
                 if i >= len(df): break
                 row = df.iloc[i]
-                
-                # Dynamic column access
                 try:
-                    val_start = row[marker_col_idx]
-                    val_end = row[marker_col_idx + 1]
-                    val_rating = row[marker_col_idx + 2]
-                    val_spread = row[marker_col_idx + 3]
+                    if has_bounds:
+                        val_start = row[marker_col_idx]
+                        val_end = row[marker_col_idx + 1]
+                        val_rating = row[marker_col_idx + 2]
+                        val_spread = row[marker_col_idx + 3]
+                    else:
+                        # Financials fallback structure: [Range Low?] [Range High?] [Rating] [Spread]
+                        # Actually financial table in Damodaran also has bounds columns usually.
+                        # Assuming same structure but robust check
+                        val_rating = row[marker_col_idx]
+                        val_spread = row[marker_col_idx + 1]
+                        val_start = "-"
+                        val_end = "-"
                     
                     if pd.isna(val_rating) or pd.isna(val_spread): break
                     
-                    # Formatting
                     if isinstance(val_spread, (int, float)):
                         spread_fmt = f"{val_spread * 100:.2f}%"
                     else:
@@ -321,6 +369,9 @@ def get_damodaran_spreads():
                         
                     start_str = str(val_start).strip()
                     if start_str == ">": start_str = "greater than"
+                    
+                    if pd.isna(val_start): start_str = "-"
+                    if pd.isna(val_end): val_end = "-"
                     
                     entry = {
                         "greater than": start_str, 
@@ -333,26 +384,22 @@ def get_damodaran_spreads():
                 
             return pd.DataFrame(data_rows) if data_rows else None
 
-        # --- Execute Extraction ---
-        # 1. Large Firms
+        # Execute Extraction
         df_large = extract_block("for large", has_bounds=True)
         if df_large is not None and not df_large.empty: 
             result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
 
-        # 2. Smaller Firms
         df_small = extract_block("for smaller", has_bounds=True)
         if df_small is not None and not df_small.empty: 
             result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
         
-        # 3. Financial Firms
-        # Financials might behave differently, let's try generic bounds extractor first
-        # If headers are different, fallback will be used.
+        # Financials
         df_fin = extract_block("for financial", has_bounds=True)
         if df_fin is not None and not df_fin.empty:
              result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
 
     except Exception as e:
-        pass # Fallback data is already set
+        pass 
 
     return result_dict
 
@@ -852,8 +899,7 @@ if 'result' in st.session_state:
                          })
     with t6:
         damodaran_dict = get_damodaran_spreads()
-        source_note = damodaran_dict["Large Firms"][1]
-        st.caption(f"Source: {source_note}")
+        st.caption(f"Source: NYU Stern (Start here Ratings sheet)")
         
         dt1, dt2, dt3 = st.tabs(["🏭 Large Firms", "🚀 Smaller/Risky Firms", "🏦 Financial Firms"])
         
