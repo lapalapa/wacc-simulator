@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import io
 import time
 import random
+import re
 
 # 페이지 설정
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
@@ -125,14 +126,9 @@ def get_fred_oas_data():
         "CCC & Lower US High Yield": "BAMLH0A3HYC"
     }
     
-    # [SAFETY NET] Hardcoded recent values (Jan 2025 approx)
     fallback_map = {
-        "AAA US Corporate": 0.45,
-        "AA US Corporate": 0.55,
-        "Single-A US Corporate": 0.75,
-        "BBB US Corporate": 1.05,
-        "BB US High Yield": 1.95,
-        "Single-B US High Yield": 3.10,
+        "AAA US Corporate": 0.45, "AA US Corporate": 0.55, "Single-A US Corporate": 0.75,
+        "BBB US Corporate": 1.05, "BB US High Yield": 1.95, "Single-B US High Yield": 3.10,
         "CCC & Lower US High Yield": 8.50
     }
 
@@ -145,13 +141,12 @@ def get_fred_oas_data():
     data_list = []
     
     for name, series_id in series_map.items():
-        time.sleep(random.uniform(0.8, 1.5)) # Anti-bot delay
+        time.sleep(random.uniform(0.5, 1.0)) 
         fetched = False
         try:
             url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
             r = requests.get(url, headers=headers, timeout=10)
             r.raise_for_status()
-            
             df = pd.read_csv(io.StringIO(r.text))
             df.columns = ["DATE", "VALUE"]
             df["DATE"] = pd.to_datetime(df["DATE"])
@@ -162,21 +157,14 @@ def get_fred_oas_data():
                 latest_val = df["VALUE"].iloc[-1]
                 latest_date = df["DATE"].iloc[-1].strftime('%Y-%m-%d')
                 data_list.append({
-                    "OAS Name": name,
-                    "Latest Spread (%)": float(latest_val),
-                    "Date": latest_date,
-                    "Link": f"https://fred.stlouisfed.org/series/{series_id}"
+                    "OAS Name": name, "Latest Spread (%)": float(latest_val), "Date": latest_date, "Link": f"https://fred.stlouisfed.org/series/{series_id}"
                 })
                 fetched = True
-        except:
-            pass
+        except: pass
         
         if not fetched:
             data_list.append({
-                "OAS Name": name,
-                "Latest Spread (%)": fallback_map.get(name, 0.0),
-                "Date": "Fallback (Live N/A)",
-                "Link": f"https://fred.stlouisfed.org/series/{series_id}"
+                "OAS Name": name, "Latest Spread (%)": fallback_map.get(name, 0.0), "Date": "Fallback", "Link": f"https://fred.stlouisfed.org/series/{series_id}"
             })
             
     return pd.DataFrame(data_list)
@@ -214,21 +202,13 @@ def get_kpmg_tax_rates():
     except: return None, {}, 2025
 
 # ==============================================================================
-# [MODULE] Data Fetcher 5: Damodaran Ratings (Fixed Location Parsing)
+# [MODULE] Data Fetcher 5: Damodaran Ratings
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
-    """
-    Downloads ratings.xls and parses specific sections by locating Title Keywords.
-    Crucially, it respects the COLUMN offset of the title to find the correct table
-    (e.g., Financials is often to the right of Large Firms).
-    """
     url = "https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     
-    # [FALLBACK DATA] - 2025 Updated Estimates from Damodaran
     fallback_large = pd.DataFrame([
         {"greater than": "8.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
         {"greater than": "6.5", "≤ to": "8.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
@@ -265,7 +245,6 @@ def get_damodaran_spreads():
         {"greater than": "-100000", "≤ to": "0.49", "Rating": "D2/D", "Spread": "19.00%"}
     ])
     
-    # Financials Fallback (Actual Values)
     fallback_fin = pd.DataFrame([
         {"greater than": "3.0", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
         {"greater than": "2.5", "≤ to": "2.99", "Rating": "Aa2/AA", "Spread": "0.55%"},
@@ -294,107 +273,68 @@ def get_damodaran_spreads():
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         
-        # Try finding the 'Start here Ratings sheet'
         try:
             df = pd.read_excel(io.BytesIO(response.content), sheet_name="Start here Ratings sheet", header=None)
         except:
             df = pd.read_excel(io.BytesIO(response.content), sheet_name=0, header=None)
 
         def extract_block(keyword):
-            start_row = -1
-            start_col = -1
-            
-            # 1. Find Title Position
+            start_row = -1; start_col = -1
             for idx, row in df.iterrows():
                 row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
                 if keyword.lower() in row_str:
                     start_row = idx
-                    # Identify specific column
                     for c_idx, cell in enumerate(row):
                         if keyword.lower() in str(cell).lower():
-                            start_col = c_idx
-                            break
+                            start_col = c_idx; break
                     break
             
             if start_row == -1: return None
             
-            # 2. Find Data Header relative to Title
-            data_start_row = -1
-            marker_col_idx = -1
-            
-            # Search within narrow column range (title col to +5)
-            # Scan down 20 rows
+            data_start_row = -1; marker_col_idx = -1
             for i in range(start_row + 1, start_row + 20):
                 if i >= len(df): break
                 row = df.iloc[i]
-                
-                # Check columns starting from where title was found
-                # Financials might be to the right of Large, so this constraint is key
                 search_cols = range(max(0, start_col - 2), min(len(row), start_col + 10))
-                
                 for c_idx in search_cols:
                     cell_str = str(row[c_idx]).strip().lower()
                     if cell_str.startswith(">") or "greater" in cell_str:
-                        data_start_row = i
-                        marker_col_idx = c_idx
-                        break
+                        data_start_row = i; marker_col_idx = c_idx; break
                 if data_start_row != -1: break
             
             if data_start_row == -1: return None
             
-            # 3. Extract Data
             data_rows = []
             for i in range(data_start_row, data_start_row + 20):
                 if i >= len(df): break
                 row = df.iloc[i]
-                
                 try:
                     val_start = row[marker_col_idx]
                     val_end = row[marker_col_idx + 1]
                     val_rating = row[marker_col_idx + 2]
                     val_spread = row[marker_col_idx + 3]
-                    
                     if pd.isna(val_rating) or pd.isna(val_spread): break
-                    
-                    if isinstance(val_spread, (int, float)):
-                        spread_fmt = f"{val_spread * 100:.2f}%"
-                    else:
-                        spread_fmt = str(val_spread)
-                        
+                    if isinstance(val_spread, (int, float)): spread_fmt = f"{val_spread * 100:.2f}%"
+                    else: spread_fmt = str(val_spread)
                     start_str = str(val_start).strip()
                     if start_str == ">": start_str = "greater than"
-                    
-                    entry = {
-                        "greater than": start_str, 
-                        "≤ to": val_end,
-                        "Rating": str(val_rating), 
-                        "Spread": spread_fmt
-                    }
+                    entry = {"greater than": start_str, "≤ to": val_end, "Rating": str(val_rating), "Spread": spread_fmt}
                     data_rows.append(entry)
                 except: continue
-                
             return pd.DataFrame(data_rows) if data_rows else None
 
-        # --- Execute Extraction ---
         df_large = extract_block("for large")
-        if df_large is not None and not df_large.empty: 
-            result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
-
+        if df_large is not None and not df_large.empty: result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
         df_small = extract_block("for smaller")
-        if df_small is not None and not df_small.empty: 
-            result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
-        
+        if df_small is not None and not df_small.empty: result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
         df_fin = extract_block("for financial")
-        if df_fin is not None and not df_fin.empty:
-             result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
+        if df_fin is not None and not df_fin.empty: result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
 
-    except Exception as e:
-        pass 
-
+    except Exception: pass
     return result_dict
 
 # ==============================================================================
-# [MODULE] Peer Recommender
+# [MODULE] Peer Recommender & Financials
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
@@ -417,12 +357,10 @@ class PeerRecommender:
             sec_key = info.get('sectorKey')
             group_name = "Unknown"
             top_df = None
-            
             if ind_key: industry = yf.Industry(ind_key); top_df = industry.top_companies; group_name = f"Industry: {ind_key}"
             elif sec_key: sector = yf.Sector(sec_key); top_df = sector.top_companies; group_name = f"Sector: {sec_key}"
             
             if top_df is None or top_df.empty: return None, group_name, ["No peers found"]
-
             raw_list = top_df['symbol'].tolist() if 'symbol' in top_df.columns else top_df.index.tolist()
             candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
             
@@ -433,11 +371,52 @@ class PeerRecommender:
                 rev = self.get_revenue(ticker)
                 revenue_map.append((ticker, rev))
                 if progress_bar: progress_bar.progress(0.2 + (0.8 * (idx/len(candidates))), text=f"Analyzing {ticker}...")
-            
             revenue_map.sort(key=lambda x: x[1], reverse=True)
             top_5 = [item[0] for item in revenue_map][:5]
             return ", ".join(top_5), group_name, []
         except Exception as e: return None, "Error", [str(e)]
+
+def get_target_financials(ticker):
+    try:
+        t = yf.Ticker(ticker)
+        info = safe_yf_info(t)
+        
+        # Get Financials (Income Statement)
+        inc = t.income_stmt
+        if inc.empty: inc = t.financials
+        
+        if not inc.empty:
+            date_str = inc.columns[0].strftime('%Y-%m-%d')
+            # Extract Interest Expense
+            if 'Interest Expense' in inc.index: int_exp = inc.loc['Interest Expense'].iloc[0]
+            elif 'Interest Expense Non Operating' in inc.index: int_exp = inc.loc['Interest Expense Non Operating'].iloc[0]
+            else: int_exp = 0
+            
+            # Extract EBIT
+            if 'EBIT' in inc.index: ebit = inc.loc['EBIT'].iloc[0]
+            elif 'Operating Income' in inc.index: ebit = inc.loc['Operating Income'].iloc[0] # Fallback
+            else: ebit = 0
+            
+            # Fill NaN with 0
+            if pd.isna(int_exp): int_exp = 0
+            if pd.isna(ebit): ebit = 0
+            
+            # Category Detection
+            mkt_cap = info.get('marketCap', 0)
+            sector = info.get('sector', '')
+            
+            if 'Financial' in sector: category = "Financial Firms"
+            elif mkt_cap > 5e9: category = "Large Firms" # $5 Billion
+            else: category = "Small/Risky Firms"
+            
+            return {
+                "int_exp": abs(int_exp), # Interest is usually negative in Yahoo
+                "ebit": ebit,
+                "date": date_str,
+                "category": category
+            }
+    except: pass
+    return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms"}
 
 # ==============================================================================
 # [LOGIC] WACC Engine
@@ -485,21 +464,14 @@ class DetailWACCModel:
         except: return 1.0, currency
 
     def get_financials_latest(self, ticker):
-        # [STRICT MODE] Fail if critical data is missing
         try:
             t = yf.Ticker(ticker)
             info = safe_yf_info(t)
-            
-            if not info:
-                return None, f"⚠️ {ticker}: No data found in Yahoo Finance."
-
+            if not info: return None, f"⚠️ {ticker}: No data found."
             curr = info.get('currency', 'USD')
             country = info.get('country', 'Unknown')
             fx, curr_code = self.get_exchange_rate_to_usd(curr)
-            
             mkt_cap_raw = info.get('marketCap', 0)
-            
-            # Debt Fallback Logic
             debt_raw = info.get('totalDebt', 0)
             if debt_raw == 0:
                 try:
@@ -509,11 +481,9 @@ class DetailWACCModel:
                             if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
                 except: pass
             
-            # Revenue Fallback Logic
             rev_raw = info.get('totalRevenue', 0)
             ebitda_raw = info.get('ebitda', 0)
             ebit_raw = 0
-            
             try:
                 fin = t.financials
                 if not fin.empty:
@@ -522,136 +492,74 @@ class DetailWACCModel:
                     if rev_raw == 0 and 'Total Revenue' in fin.index: rev_raw = fin.loc['Total Revenue'].iloc[0]
             except: pass
             
-            # [STRICT VALIDATION]
             if mkt_cap_raw == 0: 
-                try:
-                    mkt_cap_raw = t.fast_info['market_cap']
-                except:
-                    return None, f"⚠️ {ticker}: Excluded (Missing Market Cap/Price Data)."
-            
-            if rev_raw == 0:
-                 return None, f"⚠️ {ticker}: Excluded (Missing Revenue Data)."
+                try: mkt_cap_raw = t.fast_info['market_cap']
+                except: return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)."
+            if rev_raw == 0: return None, f"⚠️ {ticker}: Excluded (Missing Revenue)."
 
-            # Tax Rate Lookup (KPMG)
             tax_rate = self.kpmg_map.get(country.upper(), 25.0) 
-
             data = {
-                "name": info.get('longName', ticker),
-                "country": country,
-                "currency": curr_code,
-                "fx_rate": fx,
-                "tax_rate": tax_rate,
-                "vals": {
-                    "Revenue": rev_raw * fx,
-                    "EBIT": ebit_raw * fx,
-                    "EBITDA": ebitda_raw * fx,
-                    "Total Debt": debt_raw * fx,
-                    "Market Cap": mkt_cap_raw * fx
-                }
+                "name": info.get('longName', ticker), "country": country, "currency": curr_code, "fx_rate": fx, "tax_rate": tax_rate,
+                "vals": { "Revenue": rev_raw * fx, "EBIT": ebit_raw * fx, "EBITDA": ebitda_raw * fx, "Total Debt": debt_raw * fx, "Market Cap": mkt_cap_raw * fx }
             }
             return data, None
-        except Exception as e: 
-            return None, f"⚠️ {ticker}: Excluded (API Error: {str(e)})"
+        except Exception as e: return None, f"⚠️ {ticker}: Excluded (API Error: {str(e)})"
 
     def get_5y_monthly_beta_analysis(self):
         try:
             tickers = self.peers + [self.market_index]
             tickers = list(set([t.strip().upper() for t in tickers if t.strip()]))
             data = yf.download(tickers, period="5y", interval="1mo", progress=False)
-            
             prices = data['Adj Close'] if 'Adj Close' in data else data['Close'] if 'Close' in data else None
             if prices is None: return None, None, None, ["Price Error: Failed to download price data."]
             if isinstance(prices, pd.Series): prices = prices.to_frame()
-
             returns = prices.pct_change()
             if self.market_index not in returns.columns: return None, None, None, ["Market Index Error: ^GSPC not found."]
-            
             beta_list = []
-            
             for t in self.peers:
                 t_up = t.strip().upper()
                 if t_up in returns.columns:
                     pair = returns[[t_up, self.market_index]].dropna()
-                    if len(pair) < 12:
-                        beta_list.append({"Ticker": t, "Raw Beta": np.nan, "Adj Beta": np.nan})
-                        continue
-                    cov = pair[t_up].cov(pair[self.market_index])
-                    var = pair[self.market_index].var()
-                    raw = cov / var
-                    adj = (0.67 * raw) + (0.33 * 1.0)
+                    if len(pair) < 12: beta_list.append({"Ticker": t, "Raw Beta": np.nan, "Adj Beta": np.nan}); continue
+                    cov = pair[t_up].cov(pair[self.market_index]); var = pair[self.market_index].var()
+                    raw = cov / var; adj = (0.67 * raw) + (0.33 * 1.0)
                     beta_list.append({"Ticker": t, "Raw Beta": raw, "Adj Beta": adj})
-                else:
-                    beta_list.append({"Ticker": t, "Raw Beta": np.nan, "Adj Beta": np.nan})
-            
+                else: beta_list.append({"Ticker": t, "Raw Beta": np.nan, "Adj Beta": np.nan})
             prices_disp = prices.copy(); prices_disp.index = prices_disp.index.strftime('%Y-%m-%d')
             return pd.DataFrame(beta_list), prices_disp, None, []
         except Exception as e: return None, None, None, [str(e)]
 
     def run(self):
-        # 1. Get Beta Data
         beta_df, prices, _, beta_err = self.get_5y_monthly_beta_analysis()
         error_logs = beta_err if beta_err else []
-        
-        # 2. Get Financials with Throttling & Strict Filtering
         peer_data = []
         progress_text = st.empty()
         
         for idx, p in enumerate(self.peers):
             progress_text.text(f"⏳ Analyzing {p} ({idx+1}/{len(self.peers)})...")
-            time.sleep(random.uniform(1.5, 3.0)) 
-            
+            time.sleep(random.uniform(1.0, 2.0)) 
             fin, err = self.get_financials_latest(p)
-            if err:
-                error_logs.append(err)
-                continue # Skip bad peer
-            
+            if err: error_logs.append(err); continue 
             if fin:
-                d = fin['vals']
-                equity = d['Market Cap']
-                debt = d['Total Debt']
-                tic = equity + debt
-                de_ratio = debt / equity if equity > 0 else 0.0
-                dtic_ratio = debt / tic if tic > 0 else 0.0
-                
+                d = fin['vals']; equity = d['Market Cap']; debt = d['Total Debt']; tic = equity + debt
+                de_ratio = debt / equity if equity > 0 else 0.0; dtic_ratio = debt / tic if tic > 0 else 0.0
                 peer_data.append({
-                    "Ticker": p,
-                    "Company Name": fin['name'],
-                    "Company": fin['name'], # Alias for easier access
-                    "Country": fin['country'],
-                    "Tax Rate": fin['tax_rate'], 
-                    "Currency": fin['currency'],
-                    "FX Rate": fin['fx_rate'],
-                    "Revenue": d['Revenue'],
-                    "EBIT": d['EBIT'],
-                    "EBITDA": d['EBITDA'],
-                    "Total Debt": d['Total Debt'],
-                    "Market Cap": d['Market Cap'],
-                    "D/E Ratio": de_ratio,
-                    "Debt/TIC Ratio": dtic_ratio
+                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Country": fin['country'],
+                    "Tax Rate": fin['tax_rate'], "Currency": fin['currency'], "FX Rate": fin['fx_rate'],
+                    "Revenue": d['Revenue'], "EBIT": d['EBIT'], "EBITDA": d['EBITDA'], "Total Debt": d['Total Debt'],
+                    "Market Cap": d['Market Cap'], "D/E Ratio": de_ratio, "Debt/TIC Ratio": dtic_ratio
                 })
-        
         progress_text.empty()
-        
         df_peers = pd.DataFrame(peer_data)
-        
-        # 3. Merge
         if beta_df is not None and not beta_df.empty and not df_peers.empty:
-            beta_df['Ticker'] = beta_df['Ticker'].str.upper().str.strip()
-            df_peers['Ticker'] = df_peers['Ticker'].str.upper().str.strip()
+            beta_df['Ticker'] = beta_df['Ticker'].str.upper().str.strip(); df_peers['Ticker'] = df_peers['Ticker'].str.upper().str.strip()
             full_df = pd.merge(df_peers, beta_df, on="Ticker", how="left")
-        else:
-            full_df = pd.DataFrame()
+        else: full_df = pd.DataFrame()
 
-        rm = self.div_yield + self.buyback_yield + self.growth_rate
-        mrp = rm - self.rf
-
+        rm = self.div_yield + self.buyback_yield + self.growth_rate; mrp = rm - self.rf
         return {
-            "full_df": full_df,
-            "prices": prices,
-            "market_params": {"Rm": rm, "MRP": mrp},
-            "rf_trend": self.rf_trend_df,
-            "gdp_df": self.gdp_df,
-            "errors": error_logs
+            "full_df": full_df, "prices": prices, "market_params": {"Rm": rm, "MRP": mrp},
+            "rf_trend": self.rf_trend_df, "gdp_df": self.gdp_df, "errors": error_logs
         }
 
 # ==============================================================================
@@ -661,7 +569,6 @@ with st.sidebar:
     st.header("Target & Peers")
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
-    # [UI FIX] Removed column split to make button full width
     if st.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary", use_container_width=True):
         with st.spinner("Finding..."):
             rec = PeerRecommender()
@@ -688,6 +595,23 @@ with st.sidebar:
         
     with st.expander("Target Assumptions", expanded=True):
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, 25.0, 1.0)
+        
+        # [NEW] Target Financials Fetch & Input
+        if 'target_fin' not in st.session_state or st.session_state.get('last_ticker') != target_ticker:
+            st.session_state['target_fin'] = get_target_financials(target_ticker)
+            st.session_state['last_ticker'] = target_ticker
+        
+        tf = st.session_state['target_fin']
+        
+        st.markdown("**Target Financials** (for Credit Spread)")
+        st.caption(f"Data Date: {tf['date']}")
+        
+        int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
+        ebit_in = st.number_input("EBIT ($)", value=float(tf['ebit']), format="%.0f")
+        
+        cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
+        cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
+        category_in = st.selectbox("Firm Category", cat_options, index=cat_default_idx)
 
     st.divider()
     if st.button("Calculate WACC", type="primary", use_container_width=True):
@@ -699,7 +623,8 @@ with st.sidebar:
             st.session_state['result'] = model.run()
             st.session_state['inputs'] = {
                 'rf': rf_in, 'crp': crp_in, 'sp': size_in, 'tax': tax_in,
-                'bb': bb_in, 'div': div_in, 'g': g_in
+                'bb': bb_in, 'div': div_in, 'g': g_in,
+                'int_exp': int_exp_in, 'ebit': ebit_in, 'category': category_in
             }
 
 if 'result' in st.session_state:
@@ -708,17 +633,14 @@ if 'result' in st.session_state:
     df_init = res['full_df']
     m = res['market_params']
     
-    # 1. Top Container for Results
+    # 1. Beta & Structure
     results_container = st.container()
-    
-    # 2. Beta Analysis Section
     st.subheader("Beta Analysis")
     sens_method = st.radio("Sensitivity Selection (Aggregation Method)", 
                            ["Average", "Median", "Maximum", "Minimum"], horizontal=True, index=1)
 
     target_relevered_beta=0; ke=0; kd=0; wacc=0; wd=0; we=0; target_de=0; sel_dtic=0
 
-    # Display Excluded Peers (Transparency)
     if res.get('errors'):
         st.error("⚠️ The following peers were excluded due to missing critical data (Strict Validation):")
         for e in res['errors']: st.write(f"- {e}")
@@ -748,8 +670,56 @@ if 'result' in st.session_state:
         calc_df["Re-levered Beta"] = calc_df["Unlevered Beta"] * (1 + (1 - inp['tax']/100) * target_de)
         
         ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
-        spread = 0.02
-        kd = ((inp['rf']/100) + spread) * (1 - inp['tax']/100)
+        
+        # [LOGIC] Determine Spread from ICR
+        icr = inp['ebit'] / inp['int_exp'] if inp['int_exp'] > 0 else 100.0 # High ICR if no interest
+        
+        # 1. Get Table
+        damodaran_dict = get_damodaran_spreads()
+        rating_table, _ = damodaran_dict.get(inp['category'], (None, ""))
+        
+        implied_rating = "N/A"
+        implied_spread_val = 2.00 # Default fallback
+        
+        if rating_table is not None:
+            # Sort by limit to find range
+            # Format is string usually, need to parse
+            for idx, row in rating_table.iterrows():
+                try:
+                    # Clean bounds
+                    low_v = float(str(row.get('greater than','-')).replace('greater than','').replace('-','-99999').strip())
+                    high_v = float(str(row.get('≤ to','-')).replace('-','99999').strip())
+                    
+                    if low_v < icr <= high_v:
+                        implied_rating = row['Rating']
+                        # Parse spread string "0.40%" -> 0.40
+                        spread_str = str(row['Spread']).replace('%','')
+                        implied_spread_val = float(spread_str)
+                        break
+                except: continue
+        
+        # 2. Map Rating to OAS
+        fred_oas = get_fred_oas_data()
+        
+        # Map Damodaran Ratings to FRED Keys
+        rating_map = {
+            "Aaa/AAA": "AAA US Corporate", "Aa2/AA": "AA US Corporate", 
+            "A1/A+": "Single-A US Corporate", "A2/A": "Single-A US Corporate", "A3/A-": "Single-A US Corporate",
+            "Baa2/BBB": "BBB US Corporate", 
+            "Ba1/BB+": "BB US High Yield", "Ba2/BB": "BB US High Yield",
+            "B1/B+": "Single-B US High Yield", "B2/B": "Single-B US High Yield", "B3/B-": "Single-B US High Yield",
+            "Caa/CCC": "CCC & Lower US High Yield", "Ca2/CC": "CCC & Lower US High Yield", "C2/C": "CCC & Lower US High Yield", "D2/D": "CCC & Lower US High Yield"
+        }
+        
+        target_fred_key = rating_map.get(implied_rating, "BB US High Yield") # Default to BB
+        
+        # Find Spread in FRED Data
+        final_spread = implied_spread_val # Use Damodaran spread as base, but try to overwrite with FRED
+        fred_row = fred_oas[fred_oas['OAS Name'] == target_fred_key]
+        if not fred_row.empty:
+            final_spread = fred_row.iloc[0]['Latest Spread (%)']
+            
+        kd = ((inp['rf'] + final_spread)/100) * (1 - inp['tax']/100)
         wd = sel_dtic
         we = 1 - sel_dtic
         wacc = (we * ke) + (wd * kd)
@@ -808,7 +778,7 @@ if 'result' in st.session_state:
             with cd:
                 st.markdown("**Cost of Debt ($K_d$)**")
                 st.latex(r"K_d = (R_f + \text{Spread}) \times (1 - T_{target})")
-                st.info(f"({inp['rf']:.2f}% + 2.00%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**")
+                st.info(f"({inp['rf']:.2f}% + {final_spread:.2f}%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**")
             with cw:
                 st.markdown("**WACC Weighting**")
                 st.latex(r"WACC = K_e \cdot W_e + K_d \cdot W_d")
@@ -831,13 +801,22 @@ if 'result' in st.session_state:
 
     st.markdown("---")
     st.subheader("Cost of Debt")
+    
+    # [NEW] Target Credit Spread Section
+    with st.expander("🎯 Target Credit Spread Calculation", expanded=True):
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Interest Coverage Ratio", f"{icr:.2f}x")
+        sc2.metric("Firm Category", inp['category'])
+        sc3.metric("Implied Rating", implied_rating)
+        sc4.metric("Implied OAS Spread", f"{final_spread:.2f}%", help=f"Mapped to FRED: {target_fred_key}")
+        st.caption(f"Based on {inp['category']} Table from Damodaran. ICR = EBIT / Interest Exp = {inp['ebit']:,.0f} / {inp['int_exp']:,.0f}")
+
     st.latex(r"K_d = (R_f + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
-    spread = 2.0
-    st.info(f"**Calculation:** ({inp['rf']:.2f}% + {spread:.2f}%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**")
+    st.info(f"**Calculation:** ({inp['rf']:.2f}% + {final_spread:.2f}%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**")
     d1, d2, d3, d4, d5 = st.columns(5)
     d1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
-    d2.metric("Credit Spread", f"{spread:.2f}%")
-    d3.metric("Pre-tax Cost of Debt", f"{(inp['rf'] + spread):.2f}%")
+    d2.metric("Credit Spread (OAS)", f"{final_spread:.2f}%")
+    d3.metric("Pre-tax Cost of Debt", f"{(inp['rf'] + final_spread):.2f}%")
     d4.metric("Tax Rate", f"{inp['tax']:.1f}%")
     d5.metric("After-tax Cost of Debt", f"{kd:.2%}")
 
