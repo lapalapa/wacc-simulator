@@ -15,9 +15,6 @@ st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 # [MODULE] Helper: Safe Fetcher with Retry
 # ==============================================================================
 def safe_yf_info(ticker_obj, max_retries=3):
-    """
-    yfinance info fetching with retry logic to handle Rate Limiting (429).
-    """
     for i in range(max_retries):
         try:
             return ticker_obj.info
@@ -118,9 +115,6 @@ def get_fred_data():
 
 @st.cache_data(ttl=3600*24)
 def get_fred_oas_data():
-    """
-    Fetches US Corporate Option-Adjusted Spread (OAS) for various ratings with robust headers.
-    """
     series_map = {
         "AAA US Corporate": "BAMLC0A1CAAA",
         "AA US Corporate": "BAMLC0A2CAA",
@@ -130,53 +124,35 @@ def get_fred_oas_data():
         "Single-B US High Yield": "BAMLH0A2HYB",
         "CCC & Lower US High Yield": "BAMLH0A3HYC"
     }
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Referer": "https://fred.stlouisfed.org/"
     }
-    
     data_list = []
-    
     for name, series_id in series_map.items():
         try:
             url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
             r = requests.get(url, headers=headers, timeout=10)
             r.raise_for_status()
-            
             df = pd.read_csv(io.StringIO(r.text))
             df.columns = ["DATE", "VALUE"]
             df["DATE"] = pd.to_datetime(df["DATE"])
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors='coerce')
             df = df.dropna().sort_values(by="DATE", ascending=True)
-            
             if not df.empty:
                 latest_val = df["VALUE"].iloc[-1]
                 latest_date = df["DATE"].iloc[-1].strftime('%Y-%m-%d')
-                
-                data_list.append({
-                    "OAS Name": name,
-                    "Latest Spread (%)": float(latest_val),
-                    "Date": latest_date,
-                    "Link": f"https://fred.stlouisfed.org/series/{series_id}" # Full URL for LinkColumn
-                })
+                data_list.append({"OAS Name": name, "Latest Spread (%)": float(latest_val), "Date": latest_date, "Link": f"https://fred.stlouisfed.org/series/{series_id}"})
             else:
                 raise ValueError("Empty Data")
-                
-        except Exception:
-            data_list.append({
-                "OAS Name": name,
-                "Latest Spread (%)": None,
-                "Date": "Error",
-                "Link": f"https://fred.stlouisfed.org/series/{series_id}"
-            })
-            
+        except:
+            data_list.append({"OAS Name": name, "Latest Spread (%)": None, "Date": "Error", "Link": f"https://fred.stlouisfed.org/series/{series_id}"})
     return pd.DataFrame(data_list)
 
 # ==============================================================================
-# [MODULE] Data Fetcher 4: KPMG Tax Rates (Live Scraping)
+# [MODULE] Data Fetcher 4: KPMG Tax Rates
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_kpmg_tax_rates():
@@ -192,139 +168,138 @@ def get_kpmg_tax_rates():
             if any("2024" in c or "2025" in c for c in cols_str):
                 target_df = df; break
         if target_df is None: return None, {}, 2025
-
         target_df.rename(columns={target_df.columns[0]: "Country"}, inplace=True)
         available_years = [int(c) for c in target_df.columns if str(c).isdigit()]
         if not available_years: return None, {}, 2025
-        
         latest_year = max(available_years)
         col_name = str(latest_year)
-        
         result_df = target_df[["Country", col_name]].copy()
         result_df.columns = ["Country", f"Rate"]
         result_df["Rate"] = pd.to_numeric(result_df["Rate"], errors='coerce')
         result_df = result_df.dropna().sort_values(by="Rate", ascending=False).reset_index(drop=True)
-        
-        # Mapping Dictionary
         tax_dict = dict(zip(result_df["Country"].str.upper().str.strip(), result_df["Rate"]))
         tax_dict["UNITED STATES"] = tax_dict.get("UNITED STATES OF AMERICA", 25.57)
         tax_dict["KOREA"] = tax_dict.get("KOREA (SOUTH)", 26.40)
-        
         return result_df, tax_dict, latest_year
     except: return None, {}, 2025
 
 # ==============================================================================
-# [MODULE] Data Fetcher 5: Damodaran Ratings (Live Scraping)
+# [MODULE] Data Fetcher 5: Damodaran Ratings (Multi-Table Extract)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
     """
-    Extracts Interest Coverage Ratio -> Rating -> Spread table from ratings.xls.
-    Source: https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls
+    Extracts multiple tables (Large, Small, Financials) from ratings.xls.
     """
     url = "https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # Fallback Data (In case scraping/parsing fails)
-    fallback_data = [
-        {">": -100000, "≤ to": 0.199999, "Rating": "D2/D", "Spread": "19.00%"},
-        {">": 0.2, "≤ to": 0.649999, "Rating": "C2/C", "Spread": "16.00%"},
-        {">": 0.65, "≤ to": 0.799999, "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {">": 0.8, "≤ to": 1.249999, "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {">": 1.25, "≤ to": 1.499999, "Rating": "B3/B-", "Spread": "5.09%"},
-        {">": 1.5, "≤ to": 1.749999, "Rating": "B2/B", "Spread": "3.21%"},
-        {">": 1.75, "≤ to": 1.999999, "Rating": "B1/B+", "Spread": "2.75%"},
-        {">": 2.0, "≤ to": 2.2499999, "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {">": 2.25, "≤ to": 2.49999, "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {">": 2.5, "≤ to": 2.999999, "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {">": 3.0, "≤ to": 4.249999, "Rating": "A3/A-", "Spread": "0.89%"},
-        {">": 4.25, "≤ to": 5.499999, "Rating": "A2/A", "Spread": "0.78%"},
-        {">": 5.5, "≤ to": 6.499999, "Rating": "A1/A+", "Spread": "0.70%"},
-        {">": 6.5, "≤ to": 8.499999, "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {">": 8.5, "≤ to": 100000, "Rating": "Aaa/AAA", "Spread": "0.40%"}
+    # Define Fallback Data
+    fallback_large = [
+        {">": 8.5, "≤ to": 100000, "Rating": "Aaa/AAA", "Spread": "0.40%"},
+        {">": 6.5, "≤ to": 8.49, "Rating": "Aa2/AA", "Spread": "0.55%"},
+        {">": 5.5, "≤ to": 6.49, "Rating": "A1/A+", "Spread": "0.70%"},
+        {">": 4.25, "≤ to": 5.49, "Rating": "A2/A", "Spread": "0.78%"},
+        {">": 3.0, "≤ to": 4.24, "Rating": "A3/A-", "Spread": "0.89%"},
+        {">": 2.5, "≤ to": 2.99, "Rating": "Baa2/BBB", "Spread": "1.11%"},
+        {">": 2.25, "≤ to": 2.49, "Rating": "Ba1/BB+", "Spread": "1.38%"},
+        {">": 2.0, "≤ to": 2.24, "Rating": "Ba2/BB", "Spread": "1.84%"},
+        {">": 1.75, "≤ to": 1.99, "Rating": "B1/B+", "Spread": "2.75%"},
+        {">": 1.5, "≤ to": 1.74, "Rating": "B2/B", "Spread": "3.21%"},
+        {">": 1.25, "≤ to": 1.49, "Rating": "B3/B-", "Spread": "5.09%"},
+        {">": 0.8, "≤ to": 1.24, "Rating": "Caa/CCC", "Spread": "8.85%"},
+        {">": 0.65, "≤ to": 0.79, "Rating": "Ca2/CC", "Spread": "12.61%"},
+        {">": 0.2, "≤ to": 0.64, "Rating": "C2/C", "Spread": "16.00%"},
+        {">": -100000, "≤ to": 0.19, "Rating": "D2/D", "Spread": "19.00%"}
     ]
+    
+    fallback_small = [
+        {">": 12.5, "≤ to": 100000, "Rating": "Aaa/AAA", "Spread": "0.40%"},
+        {">": 9.5, "≤ to": 12.49, "Rating": "Aa2/AA", "Spread": "0.55%"},
+        {">": 7.5, "≤ to": 9.49, "Rating": "A1/A+", "Spread": "0.70%"},
+        {">": 6.0, "≤ to": 7.49, "Rating": "A2/A", "Spread": "0.78%"},
+        {">": 4.5, "≤ to": 5.99, "Rating": "A3/A-", "Spread": "0.89%"},
+        {">": 4.0, "≤ to": 4.49, "Rating": "Baa2/BBB", "Spread": "1.11%"},
+        {">": 3.5, "≤ to": 3.99, "Rating": "Ba1/BB+", "Spread": "1.38%"},
+        {">": 3.0, "≤ to": 3.49, "Rating": "Ba2/BB", "Spread": "1.84%"},
+        {">": 2.5, "≤ to": 2.99, "Rating": "B1/B+", "Spread": "2.75%"},
+        {">": 2.0, "≤ to": 2.49, "Rating": "B2/B", "Spread": "3.21%"},
+        {">": 1.5, "≤ to": 1.99, "Rating": "B3/B-", "Spread": "5.09%"},
+        {">": 1.25, "≤ to": 1.49, "Rating": "Caa/CCC", "Spread": "8.85%"},
+        {">": 0.8, "≤ to": 1.24, "Rating": "Ca2/CC", "Spread": "12.61%"},
+        {">": 0.5, "≤ to": 0.79, "Rating": "C2/C", "Spread": "16.00%"},
+        {">": -100000, "≤ to": 0.49, "Rating": "D2/D", "Spread": "19.00%"}
+    ]
+
+    result_dict = {
+        "Large Firms": (pd.DataFrame(fallback_large), "Fallback Data"),
+        "Small/Risky Firms": (pd.DataFrame(fallback_small), "Fallback Data"),
+        "Financial Firms": (None, "Fallback: Ratios not applicable")
+    }
 
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        
-        # Try reading with pandas (xlrd engine required for .xls)
-        # Note: If environment lacks xlrd, this jumps to except
         df = pd.read_excel(io.BytesIO(response.content), header=None)
         
-        # Locate the table for "For large non-financial service firms"
-        start_row = -1
-        for idx, row in df.iterrows():
-            # Check first few columns for the keyword
-            row_str = " ".join([str(x) for x in row.values if pd.notna(x)])
-            if "For large non-financial service firms" in row_str:
-                start_row = idx
-                break
-        
-        if start_row == -1:
-            return pd.DataFrame(fallback_data), "Source: Fallback Data (Parsing Failed)"
-
-        # The table usually starts shortly after the title
-        # Based on structure: Title -> Header(If interest...) -> Header(> <= Rating Spread)
-        # We look for the row starting with ">"
-        
-        header_row = -1
-        for i in range(start_row, start_row + 10):
-            if i >= len(df): break
-            # Check if column 0 is '>' or similar
-            val = str(df.iloc[i, 0]).strip()
-            if val == ">":
-                header_row = i
-                break
-        
-        if header_row == -1:
-             return pd.DataFrame(fallback_data), "Source: Fallback Data (Header Not Found)"
-
-        # Extract Data
-        # Columns typically: A(>), B(<=), C(Rating), D(Spread)
-        # Verify columns by checking header row
-        # We assume standard layout: Col 0: >, Col 1: <=, Col 2: Rating, Col 3: Spread
-        
-        data_rows = []
-        # Iterate until we hit an empty row or non-numeric
-        for i in range(header_row + 1, len(df)):
-            row = df.iloc[i]
-            val_low = row[0]
-            val_high = row[1]
-            val_rating = row[2]
-            val_spread = row[3]
+        # Helper to extract table based on title keyword
+        def extract_table(keyword):
+            start_row = -1
+            for idx, row in df.iterrows():
+                row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
+                if keyword.lower() in row_str:
+                    start_row = idx
+                    break
             
-            # Stop if rating is NaN or spread is NaN (End of table)
-            if pd.isna(val_rating) or pd.isna(val_spread):
-                break
-                
-            # Clean values
-            try:
-                # Spread might be a float (0.19) or string ("19%")
-                if isinstance(val_spread, (int, float)):
-                    spread_fmt = f"{val_spread * 100:.2f}%"
-                else:
-                    spread_fmt = str(val_spread)
-                
-                data_rows.append({
-                    ">": val_low,
-                    "≤ to": val_high,
-                    "Rating": str(val_rating),
-                    "Spread": spread_fmt
-                })
-            except:
-                continue
-                
-        if not data_rows:
-             return pd.DataFrame(fallback_data), "Source: Fallback Data (Extraction Empty)"
-             
-        return pd.DataFrame(data_rows), "Source: NYU Stern (Live Extract)"
+            if start_row == -1: return None
+            
+            # Find header row (starts with '>')
+            header_row = -1
+            for i in range(start_row, start_row + 15):
+                if i >= len(df): break
+                val = str(df.iloc[i, 0]).strip()
+                if val == ">":
+                    header_row = i
+                    break
+            
+            if header_row == -1: return None
+            
+            data_rows = []
+            for i in range(header_row + 1, len(df)):
+                row = df.iloc[i]
+                if pd.isna(row[2]) or pd.isna(row[3]): break # Stop at empty
+                try:
+                    val_spread = row[3]
+                    spread_fmt = f"{val_spread * 100:.2f}%" if isinstance(val_spread, (int, float)) else str(val_spread)
+                    data_rows.append({
+                        ">": row[0], "≤ to": row[1], "Rating": str(row[2]), "Spread": spread_fmt
+                    })
+                except: continue
+            
+            return pd.DataFrame(data_rows) if data_rows else None
+
+        # 1. Large Firms
+        df_large = extract_table("large non-financial service firms")
+        if df_large is not None: result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live)")
+
+        # 2. Small/Risky Firms
+        df_small = extract_table("smaller and riskier firms")
+        if df_small is not None: result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live)")
+        
+        # 3. Financial Firms (Check if exists)
+        df_fin = extract_table("financial service firms")
+        if df_fin is not None: 
+            result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live)")
+        else:
+            # Financials usually don't have ratio tables in this file
+            result_dict["Financial Firms"] = (None, "Note: Interest Coverage Ratios are typically not used for rating Financial Firms.")
 
     except Exception:
-        # Return fallback if download or read fails
-        return pd.DataFrame(fallback_data), "Source: Fallback Data (Connection Failed)"
+        pass # Keep fallback
+
+    return result_dict
 
 # ==============================================================================
 # [MODULE] Peer Recommender
@@ -418,7 +393,6 @@ class DetailWACCModel:
         except: return 1.0, currency
 
     def get_financials_latest(self, ticker):
-        # [STRICT MODE] Fail if critical data is missing
         try:
             t = yf.Ticker(ticker)
             info = safe_yf_info(t)
@@ -432,7 +406,6 @@ class DetailWACCModel:
             
             mkt_cap_raw = info.get('marketCap', 0)
             
-            # Debt Fallback Logic
             debt_raw = info.get('totalDebt', 0)
             if debt_raw == 0:
                 try:
@@ -442,11 +415,9 @@ class DetailWACCModel:
                             if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
                 except: pass
             
-            # Revenue Fallback Logic
             rev_raw = info.get('totalRevenue', 0)
             ebitda_raw = info.get('ebitda', 0)
             ebit_raw = 0
-            
             try:
                 fin = t.financials
                 if not fin.empty:
@@ -826,7 +797,22 @@ if 'result' in st.session_state:
                              "Link": st.column_config.LinkColumn(display_text="View on FRED")
                          })
     with t6:
-        damodaran_df, source_text = get_damodaran_spreads()
-        st.caption(f"{source_text}")
-        st.caption("Default Spreads for Large Non-Financial Service Firms")
-        st.dataframe(damodaran_df, use_container_width=True, hide_index=True)
+        damodaran_dict = get_damodaran_spreads()
+        st.caption(f"Source: NYU Stern (Live Extract)")
+        
+        dt1, dt2, dt3 = st.tabs(["🏭 Large Firms", "🚀 Smaller/Risky Firms", "🏦 Financial Firms"])
+        
+        with dt1:
+            df1, _ = damodaran_dict["Large Firms"]
+            if df1 is not None: st.dataframe(df1, use_container_width=True, hide_index=True)
+            else: st.info("Data not found.")
+            
+        with dt2:
+            df2, _ = damodaran_dict["Small/Risky Firms"]
+            if df2 is not None: st.dataframe(df2, use_container_width=True, hide_index=True)
+            else: st.info("Data not found.")
+            
+        with dt3:
+            df3, note = damodaran_dict["Financial Firms"]
+            if df3 is not None: st.dataframe(df3, use_container_width=True, hide_index=True)
+            else: st.info(note)
