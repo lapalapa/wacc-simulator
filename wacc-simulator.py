@@ -272,7 +272,6 @@ def get_damodaran_spreads():
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
-        
         try:
             df = pd.read_excel(io.BytesIO(response.content), sheet_name="Start here Ratings sheet", header=None)
         except:
@@ -377,6 +376,9 @@ class PeerRecommender:
         except Exception as e: return None, "Error", [str(e)]
 
 def get_target_financials(ticker):
+    # Retrieve Tax Rates Map globally
+    _, tax_map, _ = get_kpmg_tax_rates()
+    
     try:
         t = yf.Ticker(ticker)
         info = safe_yf_info(t)
@@ -384,6 +386,10 @@ def get_target_financials(ticker):
         # Get Financials (Income Statement)
         inc = t.income_stmt
         if inc.empty: inc = t.financials
+        
+        # Get Tax Rate from Country
+        country = info.get('country', 'Unknown')
+        target_tax = tax_map.get(country.upper(), 25.0) # Map country to tax rate
         
         if not inc.empty:
             date_str = inc.columns[0].strftime('%Y-%m-%d')
@@ -413,10 +419,13 @@ def get_target_financials(ticker):
                 "int_exp": abs(int_exp), # Interest is usually negative in Yahoo
                 "ebit": ebit,
                 "date": date_str,
-                "category": category
+                "category": category,
+                "tax_rate": target_tax
             }
+        else:
+            return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": target_tax}
     except: pass
-    return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms"}
+    return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": 25.0}
 
 # ==============================================================================
 # [LOGIC] WACC Engine
@@ -581,28 +590,20 @@ with st.sidebar:
     
     st.divider()
     st.header("Assumptions")
-    with st.expander("Cost of Equity / Debt", expanded=True):
-        latest_gdp, df_gdp_disp, latest_rf, rf_trend_df = get_fred_data()
-        rf_in = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
-        crp_in = st.number_input("Country Risk Premium (%)", value=0.0, step=0.1)
-        size_in = st.number_input("Size Premium (%)", value=0.0, step=0.1)
     
-    with st.expander("Implied Return", expanded=True):
-        avg_bb, avg_div, _, _ = get_sp_buyback_data()
-        bb_in = st.number_input(f"Buyback Yield (5Y Avg: {avg_bb:.2f}%)", value=avg_bb, step=0.1)
-        div_in = st.number_input(f"Dividend Yield (5Y Avg: {avg_div:.2f}%)", value=avg_div, step=0.1)
-        g_in = st.number_input(f"Growth Rate (Latest GDP: {latest_gdp:.2f}%)", value=latest_gdp, step=0.1)
-        
+    # [MOVED UP] Target Assumptions (First Section)
     with st.expander("Target Assumptions", expanded=True):
-        tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, 25.0, 1.0)
-        
-        # [NEW] Target Financials Fetch & Input
+        # Fetch Target Financials & Tax Rate
         if 'target_fin' not in st.session_state or st.session_state.get('last_ticker') != target_ticker:
             st.session_state['target_fin'] = get_target_financials(target_ticker)
             st.session_state['last_ticker'] = target_ticker
         
         tf = st.session_state['target_fin']
         
+        # Tax Rate Auto-Populated
+        tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, float(tf.get('tax_rate', 25.0)), 0.1)
+        
+        st.divider()
         st.markdown("**Target Financials** (for Credit Spread)")
         st.caption(f"Data Date: {tf['date']}")
         
@@ -612,6 +613,20 @@ with st.sidebar:
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
         category_in = st.selectbox("Firm Category", cat_options, index=cat_default_idx)
+
+    # [MOVED DOWN] Cost of Equity / Debt
+    with st.expander("Cost of Equity / Debt", expanded=True):
+        latest_gdp, df_gdp_disp, latest_rf, rf_trend_df = get_fred_data()
+        rf_in = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
+        crp_in = st.number_input("Country Risk Premium (%)", value=0.0, step=0.1)
+        size_in = st.number_input("Size Premium (%)", value=0.0, step=0.1)
+    
+    # [MOVED DOWN] Implied Return
+    with st.expander("Implied Return", expanded=True):
+        avg_bb, avg_div, _, _ = get_sp_buyback_data()
+        bb_in = st.number_input(f"Buyback Yield (5Y Avg: {avg_bb:.2f}%)", value=avg_bb, step=0.1)
+        div_in = st.number_input(f"Dividend Yield (5Y Avg: {avg_div:.2f}%)", value=avg_div, step=0.1)
+        g_in = st.number_input(f"Growth Rate (Latest GDP: {latest_gdp:.2f}%)", value=latest_gdp, step=0.1)
 
     st.divider()
     if st.button("Calculate WACC", type="primary", use_container_width=True):
@@ -672,11 +687,16 @@ if 'result' in st.session_state:
         ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
         
         # [LOGIC] Determine Spread from ICR
-        icr = inp['ebit'] / inp['int_exp'] if inp['int_exp'] > 0 else 100.0 # High ICR if no interest
+        # Safe retrieval for backward compatibility with older session states
+        int_exp = inp.get('int_exp', 0.0)
+        ebit = inp.get('ebit', 0.0)
+        category = inp.get('category', "Small/Risky Firms")
+        
+        icr = ebit / int_exp if int_exp > 0 else 100.0 # High ICR if no interest
         
         # 1. Get Table
         damodaran_dict = get_damodaran_spreads()
-        rating_table, _ = damodaran_dict.get(inp['category'], (None, ""))
+        rating_table, _ = damodaran_dict.get(category, (None, ""))
         
         implied_rating = "N/A"
         implied_spread_val = 2.00 # Default fallback
@@ -717,7 +737,9 @@ if 'result' in st.session_state:
         final_spread = implied_spread_val # Use Damodaran spread as base, but try to overwrite with FRED
         fred_row = fred_oas[fred_oas['OAS Name'] == target_fred_key]
         if not fred_row.empty:
-            final_spread = fred_row.iloc[0]['Latest Spread (%)']
+            val = fred_row.iloc[0]['Latest Spread (%)']
+            if val is not None and not pd.isna(val):
+                final_spread = val
             
         kd = ((inp['rf'] + final_spread)/100) * (1 - inp['tax']/100)
         wd = sel_dtic
@@ -806,10 +828,10 @@ if 'result' in st.session_state:
     with st.expander("🎯 Target Credit Spread Calculation", expanded=True):
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.metric("Interest Coverage Ratio", f"{icr:.2f}x")
-        sc2.metric("Firm Category", inp['category'])
+        sc2.metric("Firm Category", category)
         sc3.metric("Implied Rating", implied_rating)
         sc4.metric("Implied OAS Spread", f"{final_spread:.2f}%", help=f"Mapped to FRED: {target_fred_key}")
-        st.caption(f"Based on {inp['category']} Table from Damodaran. ICR = EBIT / Interest Exp = {inp['ebit']:,.0f} / {inp['int_exp']:,.0f}")
+        st.caption(f"Based on {category} Table from Damodaran. ICR = EBIT / Interest Exp = {ebit:,.0f} / {int_exp:,.0f}")
 
     st.latex(r"K_d = (R_f + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
     st.info(f"**Calculation:** ({inp['rf']:.2f}% + {final_spread:.2f}%) × (1 - {inp['tax']:.2f}%) = **{kd*100:.2f}%**")
