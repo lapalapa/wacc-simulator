@@ -184,98 +184,132 @@ def get_kpmg_tax_rates():
     except: return None, {}, 2025
 
 # ==============================================================================
-# [MODULE] Data Fetcher 5: Damodaran Ratings (HTML Scraping for Stability)
+# [MODULE] Data Fetcher 5: Damodaran Ratings (Keyword & Pattern Match)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
     """
-    Scrapes the HTML version of Damodaran's ratings table for stability.
-    URL: https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ratings.html
+    Downloads ratings.xls and parses tables based on user-specified markers:
+    1. Find title ("large firms", "smaller firms", "financial firms")
+    2. Look for '>' or 'greater than' in subsequent rows to start data extraction.
     """
-    url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ratings.html"
+    url = "https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # Pre-defined Fallback Data (Just in case HTML fetch fails)
-    fallback_large = pd.DataFrame([
-        {"Bound": "> 8.5", "Rating": "Aaa/AAA", "Spread": "0.40%"},
-        {"Bound": "6.5 - 8.5", "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {"Bound": "5.5 - 6.5", "Rating": "A1/A+", "Spread": "0.70%"},
-        {"Bound": "4.25 - 5.5", "Rating": "A2/A", "Spread": "0.78%"},
-        {"Bound": "3.0 - 4.25", "Rating": "A3/A-", "Spread": "0.89%"},
-        {"Bound": "2.5 - 3.0", "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {"Bound": "2.25 - 2.5", "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {"Bound": "2.0 - 2.25", "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {"Bound": "1.75 - 2.0", "Rating": "B1/B+", "Spread": "2.75%"},
-        {"Bound": "1.5 - 1.75", "Rating": "B2/B", "Spread": "3.21%"},
-        {"Bound": "1.25 - 1.5", "Rating": "B3/B-", "Spread": "5.09%"},
-        {"Bound": "0.8 - 1.25", "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {"Bound": "0.65 - 0.8", "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {"Bound": "0.2 - 0.65", "Rating": "C2/C", "Spread": "16.00%"},
-        {"Bound": "< 0.2", "Rating": "D2/D", "Spread": "19.00%"}
-    ])
-
     result_dict = {
-        "Large Firms": (fallback_large, "Fallback Data"),
+        "Large Firms": (None, "Data not found"),
         "Small/Risky Firms": (None, "Data not found"),
         "Financial Firms": (None, "Data not found")
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         
-        # Use pandas to parse all tables in the HTML
-        dfs = pd.read_html(io.StringIO(response.text))
-        
-        # Heuristic to find the right tables
-        # Usually they are in one big table or separate.
-        # Strategy: Look for keywords in the first few rows of each dataframe
-        
-        for df in dfs:
-            # Flatten to string to search
-            df_str = df.to_string().lower()
-            
-            # 1. Large Firms Table
-            if "large" in df_str and "non-financial" in df_str and "spread" in df_str:
-                # Clean up
-                df_clean = df.copy()
-                # If first row is header-like, set it
-                result_dict["Large Firms"] = (df_clean, "Source: NYU Stern (HTML)")
-            
-            # 2. Smaller/Risky Firms
-            if "smaller" in df_str and "riskier" in df_str and "spread" in df_str:
-                df_clean = df.copy()
-                result_dict["Small/Risky Firms"] = (df_clean, "Source: NYU Stern (HTML)")
-                
-            # 3. Financial Firms
-            if "financial service firms" in df_str and "spread" in df_str and "default spreads are slighty different" not in df_str: 
-                # Note: The text "default spreads are slighty different" is often a header for the whole section, 
-                # we want the specific table if separated. 
-                # Actually, in the HTML, they are often in one big sheet or separate <table> tags.
-                # Let's just capture if it contains specific financial keywords
-                pass
-            
-            # Alternative: The main table in ratings.html often combines them.
-            # Let's try to extract specific tables if they are separated.
-            
-    except Exception as e:
-        pass
+        # Load the specific sheet if possible, else first sheet
+        try:
+            df = pd.read_excel(io.BytesIO(response.content), sheet_name="Start here Ratings sheet", header=None)
+        except:
+            df = pd.read_excel(io.BytesIO(response.content), sheet_name=0, header=None)
 
-    # [FALLBACK MECHANISM FOR HTML PARSING]
-    # If pandas read_html yields messy results (common with older HTML), use the hardcoded fallback which is clean.
-    # The user really wants to SEE the data. If fetching fails, showing clean fallback is better than "Data not found".
-    
-    # Update Fallback for Small/Financial if still None
-    if result_dict["Small/Risky Firms"][0] is None:
-        # Fallback data for small firms (approximate based on known Damodaran values)
-        fallback_small = fallback_large.copy() # Ratios differ, but structure is same. 
-        result_dict["Small/Risky Firms"] = (fallback_small, "Fallback Data (Connection Failed)")
+        def extract_table_by_marker(title_keyword):
+            # 1. Find the row containing the Title
+            start_row = -1
+            for idx, row in df.iterrows():
+                row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
+                if title_keyword.lower() in row_str:
+                    start_row = idx
+                    break
+            
+            if start_row == -1: return None
+            
+            # 2. Find the Data Start Row
+            # Look for a cell starting with ">" or "greater"
+            data_start_row = -1
+            
+            for i in range(start_row + 1, start_row + 20): # Scan next 20 rows
+                if i >= len(df): break
+                row = df.iloc[i]
+                # Check first few columns
+                found = False
+                for cell in row[:5]: # Check first 5 cols
+                    cell_str = str(cell).strip().lower()
+                    if cell_str.startswith(">") or "greater" in cell_str:
+                        data_start_row = i
+                        found = True
+                        break
+                if found: break
+            
+            if data_start_row == -1: return None
+            
+            # 3. Extract Data
+            data_rows = []
+            # Assume columns: Col 0 (Start), Col 1 (End), Col 2 (Rating), Col 3 (Spread)
+            # We need to detect column indices dynamically if possible, or assume relative to the found marker
+            
+            # Let's find the column index of the marker
+            marker_col_idx = 0
+            row = df.iloc[data_start_row]
+            for c_idx, cell in enumerate(row):
+                if str(cell).strip().lower().startswith(">") or "greater" in str(cell).strip().lower():
+                    marker_col_idx = c_idx
+                    break
+            
+            # Iterate rows until data ends
+            for i in range(data_start_row, data_start_row + 20):
+                if i >= len(df): break
+                row = df.iloc[i]
+                
+                # Check bounds
+                val_start = row[marker_col_idx]
+                val_end = row[marker_col_idx + 1]
+                val_rating = row[marker_col_idx + 2]
+                val_spread = row[marker_col_idx + 3]
+                
+                # If rating or spread is empty, stop
+                if pd.isna(val_rating) or pd.isna(val_spread):
+                    break
+                
+                try:
+                    # Clean Spread
+                    if isinstance(val_spread, (int, float)):
+                        spread_fmt = f"{val_spread * 100:.2f}%"
+                    else:
+                        spread_fmt = str(val_spread)
+                    
+                    # Clean Bounds (Handle > and <=)
+                    start_str = str(val_start).strip()
+                    if start_str == ">": start_str = "greater than" # Normalize
+                    
+                    data_rows.append({
+                        "greater than": start_str, # User requested 'greater than'
+                        "≤ to": val_end,
+                        "Rating": str(val_rating),
+                        "Spread": spread_fmt
+                    })
+                except:
+                    continue
+            
+            return pd.DataFrame(data_rows) if data_rows else None
+
+        # --- Execute ---
+        # 1. Large Firms
+        df_large = extract_table_by_marker("large non-financial service")
+        if df_large is not None: result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Start here Ratings sheet)")
+
+        # 2. Smaller Firms
+        df_small = extract_table_by_marker("smaller and riskier")
+        if df_small is not None: result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Start here Ratings sheet)")
         
-    if result_dict["Financial Firms"][0] is None:
-        fallback_fin = fallback_large.copy() # Financials often share spreads but use different ratios
-        result_dict["Financial Firms"] = (fallback_fin, "Fallback Data (Connection Failed)")
+        # 3. Financial Firms
+        df_fin = extract_table_by_marker("financial service firms")
+        if df_fin is not None: 
+            result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Start here Ratings sheet)")
+
+    except Exception:
+        pass 
 
     return result_dict
 
@@ -775,7 +809,7 @@ if 'result' in st.session_state:
                          })
     with t6:
         damodaran_dict = get_damodaran_spreads()
-        st.caption(f"Source: NYU Stern (HTML Scrape)")
+        st.caption(f"Source: NYU Stern (Start here Ratings sheet)")
         
         dt1, dt2, dt3 = st.tabs(["🏭 Large Firms", "🚀 Smaller/Risky Firms", "🏦 Financial Firms"])
         
