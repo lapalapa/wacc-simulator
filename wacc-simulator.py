@@ -84,7 +84,7 @@ def get_sp_buyback_data():
     except: return default_bb_yield, default_div_yield, None, ["Error"]
 
 # ==============================================================================
-# [MODULE] Data Fetcher 2 & 3: FRED Data (GDP & RF)
+# [MODULE] Data Fetcher 2 & 3: FRED Data (GDP & RF) + [NEW] OAS Spreads
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_fred_data():
@@ -112,6 +112,52 @@ def get_fred_data():
     except: latest_rf = 4.0; df_rf_trend = None
 
     return latest_gdp, df_gdp_disp, latest_rf, df_rf_trend
+
+@st.cache_data(ttl=3600*24)
+def get_fred_oas_data():
+    """
+    Fetches US Corporate Option-Adjusted Spread (OAS) for various ratings.
+    """
+    series_map = {
+        "AAA US Corporate": "BAMLC0A1CAAA",
+        "AA US Corporate": "BAMLC0A2CAA",
+        "Single-A US Corporate": "BAMLC0A3CA",
+        "BBB US Corporate": "BAMLC0A4CBBB",
+        "BB US High Yield": "BAMLH0A1HYBB",
+        "Single-B US High Yield": "BAMLH0A2HYB",
+        "CCC & Lower US High Yield": "BAMLH0A3HYC"
+    }
+    
+    headers = {"User-Agent": "Mozilla/5.0"}
+    data_list = []
+    
+    for name, series_id in series_map.items():
+        try:
+            url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+            r = requests.get(url, headers=headers, timeout=5)
+            df = pd.read_csv(io.StringIO(r.text))
+            df["DATE"] = pd.to_datetime(df["DATE"])
+            df = df.sort_values(by="DATE", ascending=False)
+            
+            # Get latest valid value
+            latest_val = df.iloc[0, 1]
+            latest_date = df.iloc[0, 0].strftime('%Y-%m-%d')
+            
+            data_list.append({
+                "OAS Name": name,
+                "Latest Spread (%)": float(latest_val),
+                "Date": latest_date,
+                "Series ID": series_id
+            })
+        except:
+            data_list.append({
+                "OAS Name": name,
+                "Latest Spread (%)": None,
+                "Date": "N/A",
+                "Series ID": series_id
+            })
+            
+    return pd.DataFrame(data_list)
 
 # ==============================================================================
 # [MODULE] Data Fetcher 4: KPMG Tax Rates (Live Scraping)
@@ -419,8 +465,8 @@ with st.sidebar:
     st.header("Target & Peers")
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
-    # [UI FIX] Full width button for recommendation
-    if st.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary", use_container_width=True):
+    col1, col2 = st.columns([1,1])
+    if col1.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary", use_container_width=True):
         with st.spinner("Finding..."):
             rec = PeerRecommender()
             res_peers, group, logs = rec.recommend(target_ticker)
@@ -623,7 +669,7 @@ if 'result' in st.session_state:
 
     st.markdown("---")
     st.subheader("Market Data Reference")
-    t1, t2, t3, t4 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ KPMG Corp Tax"])
+    t1, t2, t3, t4, t5 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ KPMG Corp Tax", "📉 US Corp Spreads"])
     with t1:
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
         if res.get('rf_trend') is not None: st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
@@ -641,3 +687,12 @@ if 'result' in st.session_state:
         st.caption(f"Source: KPMG (Live Data, {yr} Rates)")
         if kpmg_df is not None: 
             st.dataframe(kpmg_df, use_container_width=True, hide_index=True, column_config={kpmg_df.columns[1]: st.column_config.NumberColumn(format="%.2f%%")})
+    with t5:
+        st.caption("Source: FRED (St. Louis Fed) - ICE BofA US Corporate Option-Adjusted Spread Data")
+        oas_df = get_fred_oas_data()
+        if not oas_df.empty:
+            st.dataframe(oas_df, use_container_width=True, hide_index=True, 
+                         column_config={
+                             "Latest Spread (%)": st.column_config.NumberColumn(format="%.2f%%"),
+                             "Series ID": st.column_config.LinkColumn(display_text="View on FRED")
+                         })
