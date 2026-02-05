@@ -18,15 +18,14 @@ st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 def safe_yf_info(ticker_obj, max_retries=3):
     for i in range(max_retries):
         try:
-            return ticker_obj.info
+            info = ticker_obj.info
+            # JPM 같은 대형주는 info 키가 많아야 정상임. 너무 적으면 실패로 간주.
+            if info and len(info) > 5:
+                return info
         except Exception as e:
-            if "429" in str(e) or "Too Many Requests" in str(e):
-                wait = (2 ** (i + 1)) + random.uniform(0.5, 1.5)
-                time.sleep(wait)
-                continue
-            else:
-                if i == max_retries - 1: return {}
-                time.sleep(1)
+            pass
+        
+        time.sleep(random.uniform(0.5, 1.5)) # 지연 시간
     return {}
 
 # ==============================================================================
@@ -384,7 +383,8 @@ def get_target_financials(ticker):
     _, tax_map, _ = get_kpmg_tax_rates()
     try:
         t = yf.Ticker(ticker)
-        info = safe_yf_info(t)
+        # 1. Fetch Info with persistence for Target
+        info = safe_yf_info(t, max_retries=5) # More robust fetching
         
         country = info.get('country', 'Unknown')
         country_norm = country.upper().strip()
@@ -400,31 +400,29 @@ def get_target_financials(ticker):
         int_exp = 0; ebit = 0; date_str = "N/A"
         category = "Small/Risky Firms"
         
-        # --- Priority 1: Annual Data (Strictly Latest) ---
+        # --- Priority 1: Annual Data (Smart Filtering) ---
         a_fin = t.income_stmt
         if a_fin.empty: a_fin = t.financials
         
         valid_annual = False
         if not a_fin.empty:
-            cols = a_fin.columns
-            if len(cols) > 0:
-                # Try to extract from the very first column (Latest Annual)
-                temp_date_str = cols[0].strftime('%Y-%m-%d (Annual)')
-                temp_int_exp = 0
-                temp_ebit = 0
+            # Check cols. If latest (2025) is empty, skip to 2024
+            for col in a_fin.columns:
+                # Use Total Revenue as proxy for "Data Exists"
+                chk_rev = 0
+                if 'Total Revenue' in a_fin.index: chk_rev = a_fin.loc['Total Revenue'][col]
                 
-                if 'Interest Expense' in a_fin.index: temp_int_exp = a_fin.loc['Interest Expense'].iloc[0]
-                elif 'Interest Expense Non Operating' in a_fin.index: temp_int_exp = a_fin.loc['Interest Expense Non Operating'].iloc[0]
-                
-                if 'EBIT' in a_fin.index: temp_ebit = a_fin.loc['EBIT'].iloc[0]
-                elif 'Operating Income' in a_fin.index: temp_ebit = a_fin.loc['Operating Income'].iloc[0]
-                
-                # Validation: If both are 0 or NaN, consider it invalid/empty year
-                if (pd.notna(temp_int_exp) and temp_int_exp != 0) or (pd.notna(temp_ebit) and temp_ebit != 0):
-                    int_exp = temp_int_exp
-                    ebit = temp_ebit
-                    date_str = temp_date_str
+                if pd.notna(chk_rev) and chk_rev > 0:
+                    # Found valid year
+                    date_str = col.strftime('%Y-%m-%d (Annual)')
+                    if 'Interest Expense' in a_fin.index: int_exp = a_fin.loc['Interest Expense'][col]
+                    elif 'Interest Expense Non Operating' in a_fin.index: int_exp = a_fin.loc['Interest Expense Non Operating'][col]
+                    
+                    if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'][col]
+                    elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'][col]
+                    
                     valid_annual = True
+                    break # Stop at first valid column
         
         # --- Priority 2: Calculated TTM (Quarterly Sum) ---
         if not valid_annual:
@@ -440,12 +438,10 @@ def get_target_financials(ticker):
                 elif 'Operating Income' in recent_4.index: ebit = recent_4.loc['Operating Income'].sum()
             else:
                 # --- Priority 3: Info TTM (Last Resort) ---
-                # Only if Calc failed
                 date_str = "TTM (Yahoo Info Proxy)"
                 rev_ttm = info.get('totalRevenue', 0)
                 ebitda_ttm = info.get('ebitda', 0)
                 if rev_ttm > 0:
-                    # Estimate EBIT if missing in info
                     if ebitda_ttm > 0: ebit = ebitda_ttm
                     else: ebit = rev_ttm * info.get('operatingMargins', 0)
         
@@ -538,20 +534,25 @@ class DetailWACCModel:
             
             valid_annual = False
             if not a_fin.empty:
-                cols = a_fin.columns
-                if len(cols) > 0:
-                    period_label = cols[0].strftime('%Y-%m-%d (Annual)')
-                    if 'Total Revenue' in a_fin.index: rev = a_fin.loc['Total Revenue'].iloc[0]
+                for col in a_fin.columns:
+                    temp_rev = 0
+                    if 'Total Revenue' in a_fin.index: temp_rev = a_fin.loc['Total Revenue'][col]
                     
-                    if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
-                    elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
-                    
-                    if 'EBITDA' in a_fin.index: ebitda = a_fin.loc['EBITDA'].iloc[0]
-                    elif 'Normalized EBITDA' in a_fin.index: ebitda = a_fin.loc['Normalized EBITDA'].iloc[0]
-                    
-                    # Validate: If Revenue is 0 or NaN, consider invalid
-                    if pd.notna(rev) and rev != 0:
+                    if pd.notna(temp_rev) and temp_rev > 0:
+                        period_label = col.strftime('%Y-%m-%d (Annual)')
+                        rev = temp_rev
+                        if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'][col]
+                        elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'][col]
+                        
+                        if 'EBITDA' in a_fin.index: ebitda = a_fin.loc['EBITDA'][col]
+                        elif 'Normalized EBITDA' in a_fin.index: ebitda = a_fin.loc['Normalized EBITDA'][col]
+                        
+                        # Fix NaNs
+                        if pd.isna(ebit): ebit = 0
+                        if pd.isna(ebitda): ebitda = 0
+                        
                         valid_annual = True
+                        break
             
             # --- Priority 2: Calculated TTM (Quarterly Sum) ---
             if not valid_annual:
