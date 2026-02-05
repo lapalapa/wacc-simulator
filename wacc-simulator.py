@@ -214,6 +214,119 @@ def get_kpmg_tax_rates():
     except: return None, {}, 2025
 
 # ==============================================================================
+# [MODULE] Data Fetcher 5: Damodaran Ratings (Live Scraping)
+# ==============================================================================
+@st.cache_data(ttl=3600*24)
+def get_damodaran_spreads():
+    """
+    Extracts Interest Coverage Ratio -> Rating -> Spread table from ratings.xls.
+    Source: https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls
+    """
+    url = "https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    
+    # Fallback Data (In case scraping/parsing fails)
+    fallback_data = [
+        {">": -100000, "≤ to": 0.199999, "Rating": "D2/D", "Spread": "19.00%"},
+        {">": 0.2, "≤ to": 0.649999, "Rating": "C2/C", "Spread": "16.00%"},
+        {">": 0.65, "≤ to": 0.799999, "Rating": "Ca2/CC", "Spread": "12.61%"},
+        {">": 0.8, "≤ to": 1.249999, "Rating": "Caa/CCC", "Spread": "8.85%"},
+        {">": 1.25, "≤ to": 1.499999, "Rating": "B3/B-", "Spread": "5.09%"},
+        {">": 1.5, "≤ to": 1.749999, "Rating": "B2/B", "Spread": "3.21%"},
+        {">": 1.75, "≤ to": 1.999999, "Rating": "B1/B+", "Spread": "2.75%"},
+        {">": 2.0, "≤ to": 2.2499999, "Rating": "Ba2/BB", "Spread": "1.84%"},
+        {">": 2.25, "≤ to": 2.49999, "Rating": "Ba1/BB+", "Spread": "1.38%"},
+        {">": 2.5, "≤ to": 2.999999, "Rating": "Baa2/BBB", "Spread": "1.11%"},
+        {">": 3.0, "≤ to": 4.249999, "Rating": "A3/A-", "Spread": "0.89%"},
+        {">": 4.25, "≤ to": 5.499999, "Rating": "A2/A", "Spread": "0.78%"},
+        {">": 5.5, "≤ to": 6.499999, "Rating": "A1/A+", "Spread": "0.70%"},
+        {">": 6.5, "≤ to": 8.499999, "Rating": "Aa2/AA", "Spread": "0.55%"},
+        {">": 8.5, "≤ to": 100000, "Rating": "Aaa/AAA", "Spread": "0.40%"}
+    ]
+
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Try reading with pandas (xlrd engine required for .xls)
+        # Note: If environment lacks xlrd, this jumps to except
+        df = pd.read_excel(io.BytesIO(response.content), header=None)
+        
+        # Locate the table for "For large non-financial service firms"
+        start_row = -1
+        for idx, row in df.iterrows():
+            # Check first few columns for the keyword
+            row_str = " ".join([str(x) for x in row.values if pd.notna(x)])
+            if "For large non-financial service firms" in row_str:
+                start_row = idx
+                break
+        
+        if start_row == -1:
+            return pd.DataFrame(fallback_data), "Source: Fallback Data (Parsing Failed)"
+
+        # The table usually starts shortly after the title
+        # Based on structure: Title -> Header(If interest...) -> Header(> <= Rating Spread)
+        # We look for the row starting with ">"
+        
+        header_row = -1
+        for i in range(start_row, start_row + 10):
+            if i >= len(df): break
+            # Check if column 0 is '>' or similar
+            val = str(df.iloc[i, 0]).strip()
+            if val == ">":
+                header_row = i
+                break
+        
+        if header_row == -1:
+             return pd.DataFrame(fallback_data), "Source: Fallback Data (Header Not Found)"
+
+        # Extract Data
+        # Columns typically: A(>), B(<=), C(Rating), D(Spread)
+        # Verify columns by checking header row
+        # We assume standard layout: Col 0: >, Col 1: <=, Col 2: Rating, Col 3: Spread
+        
+        data_rows = []
+        # Iterate until we hit an empty row or non-numeric
+        for i in range(header_row + 1, len(df)):
+            row = df.iloc[i]
+            val_low = row[0]
+            val_high = row[1]
+            val_rating = row[2]
+            val_spread = row[3]
+            
+            # Stop if rating is NaN or spread is NaN (End of table)
+            if pd.isna(val_rating) or pd.isna(val_spread):
+                break
+                
+            # Clean values
+            try:
+                # Spread might be a float (0.19) or string ("19%")
+                if isinstance(val_spread, (int, float)):
+                    spread_fmt = f"{val_spread * 100:.2f}%"
+                else:
+                    spread_fmt = str(val_spread)
+                
+                data_rows.append({
+                    ">": val_low,
+                    "≤ to": val_high,
+                    "Rating": str(val_rating),
+                    "Spread": spread_fmt
+                })
+            except:
+                continue
+                
+        if not data_rows:
+             return pd.DataFrame(fallback_data), "Source: Fallback Data (Extraction Empty)"
+             
+        return pd.DataFrame(data_rows), "Source: NYU Stern (Live Extract)"
+
+    except Exception:
+        # Return fallback if download or read fails
+        return pd.DataFrame(fallback_data), "Source: Fallback Data (Connection Failed)"
+
+# ==============================================================================
 # [MODULE] Peer Recommender
 # ==============================================================================
 class PeerRecommender:
@@ -685,7 +798,7 @@ if 'result' in st.session_state:
 
     st.markdown("---")
     st.subheader("Market Data Reference")
-    t1, t2, t3, t4, t5 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ KPMG Corp Tax", "📉 US Corp Spreads"])
+    t1, t2, t3, t4, t5, t6 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ KPMG Corp Tax", "📉 US Corp Spreads", "📊 Damodaran Ratings"])
     with t1:
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
         if res.get('rf_trend') is not None: st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
@@ -712,3 +825,8 @@ if 'result' in st.session_state:
                              "Latest Spread (%)": st.column_config.NumberColumn(format="%.2f%%"),
                              "Link": st.column_config.LinkColumn(display_text="View on FRED")
                          })
+    with t6:
+        damodaran_df, source_text = get_damodaran_spreads()
+        st.caption(f"{source_text}")
+        st.caption("Default Spreads for Large Non-Financial Service Firms")
+        st.dataframe(damodaran_df, use_container_width=True, hide_index=True)
