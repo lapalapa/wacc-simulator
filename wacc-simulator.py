@@ -131,7 +131,6 @@ def get_fred_oas_data():
         "CCC & Lower US High Yield": "BAMLH0A3HYC"
     }
     
-    # [FIX] Enhanced Headers to mimic a real browser
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -145,36 +144,33 @@ def get_fred_oas_data():
         try:
             url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
             r = requests.get(url, headers=headers, timeout=10)
-            r.raise_for_status() # Check for 403/404 errors
+            r.raise_for_status()
             
             df = pd.read_csv(io.StringIO(r.text))
-            
-            # Clean and sort
             df.columns = ["DATE", "VALUE"]
             df["DATE"] = pd.to_datetime(df["DATE"])
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors='coerce')
-            df = df.dropna().sort_values(by="DATE", ascending=True) # Oldest to Newest
+            df = df.dropna().sort_values(by="DATE", ascending=True)
             
             if not df.empty:
-                latest_val = df["VALUE"].iloc[-1] # Take the last one
+                latest_val = df["VALUE"].iloc[-1]
                 latest_date = df["DATE"].iloc[-1].strftime('%Y-%m-%d')
                 
                 data_list.append({
                     "OAS Name": name,
                     "Latest Spread (%)": float(latest_val),
                     "Date": latest_date,
-                    "Series ID": series_id
+                    "Link": f"https://fred.stlouisfed.org/series/{series_id}" # Full URL for LinkColumn
                 })
             else:
                 raise ValueError("Empty Data")
                 
-        except Exception as e:
-            # If fail, append None but keep row
+        except Exception:
             data_list.append({
                 "OAS Name": name,
                 "Latest Spread (%)": None,
-                "Date": "Error/N/A",
-                "Series ID": series_id
+                "Date": "Error",
+                "Link": f"https://fred.stlouisfed.org/series/{series_id}"
             })
             
     return pd.DataFrame(data_list)
@@ -714,5 +710,5 @@ if 'result' in st.session_state:
             st.dataframe(oas_df, use_container_width=True, hide_index=True, 
                          column_config={
                              "Latest Spread (%)": st.column_config.NumberColumn(format="%.2f%%"),
-                             "Series ID": st.column_config.LinkColumn(display_text="View on FRED")
+                             "Link": st.column_config.LinkColumn(display_text="View on FRED")
                          })
