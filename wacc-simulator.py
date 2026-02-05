@@ -195,9 +195,15 @@ def get_kpmg_tax_rates():
         result_df.columns = ["Country", f"Rate"]
         result_df["Rate"] = pd.to_numeric(result_df["Rate"], errors='coerce')
         result_df = result_df.dropna().sort_values(by="Rate", ascending=False).reset_index(drop=True)
+        # Normalize Country Keys
         tax_dict = dict(zip(result_df["Country"].str.upper().str.strip(), result_df["Rate"]))
+        
+        # Enhanced Mapping for Common Mismatches
         tax_dict["UNITED STATES"] = tax_dict.get("UNITED STATES OF AMERICA", 25.57)
+        tax_dict["USA"] = tax_dict.get("UNITED STATES OF AMERICA", 25.57)
         tax_dict["KOREA"] = tax_dict.get("KOREA (SOUTH)", 26.40)
+        tax_dict["SOUTH KOREA"] = tax_dict.get("KOREA (SOUTH)", 26.40)
+        
         return result_df, tax_dict, latest_year
     except: return None, {}, 2025
 
@@ -381,8 +387,17 @@ def get_target_financials(ticker):
         t = yf.Ticker(ticker)
         info = safe_yf_info(t)
         
-        country = info.get('country', 'Unknown')
-        target_tax = tax_map.get(country.upper(), 25.0) 
+        # [Corrected Country Logic]
+        country_raw = info.get('country', 'Unknown')
+        country_norm = country_raw.upper().strip()
+        
+        # Try exact match, then United States fallback
+        target_tax = tax_map.get(country_norm)
+        if target_tax is None:
+            # Handle common variations if not in map
+            if "UNITED STATES" in country_norm: target_tax = 25.57
+            elif "KOREA" in country_norm: target_tax = 26.40
+            else: target_tax = 25.0 # Default fallback
         
         # Financials Init
         int_exp = 0; ebit = 0; date_str = "N/A"
@@ -396,28 +411,29 @@ def get_target_financials(ticker):
             cols = a_fin.columns
             if len(cols) > 0:
                 date_str = cols[0].strftime('%Y-%m-%d (Annual)')
+                
+                # Interest Expense
                 if 'Interest Expense' in a_fin.index: int_exp = a_fin.loc['Interest Expense'].iloc[0]
                 elif 'Interest Expense Non Operating' in a_fin.index: int_exp = a_fin.loc['Interest Expense Non Operating'].iloc[0]
                 
+                # EBIT
                 if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
                 elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
+                
+                # Fill NaN with 0
+                if pd.isna(int_exp): int_exp = 0
+                if pd.isna(ebit): ebit = 0
         
-        # --- Priority 2: Yahoo Info (TTM) ---
-        # If Annual data yielded zero or missing, fallback to Info TTM (Do NOT calc manually)
+        # --- Priority 2: Yahoo Info (TTM) - No Calc ---
+        # Only if Annual data is missing or zero
         if int_exp == 0 and ebit == 0:
-            rev_ttm = info.get('totalRevenue', 0)
-            op_margin = info.get('operatingMargins', 0)
+            date_str = "TTM (Yahoo Info)"
+            # Info usually lacks Interest Expense, so we keep it 0.
+            # Info usually has EBITDA, we use it as best proxy if EBIT missing
             ebitda_ttm = info.get('ebitda', 0)
+            if ebitda_ttm > 0:
+                ebit = ebitda_ttm # Best available from info
             
-            if rev_ttm > 0:
-                date_str = "TTM (Yahoo Info)"
-                # Try to get EBIT directly if possible, else infer
-                # Info doesn't have explicit EBIT usually, so we estimate
-                if ebitda_ttm > 0:
-                    ebit = ebitda_ttm # Proxy if EBIT missing, better than 0
-                else:
-                    ebit = rev_ttm * op_margin
-        
         # Category Detection
         mkt_cap = info.get('marketCap', 0)
         sector = info.get('sector', '')
@@ -426,12 +442,12 @@ def get_target_financials(ticker):
         else: category = "Small/Risky Firms"
         
         return {
-            "int_exp": abs(int_exp) if pd.notna(int_exp) else 0, 
-            "ebit": ebit if pd.notna(ebit) else 0,
+            "int_exp": abs(int_exp), 
+            "ebit": ebit,
             "date": date_str,
             "category": category,
             "tax_rate": target_tax,
-            "country_name": country
+            "country_name": country_raw
         }
     except: pass
     return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": 25.0, "country_name": "Unknown"}
@@ -510,18 +526,23 @@ class DetailWACCModel:
                 
                 if 'EBITDA' in a_fin.index: ebitda = a_fin.loc['EBITDA'].iloc[0]
                 elif 'Normalized EBITDA' in a_fin.index: ebitda = a_fin.loc['Normalized EBITDA'].iloc[0]
+                
+                # Check for NaNs
+                if pd.isna(rev): rev = 0
+                if pd.isna(ebit): ebit = 0
+                if pd.isna(ebitda): ebitda = 0
             
             # --- Priority 2: Yahoo Info (TTM) ---
-            # If Annual data missing critical fields, use Info TTM directly (No Manual Calc)
             if rev == 0 or ebit == 0:
                 period_label = "TTM (Yahoo Info)"
-                rev = info.get('totalRevenue', 0)
-                ebitda = info.get('ebitda', 0)
-                # Estimate EBIT if missing in info
-                if ebit == 0:
-                    # Prefer EBITDA if available as proxy for Beta logic, or derive from margins
-                    if ebitda > 0: ebit = ebitda 
-                    else: ebit = rev * info.get('operatingMargins', 0)
+                rev_ttm = info.get('totalRevenue', 0)
+                ebitda_ttm = info.get('ebitda', 0)
+                
+                if rev_ttm is not None and rev_ttm > 0:
+                    rev = rev_ttm
+                    if ebitda_ttm is not None: ebitda = ebitda_ttm
+                    # EBIT Proxy from info
+                    if ebit == 0 and ebitda > 0: ebit = ebitda
 
             if mkt_cap == 0: 
                 try: mkt_cap = t.fast_info['market_cap']
@@ -624,8 +645,9 @@ with st.sidebar:
         
         tf = st.session_state['target_fin']
         
+        # Tax Rate Slider
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, float(tf.get('tax_rate', 25.0)), 0.1)
-        st.caption(f"📍 Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
+        st.caption(f"📍 Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown')}**")
         
         st.divider()
         st.markdown("**Target Financials** (for Credit Spread)")
