@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import io
 import time
 import random
+import re
 
 # 페이지 설정
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
@@ -144,11 +145,21 @@ def get_fred_oas_data():
             if not df.empty:
                 latest_val = df["VALUE"].iloc[-1]
                 latest_date = df["DATE"].iloc[-1].strftime('%Y-%m-%d')
-                data_list.append({"OAS Name": name, "Latest Spread (%)": float(latest_val), "Date": latest_date, "Link": f"https://fred.stlouisfed.org/series/{series_id}"})
+                data_list.append({
+                    "OAS Name": name,
+                    "Latest Spread (%)": float(latest_val),
+                    "Date": latest_date,
+                    "Link": f"https://fred.stlouisfed.org/series/{series_id}"
+                })
             else:
                 raise ValueError("Empty Data")
         except:
-            data_list.append({"OAS Name": name, "Latest Spread (%)": None, "Date": "Error", "Link": f"https://fred.stlouisfed.org/series/{series_id}"})
+            data_list.append({
+                "OAS Name": name,
+                "Latest Spread (%)": None,
+                "Date": "Error",
+                "Link": f"https://fred.stlouisfed.org/series/{series_id}"
+            })
     return pd.DataFrame(data_list)
 
 # ==============================================================================
@@ -184,38 +195,41 @@ def get_kpmg_tax_rates():
     except: return None, {}, 2025
 
 # ==============================================================================
-# [MODULE] Data Fetcher 5: Damodaran Ratings (Robust Multi-Table)
+# [MODULE] Data Fetcher 5: Damodaran Ratings (Smart Pattern Parsing)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
     """
-    Robustly extracts multiple tables (Large, Small, Financials) from ratings.xls
-    by searching for 'Rating' and 'Spread' headers near title keywords.
+    Extracts tables from ratings.xls using pattern matching for Ratings strings.
+    This avoids reliance on strict header rows which may vary.
     """
     url = "https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # Empty Placeholders
     result_dict = {
         "Large Firms": (None, "Data not found"),
         "Small/Risky Firms": (None, "Data not found"),
         "Financial Firms": (None, "Data not found")
     }
 
+    # Known Rating Patterns in Damodaran's file
+    rating_patterns = [
+        "Aaa/AAA", "Aa2/AA", "A1/A+", "A2/A", "A3/A-", 
+        "Baa2/BBB", "Ba1/BB+", "Ba2/BB", "B1/B+", "B2/B", "B3/B-", 
+        "Caa/CCC", "Ca2/CC", "C2/C", "D2/D"
+    ]
+
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
-        # Read without header to scan content
         df = pd.read_excel(io.BytesIO(response.content), header=None)
         
-        # --- Helper Function: Smart Table Extractor ---
-        def extract_table_smart(title_keyword):
-            # 1. Find the row containing the Title
+        def extract_by_pattern(title_keyword):
+            # 1. Find Title Row
             start_row = -1
             for idx, row in df.iterrows():
-                # Convert row to string and check keyword
                 row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
                 if title_keyword.lower() in row_str:
                     start_row = idx
@@ -223,89 +237,70 @@ def get_damodaran_spreads():
             
             if start_row == -1: return None
             
-            # 2. Find the Header Row (Look for 'Rating' and 'Spread' columns)
-            # Scan next 20 rows from title
-            header_row = -1
-            col_indices = {} # Store map: {'rating': col_idx, 'spread': col_idx, ...}
-            
-            for i in range(start_row, start_row + 20):
-                if i >= len(df): break
-                row_values = [str(x).lower().strip() for x in df.iloc[i].values]
-                
-                # Check if this row looks like a header
-                if "rating" in row_values and "spread" in row_values:
-                    header_row = i
-                    # Map columns
-                    for c_idx, val in enumerate(row_values):
-                        if "rating" in val: col_indices['rating'] = c_idx
-                        elif "spread" in val: col_indices['spread'] = c_idx
-                        elif ">" in val or "greater" in val: col_indices['low'] = c_idx
-                        elif "<" in val or "less" in val or "≤" in val: col_indices['high'] = c_idx
-                    break
-            
-            if header_row == -1 or 'rating' not in col_indices or 'spread' not in col_indices:
-                return None
-            
-            # 3. Extract Data Rows
             data_rows = []
-            for i in range(header_row + 1, len(df)):
+            # Scan subsequent rows (limit 30 rows to prevent reading into next table)
+            for i in range(start_row + 1, start_row + 40):
+                if i >= len(df): break
                 row = df.iloc[i]
                 
-                # Extract values using mapped indices
-                rating_val = row[col_indices['rating']]
-                spread_val = row[col_indices['spread']]
+                # Check if any cell in this row matches a known rating
+                rating_col_idx = -1
+                found_rating = ""
                 
-                # Stop if critical values are NaN (End of table)
-                if pd.isna(rating_val) or pd.isna(spread_val):
-                    break
+                for col_idx, cell_val in enumerate(row):
+                    cell_str = str(cell_val).strip()
+                    if cell_str in rating_patterns:
+                        rating_col_idx = col_idx
+                        found_rating = cell_str
+                        break
                 
-                # Retrieve Low/High bounds if available (Financials might not have them)
-                low_val = row[col_indices['low']] if 'low' in col_indices else "-"
-                high_val = row[col_indices['high']] if 'high' in col_indices else "-"
-                
-                try:
-                    # Format Spread
-                    if isinstance(spread_val, (int, float)):
-                        spread_fmt = f"{spread_val * 100:.2f}%"
-                    else:
-                        spread_fmt = str(spread_val)
+                if rating_col_idx != -1:
+                    # Found a rating row!
+                    # Logic: Spread is usually to the right. Low/High is to the left.
+                    # Damodaran format: > | <= | Rating | Spread
                     
-                    entry = {"Rating": str(rating_val), "Spread": spread_fmt}
-                    if 'low' in col_indices: entry[">"] = low_val
-                    if 'high' in col_indices: entry["≤ to"] = high_val
-                    
-                    # Reorder for display: > | < | Rating | Spread
-                    ordered_entry = {}
-                    if 'low' in col_indices: ordered_entry[">"] = low_val
-                    if 'high' in col_indices: ordered_entry["≤ to"] = high_val
-                    ordered_entry["Rating"] = str(rating_val)
-                    ordered_entry["Spread"] = spread_fmt
-                    
-                    data_rows.append(ordered_entry)
-                except:
-                    continue
+                    try:
+                        spread_val = row[rating_col_idx + 1] # Usually immediate right
+                        # Check if spread_val is valid number
+                        if not isinstance(spread_val, (int, float)):
+                             # Sometimes there's an empty col
+                             spread_val = row[rating_col_idx + 2]
+                        
+                        if isinstance(spread_val, (int, float)):
+                            spread_fmt = f"{spread_val * 100:.2f}%"
+                        else:
+                            spread_fmt = str(spread_val)
+
+                        entry = {"Rating": found_rating, "Spread": spread_fmt}
+                        
+                        # Try to find Low/High bounds (left of rating)
+                        # Only if columns exist
+                        if rating_col_idx >= 2:
+                            high_val = row[rating_col_idx - 1]
+                            low_val = row[rating_col_idx - 2]
+                            
+                            # Validating numeric
+                            if isinstance(high_val, (int, float)) or isinstance(low_val, (int, float)):
+                                entry[">"] = low_val
+                                entry["≤ to"] = high_val
+                                # Reorder
+                                entry = {">": low_val, "≤ to": high_val, "Rating": found_rating, "Spread": spread_fmt}
+
+                        data_rows.append(entry)
+                    except:
+                        continue
             
             return pd.DataFrame(data_rows) if data_rows else None
 
-        # --- Execute Extraction ---
-        # 1. Large Firms
-        df_large = extract_table_smart("large non-financial service firms")
+        # Execute
+        df_large = extract_by_pattern("large non-financial service firms")
         if df_large is not None: result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live)")
 
-        # 2. Small/Risky Firms
-        df_small = extract_table_smart("smaller and riskier firms")
+        df_small = extract_by_pattern("smaller and riskier firms")
         if df_small is not None: result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live)")
         
-        # 3. Financial Firms
-        # Note: Damodaran sometimes labels this "For financial service firms"
-        df_fin = extract_table_smart("financial service firms")
-        if df_fin is not None: 
-            result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live)")
-        else:
-            # Fallback check for slightly different wording if needed
-            df_fin_alt = extract_table_smart("financial firms")
-            if df_fin_alt is not None:
-                result_dict["Financial Firms"] = (df_fin_alt, "Source: NYU Stern (Live)")
+        df_fin = extract_by_pattern("financial service firms")
+        if df_fin is not None: result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live)")
 
     except Exception:
         pass 
@@ -418,6 +413,7 @@ class DetailWACCModel:
             
             mkt_cap_raw = info.get('marketCap', 0)
             
+            # Debt Fallback Logic
             debt_raw = info.get('totalDebt', 0)
             if debt_raw == 0:
                 try:
@@ -427,9 +423,11 @@ class DetailWACCModel:
                             if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
                 except: pass
             
+            # Revenue Fallback Logic
             rev_raw = info.get('totalRevenue', 0)
             ebitda_raw = info.get('ebitda', 0)
             ebit_raw = 0
+            
             try:
                 fin = t.financials
                 if not fin.empty:
