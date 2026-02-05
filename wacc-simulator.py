@@ -84,13 +84,16 @@ def get_sp_buyback_data():
     except: return default_bb_yield, default_div_yield, None, ["Error"]
 
 # ==============================================================================
-# [MODULE] Data Fetcher 2 & 3: FRED Data (GDP & RF) + [NEW] OAS Spreads
+# [MODULE] Data Fetcher 2 & 3: FRED Data (GDP & RF) + OAS Spreads
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_fred_data():
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
     try:
-        r_gdp = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=A191RP1A027NBEA", headers=headers)
+        r_gdp = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=A191RP1A027NBEA", headers=headers, timeout=10)
         df_gdp = pd.read_csv(io.StringIO(r_gdp.text))
         df_gdp.columns = ["Date", "GDP Growth %"]
         df_gdp["Date"] = pd.to_datetime(df_gdp["Date"])
@@ -100,7 +103,7 @@ def get_fred_data():
     except: latest_gdp = 2.0; df_gdp_disp = None
 
     try:
-        r_rf = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10", headers=headers)
+        r_rf = requests.get("https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10", headers=headers, timeout=10)
         df_rf = pd.read_csv(io.StringIO(r_rf.text))
         df_rf.columns = ["Date", "Rate"]
         df_rf["Date"] = pd.to_datetime(df_rf["Date"])
@@ -116,7 +119,7 @@ def get_fred_data():
 @st.cache_data(ttl=3600*24)
 def get_fred_oas_data():
     """
-    Fetches US Corporate Option-Adjusted Spread (OAS) for various ratings.
+    Fetches US Corporate Option-Adjusted Spread (OAS) for various ratings with robust headers.
     """
     series_map = {
         "AAA US Corporate": "BAMLC0A1CAAA",
@@ -128,32 +131,49 @@ def get_fred_oas_data():
         "CCC & Lower US High Yield": "BAMLH0A3HYC"
     }
     
-    headers = {"User-Agent": "Mozilla/5.0"}
+    # [FIX] Enhanced Headers to mimic a real browser
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://fred.stlouisfed.org/"
+    }
+    
     data_list = []
     
     for name, series_id in series_map.items():
         try:
             url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-            r = requests.get(url, headers=headers, timeout=5)
+            r = requests.get(url, headers=headers, timeout=10)
+            r.raise_for_status() # Check for 403/404 errors
+            
             df = pd.read_csv(io.StringIO(r.text))
+            
+            # Clean and sort
+            df.columns = ["DATE", "VALUE"]
             df["DATE"] = pd.to_datetime(df["DATE"])
-            df = df.sort_values(by="DATE", ascending=False)
+            df["VALUE"] = pd.to_numeric(df["VALUE"], errors='coerce')
+            df = df.dropna().sort_values(by="DATE", ascending=True) # Oldest to Newest
             
-            # Get latest valid value
-            latest_val = df.iloc[0, 1]
-            latest_date = df.iloc[0, 0].strftime('%Y-%m-%d')
-            
-            data_list.append({
-                "OAS Name": name,
-                "Latest Spread (%)": float(latest_val),
-                "Date": latest_date,
-                "Series ID": series_id
-            })
-        except:
+            if not df.empty:
+                latest_val = df["VALUE"].iloc[-1] # Take the last one
+                latest_date = df["DATE"].iloc[-1].strftime('%Y-%m-%d')
+                
+                data_list.append({
+                    "OAS Name": name,
+                    "Latest Spread (%)": float(latest_val),
+                    "Date": latest_date,
+                    "Series ID": series_id
+                })
+            else:
+                raise ValueError("Empty Data")
+                
+        except Exception as e:
+            # If fail, append None but keep row
             data_list.append({
                 "OAS Name": name,
                 "Latest Spread (%)": None,
-                "Date": "N/A",
+                "Date": "Error/N/A",
                 "Series ID": series_id
             })
             
