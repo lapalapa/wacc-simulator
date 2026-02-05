@@ -293,6 +293,8 @@ def get_damodaran_spreads():
     try:
         response = requests.get(url, headers=headers, timeout=15)
         response.raise_for_status()
+        
+        # Try finding the 'Start here Ratings sheet'
         try:
             df = pd.read_excel(io.BytesIO(response.content), sheet_name="Start here Ratings sheet", header=None)
         except:
@@ -376,15 +378,15 @@ def get_damodaran_spreads():
         # --- Execute Extraction ---
         df_large = extract_block("for large")
         if df_large is not None and not df_large.empty: 
-            result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Start here Ratings sheet)")
+            result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
 
         df_small = extract_block("for smaller")
         if df_small is not None and not df_small.empty: 
-            result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Start here Ratings sheet)")
+            result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
         
         df_fin = extract_block("for financial")
         if df_fin is not None and not df_fin.empty:
-             result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Start here Ratings sheet)")
+             result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
 
     except Exception as e:
         pass 
@@ -483,6 +485,7 @@ class DetailWACCModel:
         except: return 1.0, currency
 
     def get_financials_latest(self, ticker):
+        # [STRICT MODE] Fail if critical data is missing
         try:
             t = yf.Ticker(ticker)
             info = safe_yf_info(t)
@@ -496,6 +499,7 @@ class DetailWACCModel:
             
             mkt_cap_raw = info.get('marketCap', 0)
             
+            # Debt Fallback Logic
             debt_raw = info.get('totalDebt', 0)
             if debt_raw == 0:
                 try:
@@ -505,9 +509,11 @@ class DetailWACCModel:
                             if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
                 except: pass
             
+            # Revenue Fallback Logic
             rev_raw = info.get('totalRevenue', 0)
             ebitda_raw = info.get('ebitda', 0)
             ebit_raw = 0
+            
             try:
                 fin = t.financials
                 if not fin.empty:
@@ -516,6 +522,7 @@ class DetailWACCModel:
                     if rev_raw == 0 and 'Total Revenue' in fin.index: rev_raw = fin.loc['Total Revenue'].iloc[0]
             except: pass
             
+            # [STRICT VALIDATION]
             if mkt_cap_raw == 0: 
                 try:
                     mkt_cap_raw = t.fast_info['market_cap']
@@ -654,8 +661,8 @@ with st.sidebar:
     st.header("Target & Peers")
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
-    col1, col2 = st.columns([1,1])
-    if col1.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary", use_container_width=True):
+    # [UI FIX] Removed column split to make button full width
+    if st.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary", use_container_width=True):
         with st.spinner("Finding..."):
             rec = PeerRecommender()
             res_peers, group, logs = rec.recommend(target_ticker)
@@ -887,8 +894,7 @@ if 'result' in st.session_state:
                          })
     with t6:
         damodaran_dict = get_damodaran_spreads()
-        source_note = damodaran_dict["Large Firms"][1]
-        st.caption(f"Source: {source_note}")
+        st.caption(f"Source: NYU Stern (Start here Ratings sheet)")
         
         dt1, dt2, dt3 = st.tabs(["🏭 Large Firms", "🚀 Smaller/Risky Firms", "🏦 Financial Firms"])
         
