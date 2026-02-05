@@ -376,44 +376,48 @@ class PeerRecommender:
         except Exception as e: return None, "Error", [str(e)]
 
 def get_target_financials(ticker):
-    # Retrieve Tax Rates Map globally
     _, tax_map, _ = get_kpmg_tax_rates()
-    
     try:
         t = yf.Ticker(ticker)
         info = safe_yf_info(t)
         
-        # Get Tax Rate from Country
         country = info.get('country', 'Unknown')
         target_tax = tax_map.get(country.upper(), 25.0) 
         
-        # Financials
+        # Financials Init
         int_exp = 0; ebit = 0; date_str = "N/A"
         category = "Small/Risky Firms"
         
-        # Priority 1: Annual Data
+        # --- Priority 1: Annual Data ---
         a_fin = t.income_stmt
-        if a_fin.empty: a_fin = t.financials # Fallback to older prop name
+        if a_fin.empty: a_fin = t.financials
         
         if not a_fin.empty:
-            date_str = a_fin.columns[0].strftime('%Y-%m-%d (Annual)')
-            if 'Interest Expense' in a_fin.index: int_exp = a_fin.loc['Interest Expense'].iloc[0]
-            elif 'Interest Expense Non Operating' in a_fin.index: int_exp = a_fin.loc['Interest Expense Non Operating'].iloc[0]
-            
-            if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
-            elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
-        else:
-            # Priority 2: TTM (Quarterly Sum)
-            q_fin = t.quarterly_income_stmt
-            if not q_fin.empty and q_fin.shape[1] >= 4:
-                date_str = "TTM (4Q Sum)"
-                recent_4 = q_fin.iloc[:, :4]
-                if 'Interest Expense' in recent_4.index: int_exp = recent_4.loc['Interest Expense'].sum()
-                elif 'Interest Expense Non Operating' in recent_4.index: int_exp = recent_4.loc['Interest Expense Non Operating'].sum()
+            cols = a_fin.columns
+            if len(cols) > 0:
+                date_str = cols[0].strftime('%Y-%m-%d (Annual)')
+                if 'Interest Expense' in a_fin.index: int_exp = a_fin.loc['Interest Expense'].iloc[0]
+                elif 'Interest Expense Non Operating' in a_fin.index: int_exp = a_fin.loc['Interest Expense Non Operating'].iloc[0]
                 
-                if 'EBIT' in recent_4.index: ebit = recent_4.loc['EBIT'].sum()
-                elif 'Operating Income' in recent_4.index: ebit = recent_4.loc['Operating Income'].sum()
-
+                if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
+                elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
+        
+        # --- Priority 2: Yahoo Info (TTM) ---
+        # If Annual data yielded zero or missing, fallback to Info TTM (Do NOT calc manually)
+        if int_exp == 0 and ebit == 0:
+            rev_ttm = info.get('totalRevenue', 0)
+            op_margin = info.get('operatingMargins', 0)
+            ebitda_ttm = info.get('ebitda', 0)
+            
+            if rev_ttm > 0:
+                date_str = "TTM (Yahoo Info)"
+                # Try to get EBIT directly if possible, else infer
+                # Info doesn't have explicit EBIT usually, so we estimate
+                if ebitda_ttm > 0:
+                    ebit = ebitda_ttm # Proxy if EBIT missing, better than 0
+                else:
+                    ebit = rev_ttm * op_margin
+        
         # Category Detection
         mkt_cap = info.get('marketCap', 0)
         sector = info.get('sector', '')
@@ -426,10 +430,11 @@ def get_target_financials(ticker):
             "ebit": ebit if pd.notna(ebit) else 0,
             "date": date_str,
             "category": category,
-            "tax_rate": target_tax
+            "tax_rate": target_tax,
+            "country_name": country
         }
     except: pass
-    return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": 25.0}
+    return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": 25.0, "country_name": "Unknown"}
 
 # ==============================================================================
 # [LOGIC] WACC Engine
@@ -485,15 +490,14 @@ class DetailWACCModel:
             country = info.get('country', 'Unknown')
             fx, curr_code = self.get_exchange_rate_to_usd(curr)
             
-            # --- Financials Logic (Priority 1: Annual, Priority 2: TTM) ---
             mkt_cap = info.get('marketCap', 0)
-            debt = info.get('totalDebt', 0)
+            debt = info.get('totalDebt', 0) # Usually TTM/MRQ from info
             
             # Init holders
             rev = 0; ebit = 0; ebitda = 0
             period_label = "N/A"
             
-            # 1. Try Annual First
+            # --- Priority 1: Annual Data ---
             a_fin = t.income_stmt
             if a_fin.empty: a_fin = t.financials
             
@@ -507,23 +511,17 @@ class DetailWACCModel:
                 if 'EBITDA' in a_fin.index: ebitda = a_fin.loc['EBITDA'].iloc[0]
                 elif 'Normalized EBITDA' in a_fin.index: ebitda = a_fin.loc['Normalized EBITDA'].iloc[0]
             
-            # 2. If Annual missing critical data, Try TTM
+            # --- Priority 2: Yahoo Info (TTM) ---
+            # If Annual data missing critical fields, use Info TTM directly (No Manual Calc)
             if rev == 0 or ebit == 0:
-                q_fin = t.quarterly_income_stmt
-                if not q_fin.empty and q_fin.shape[1] >= 4:
-                    period_label = "TTM (Calc)"
-                    recent_4 = q_fin.iloc[:, :4]
-                    if rev == 0 and 'Total Revenue' in recent_4.index: rev = recent_4.loc['Total Revenue'].sum()
-                    if ebit == 0:
-                        if 'EBIT' in recent_4.index: ebit = recent_4.loc['EBIT'].sum()
-                        elif 'Operating Income' in recent_4.index: ebit = recent_4.loc['Operating Income'].sum()
-                    # Approx EBITDA if missing in Annual
-                    if ebitda == 0: ebitda = ebit 
-                else:
-                    # Last Resort: Info
-                    if rev == 0: rev = info.get('totalRevenue', 0)
-                    if ebitda == 0: ebitda = info.get('ebitda', 0)
-                    if period_label == "N/A": period_label = "TTM (Yahoo Info)"
+                period_label = "TTM (Yahoo Info)"
+                rev = info.get('totalRevenue', 0)
+                ebitda = info.get('ebitda', 0)
+                # Estimate EBIT if missing in info
+                if ebit == 0:
+                    # Prefer EBITDA if available as proxy for Beta logic, or derive from margins
+                    if ebitda > 0: ebit = ebitda 
+                    else: ebit = rev * info.get('operatingMargins', 0)
 
             if mkt_cap == 0: 
                 try: mkt_cap = t.fast_info['market_cap']
@@ -627,6 +625,7 @@ with st.sidebar:
         tf = st.session_state['target_fin']
         
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, float(tf.get('tax_rate', 25.0)), 0.1)
+        st.caption(f"📍 Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
         
         st.divider()
         st.markdown("**Target Financials** (for Credit Spread)")
