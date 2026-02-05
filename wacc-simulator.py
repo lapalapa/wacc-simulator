@@ -383,47 +383,51 @@ def get_target_financials(ticker):
         t = yf.Ticker(ticker)
         info = safe_yf_info(t)
         
-        # Get Financials (Income Statement)
-        inc = t.income_stmt
-        if inc.empty: inc = t.financials
-        
         # Get Tax Rate from Country
         country = info.get('country', 'Unknown')
-        target_tax = tax_map.get(country.upper(), 25.0) # Map country to tax rate
+        target_tax = tax_map.get(country.upper(), 25.0) 
         
-        if not inc.empty:
-            date_str = inc.columns[0].strftime('%Y-%m-%d')
-            # Extract Interest Expense
-            if 'Interest Expense' in inc.index: int_exp = inc.loc['Interest Expense'].iloc[0]
-            elif 'Interest Expense Non Operating' in inc.index: int_exp = inc.loc['Interest Expense Non Operating'].iloc[0]
-            else: int_exp = 0
+        # Financials
+        int_exp = 0; ebit = 0; date_str = "N/A"
+        category = "Small/Risky Firms"
+        
+        # Priority 1: Annual Data
+        a_fin = t.income_stmt
+        if a_fin.empty: a_fin = t.financials # Fallback to older prop name
+        
+        if not a_fin.empty:
+            date_str = a_fin.columns[0].strftime('%Y-%m-%d (Annual)')
+            if 'Interest Expense' in a_fin.index: int_exp = a_fin.loc['Interest Expense'].iloc[0]
+            elif 'Interest Expense Non Operating' in a_fin.index: int_exp = a_fin.loc['Interest Expense Non Operating'].iloc[0]
             
-            # Extract EBIT
-            if 'EBIT' in inc.index: ebit = inc.loc['EBIT'].iloc[0]
-            elif 'Operating Income' in inc.index: ebit = inc.loc['Operating Income'].iloc[0] # Fallback
-            else: ebit = 0
-            
-            # Fill NaN with 0
-            if pd.isna(int_exp): int_exp = 0
-            if pd.isna(ebit): ebit = 0
-            
-            # Category Detection
-            mkt_cap = info.get('marketCap', 0)
-            sector = info.get('sector', '')
-            
-            if 'Financial' in sector: category = "Financial Firms"
-            elif mkt_cap > 5e9: category = "Large Firms" # $5 Billion
-            else: category = "Small/Risky Firms"
-            
-            return {
-                "int_exp": abs(int_exp), # Interest is usually negative in Yahoo
-                "ebit": ebit,
-                "date": date_str,
-                "category": category,
-                "tax_rate": target_tax
-            }
+            if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
+            elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
         else:
-            return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": target_tax}
+            # Priority 2: TTM (Quarterly Sum)
+            q_fin = t.quarterly_income_stmt
+            if not q_fin.empty and q_fin.shape[1] >= 4:
+                date_str = "TTM (4Q Sum)"
+                recent_4 = q_fin.iloc[:, :4]
+                if 'Interest Expense' in recent_4.index: int_exp = recent_4.loc['Interest Expense'].sum()
+                elif 'Interest Expense Non Operating' in recent_4.index: int_exp = recent_4.loc['Interest Expense Non Operating'].sum()
+                
+                if 'EBIT' in recent_4.index: ebit = recent_4.loc['EBIT'].sum()
+                elif 'Operating Income' in recent_4.index: ebit = recent_4.loc['Operating Income'].sum()
+
+        # Category Detection
+        mkt_cap = info.get('marketCap', 0)
+        sector = info.get('sector', '')
+        if 'Financial' in sector: category = "Financial Firms"
+        elif mkt_cap > 5e9: category = "Large Firms" 
+        else: category = "Small/Risky Firms"
+        
+        return {
+            "int_exp": abs(int_exp) if pd.notna(int_exp) else 0, 
+            "ebit": ebit if pd.notna(ebit) else 0,
+            "date": date_str,
+            "category": category,
+            "tax_rate": target_tax
+        }
     except: pass
     return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": 25.0}
 
@@ -480,36 +484,58 @@ class DetailWACCModel:
             curr = info.get('currency', 'USD')
             country = info.get('country', 'Unknown')
             fx, curr_code = self.get_exchange_rate_to_usd(curr)
-            mkt_cap_raw = info.get('marketCap', 0)
-            debt_raw = info.get('totalDebt', 0)
-            if debt_raw == 0:
-                try:
-                    bs = t.balance_sheet
-                    if not bs.empty:
-                        for item in ['Total Debt', 'Long Term Debt', 'Total Liab']:
-                            if item in bs.index: debt_raw = bs.loc[item].iloc[0]; break
-                except: pass
             
-            rev_raw = info.get('totalRevenue', 0)
-            ebitda_raw = info.get('ebitda', 0)
-            ebit_raw = 0
-            try:
-                fin = t.financials
-                if not fin.empty:
-                    if 'EBIT' in fin.index: ebit_raw = fin.loc['EBIT'].iloc[0]
-                    elif 'Operating Income' in fin.index: ebit_raw = fin.loc['Operating Income'].iloc[0]
-                    if rev_raw == 0 and 'Total Revenue' in fin.index: rev_raw = fin.loc['Total Revenue'].iloc[0]
-            except: pass
+            # --- Financials Logic (Priority 1: Annual, Priority 2: TTM) ---
+            mkt_cap = info.get('marketCap', 0)
+            debt = info.get('totalDebt', 0)
             
-            if mkt_cap_raw == 0: 
-                try: mkt_cap_raw = t.fast_info['market_cap']
+            # Init holders
+            rev = 0; ebit = 0; ebitda = 0
+            period_label = "N/A"
+            
+            # 1. Try Annual First
+            a_fin = t.income_stmt
+            if a_fin.empty: a_fin = t.financials
+            
+            if not a_fin.empty:
+                period_label = a_fin.columns[0].strftime('%Y-%m-%d (Annual)')
+                if 'Total Revenue' in a_fin.index: rev = a_fin.loc['Total Revenue'].iloc[0]
+                
+                if 'EBIT' in a_fin.index: ebit = a_fin.loc['EBIT'].iloc[0]
+                elif 'Operating Income' in a_fin.index: ebit = a_fin.loc['Operating Income'].iloc[0]
+                
+                if 'EBITDA' in a_fin.index: ebitda = a_fin.loc['EBITDA'].iloc[0]
+                elif 'Normalized EBITDA' in a_fin.index: ebitda = a_fin.loc['Normalized EBITDA'].iloc[0]
+            
+            # 2. If Annual missing critical data, Try TTM
+            if rev == 0 or ebit == 0:
+                q_fin = t.quarterly_income_stmt
+                if not q_fin.empty and q_fin.shape[1] >= 4:
+                    period_label = "TTM (Calc)"
+                    recent_4 = q_fin.iloc[:, :4]
+                    if rev == 0 and 'Total Revenue' in recent_4.index: rev = recent_4.loc['Total Revenue'].sum()
+                    if ebit == 0:
+                        if 'EBIT' in recent_4.index: ebit = recent_4.loc['EBIT'].sum()
+                        elif 'Operating Income' in recent_4.index: ebit = recent_4.loc['Operating Income'].sum()
+                    # Approx EBITDA if missing in Annual
+                    if ebitda == 0: ebitda = ebit 
+                else:
+                    # Last Resort: Info
+                    if rev == 0: rev = info.get('totalRevenue', 0)
+                    if ebitda == 0: ebitda = info.get('ebitda', 0)
+                    if period_label == "N/A": period_label = "TTM (Yahoo Info)"
+
+            if mkt_cap == 0: 
+                try: mkt_cap = t.fast_info['market_cap']
                 except: return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)."
-            if rev_raw == 0: return None, f"⚠️ {ticker}: Excluded (Missing Revenue)."
+            
+            if rev == 0: return None, f"⚠️ {ticker}: Excluded (Missing Revenue)."
 
             tax_rate = self.kpmg_map.get(country.upper(), 25.0) 
             data = {
                 "name": info.get('longName', ticker), "country": country, "currency": curr_code, "fx_rate": fx, "tax_rate": tax_rate,
-                "vals": { "Revenue": rev_raw * fx, "EBIT": ebit_raw * fx, "EBITDA": ebitda_raw * fx, "Total Debt": debt_raw * fx, "Market Cap": mkt_cap_raw * fx }
+                "vals": { "Revenue": rev * fx, "EBIT": ebit * fx, "EBITDA": ebitda * fx, "Total Debt": debt * fx, "Market Cap": mkt_cap * fx },
+                "period": period_label
             }
             return data, None
         except Exception as e: return None, f"⚠️ {ticker}: Excluded (API Error: {str(e)})"
@@ -556,7 +582,8 @@ class DetailWACCModel:
                     "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Country": fin['country'],
                     "Tax Rate": fin['tax_rate'], "Currency": fin['currency'], "FX Rate": fin['fx_rate'],
                     "Revenue": d['Revenue'], "EBIT": d['EBIT'], "EBITDA": d['EBITDA'], "Total Debt": d['Total Debt'],
-                    "Market Cap": d['Market Cap'], "D/E Ratio": de_ratio, "Debt/TIC Ratio": dtic_ratio
+                    "Market Cap": d['Market Cap'], "D/E Ratio": de_ratio, "Debt/TIC Ratio": dtic_ratio,
+                    "Period": fin['period']
                 })
         progress_text.empty()
         df_peers = pd.DataFrame(peer_data)
@@ -591,21 +618,19 @@ with st.sidebar:
     st.divider()
     st.header("Assumptions")
     
-    # [MOVED UP] Target Assumptions (First Section)
+    # [SECTION] Target Assumptions
     with st.expander("Target Assumptions", expanded=True):
-        # Fetch Target Financials & Tax Rate
         if 'target_fin' not in st.session_state or st.session_state.get('last_ticker') != target_ticker:
             st.session_state['target_fin'] = get_target_financials(target_ticker)
             st.session_state['last_ticker'] = target_ticker
         
         tf = st.session_state['target_fin']
         
-        # Tax Rate Auto-Populated
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, float(tf.get('tax_rate', 25.0)), 0.1)
         
         st.divider()
         st.markdown("**Target Financials** (for Credit Spread)")
-        st.caption(f"Data Date: {tf['date']}")
+        st.caption(f"Data Source: {tf['date']}")
         
         int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
         ebit_in = st.number_input("EBIT ($)", value=float(tf['ebit']), format="%.0f")
@@ -614,14 +639,14 @@ with st.sidebar:
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
         category_in = st.selectbox("Firm Category", cat_options, index=cat_default_idx)
 
-    # [MOVED DOWN] Cost of Equity / Debt
+    # [SECTION] Cost of Equity / Debt
     with st.expander("Cost of Equity / Debt", expanded=True):
         latest_gdp, df_gdp_disp, latest_rf, rf_trend_df = get_fred_data()
         rf_in = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
         crp_in = st.number_input("Country Risk Premium (%)", value=0.0, step=0.1)
         size_in = st.number_input("Size Premium (%)", value=0.0, step=0.1)
     
-    # [MOVED DOWN] Implied Return
+    # [SECTION] Implied Return
     with st.expander("Implied Return", expanded=True):
         avg_bb, avg_div, _, _ = get_sp_buyback_data()
         bb_in = st.number_input(f"Buyback Yield (5Y Avg: {avg_bb:.2f}%)", value=avg_bb, step=0.1)
@@ -687,7 +712,6 @@ if 'result' in st.session_state:
         ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
         
         # [LOGIC] Determine Spread from ICR
-        # Safe retrieval for backward compatibility with older session states
         int_exp = inp.get('int_exp', 0.0)
         ebit = inp.get('ebit', 0.0)
         category = inp.get('category', "Small/Risky Firms")
@@ -702,17 +726,12 @@ if 'result' in st.session_state:
         implied_spread_val = 2.00 # Default fallback
         
         if rating_table is not None:
-            # Sort by limit to find range
-            # Format is string usually, need to parse
             for idx, row in rating_table.iterrows():
                 try:
-                    # Clean bounds
                     low_v = float(str(row.get('greater than','-')).replace('greater than','').replace('-','-99999').strip())
                     high_v = float(str(row.get('≤ to','-')).replace('-','99999').strip())
-                    
                     if low_v < icr <= high_v:
                         implied_rating = row['Rating']
-                        # Parse spread string "0.40%" -> 0.40
                         spread_str = str(row['Spread']).replace('%','')
                         implied_spread_val = float(spread_str)
                         break
@@ -720,8 +739,6 @@ if 'result' in st.session_state:
         
         # 2. Map Rating to OAS
         fred_oas = get_fred_oas_data()
-        
-        # Map Damodaran Ratings to FRED Keys
         rating_map = {
             "Aaa/AAA": "AAA US Corporate", "Aa2/AA": "AA US Corporate", 
             "A1/A+": "Single-A US Corporate", "A2/A": "Single-A US Corporate", "A3/A-": "Single-A US Corporate",
@@ -732,14 +749,11 @@ if 'result' in st.session_state:
         }
         
         target_fred_key = rating_map.get(implied_rating, "BB US High Yield") # Default to BB
-        
-        # Find Spread in FRED Data
-        final_spread = implied_spread_val # Use Damodaran spread as base, but try to overwrite with FRED
+        final_spread = implied_spread_val 
         fred_row = fred_oas[fred_oas['OAS Name'] == target_fred_key]
         if not fred_row.empty:
             val = fred_row.iloc[0]['Latest Spread (%)']
-            if val is not None and not pd.isna(val):
-                final_spread = val
+            if val is not None and not pd.isna(val): final_spread = val
             
         kd = ((inp['rf'] + final_spread)/100) * (1 - inp['tax']/100)
         wd = sel_dtic
@@ -747,7 +761,7 @@ if 'result' in st.session_state:
         wacc = (we * ke) + (wd * kd)
 
         with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
-            cols_show = ["Ticker", "Company Name", "Country", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", "Unlevered Beta", "Re-levered Beta"]
+            cols_show = ["Ticker", "Company Name", "Country", "Period", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", "Unlevered Beta", "Re-levered Beta"]
             disp_df = calc_df.copy()
             disp_df["Total Debt"] = disp_df.apply(lambda x: f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B", axis=1)
             disp_df["Market Cap"] = disp_df.apply(lambda x: f"{x['Currency']} {x['Market Cap']/1e9:,.2f}B", axis=1)
@@ -824,7 +838,6 @@ if 'result' in st.session_state:
     st.markdown("---")
     st.subheader("Cost of Debt")
     
-    # [NEW] Target Credit Spread Section
     with st.expander("🎯 Target Credit Spread Calculation", expanded=True):
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.metric("Interest Coverage Ratio", f"{icr:.2f}x")
@@ -845,7 +858,7 @@ if 'result' in st.session_state:
     st.markdown("---")
     st.subheader("Peer Group Analysis (Financials)")
     if not df_init.empty:
-        fin_cols = ["Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio"]
+        fin_cols = ["Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Period"]
         fin_df = df_init.copy()
         for c in ["Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap"]: fin_df[c] = fin_df[c] / 1e9 
         st.dataframe(fin_df[fin_cols], use_container_width=True, hide_index=True,
@@ -895,7 +908,8 @@ if 'result' in st.session_state:
                          })
     with t6:
         damodaran_dict = get_damodaran_spreads()
-        st.caption(f"Source: NYU Stern (Start here Ratings sheet)")
+        source_note = damodaran_dict["Large Firms"][1]
+        st.caption(f"Source: {source_note}")
         
         dt1, dt2, dt3 = st.tabs(["🏭 Large Firms", "🚀 Smaller/Risky Firms", "🏦 Financial Firms"])
         
