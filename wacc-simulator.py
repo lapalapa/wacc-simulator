@@ -44,123 +44,136 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     sector = info_dict.get('sector', '').lower()
     is_financial = 'financial' in sector or 'bank' in sector
     
+    current_year = datetime.now().year
+    target_y1 = current_year - 1
+    target_y2 = current_year - 2
+    
     try:
-        # --- Priority 1: Latest Annual (Strict Validation) ---
+        # Load Statements
         a_fin = ticker_obj.income_stmt
         if a_fin.empty: a_fin = ticker_obj.financials
         
-        valid_annual = False
-        if not a_fin.empty:
-            for col in a_fin.columns:
-                temp_rev = 0
-                if 'Total Revenue' in a_fin.index: temp_rev = a_fin.loc['Total Revenue'][col]
-                
-                # Check if Revenue exists and > 0
-                if pd.notna(temp_rev) and temp_rev > 1000:
-                    period_label = col.strftime('%Y-%m-%d (Annual)')
-                    rev = temp_rev
-                    
-                    if 'Interest Expense' in a_fin.index: int_exp = a_fin.loc['Interest Expense'][col]
-                    elif 'Interest Expense Non Operating' in a_fin.index: int_exp = a_fin.loc['Interest Expense Non Operating'][col]
-                    
-                    if 'EBITDA' in a_fin.index: ebitda = a_fin.loc['EBITDA'][col]
-                    elif 'Normalized EBITDA' in a_fin.index: ebitda = a_fin.loc['Normalized EBITDA'][col]
-                    
-                    val_e = 0
-                    if is_financial:
-                        pretax = 0; provision = 0
-                        if 'Pretax Income' in a_fin.index: pretax = a_fin.loc['Pretax Income'][col]
-                        if 'Provision For Credit Losses' in a_fin.index: provision = a_fin.loc['Provision For Credit Losses'][col]
-                        elif 'Provision For Loan Losses' in a_fin.index: provision = a_fin.loc['Provision For Loan Losses'][col]
-                        
-                        if pd.notna(pretax): val_e = pretax + (provision if pd.notna(provision) else 0)
-                        if val_e == 0 and 'EBIT' in a_fin.index: val_e = a_fin.loc['EBIT'][col]
-                    else:
-                        if 'EBIT' in a_fin.index: val_e = a_fin.loc['EBIT'][col]
-                        elif 'Operating Income' in a_fin.index: val_e = a_fin.loc['Operating Income'][col]
-                    
-                    ebit = val_e
-                    
-                    if pd.isna(ebit): ebit = 0
-                    if pd.isna(ebitda): ebitda = 0
-                    if pd.isna(int_exp): int_exp = 0
-                    
-                    valid_annual = True
-                    break
-        
-        if valid_annual:
-            return rev, ebit, ebitda, abs(int_exp), period_label
+        q_fin = ticker_obj.quarterly_income_stmt
+        if q_fin.empty: q_fin = ticker_obj.quarterly_financials
 
-        # --- Priority 2: Yahoo Info TTM ---
+        # Helper to extract from a specific column in dataframe
+        def extract_from_col(df, col_idx):
+            r = 0; e = 0; ed = 0; i = 0
+            if 'Total Revenue' in df.index: r = df.loc['Total Revenue'].iloc[col_idx]
+            
+            # Interest
+            if 'Interest Expense' in df.index: i = df.loc['Interest Expense'].iloc[col_idx]
+            elif 'Interest Expense Non Operating' in df.index: i = df.loc['Interest Expense Non Operating'].iloc[col_idx]
+            
+            # EBITDA
+            if 'EBITDA' in df.index: ed = df.loc['EBITDA'].iloc[col_idx]
+            elif 'Normalized EBITDA' in df.index: ed = df.loc['Normalized EBITDA'].iloc[col_idx]
+            
+            # EBIT / PPNR
+            val_e = 0
+            if is_financial:
+                pretax = 0; provision = 0
+                if 'Pretax Income' in df.index: pretax = df.loc['Pretax Income'].iloc[col_idx]
+                if 'Provision For Credit Losses' in df.index: provision = df.loc['Provision For Credit Losses'].iloc[col_idx]
+                elif 'Provision For Loan Losses' in df.index: provision = df.loc['Provision For Loan Losses'].iloc[col_idx]
+                
+                if pd.notna(pretax): val_e = pretax + (provision if pd.notna(provision) else 0)
+                if val_e == 0 and 'EBIT' in df.index: val_e = df.loc['EBIT'].iloc[col_idx] # Fallback
+            else:
+                if 'EBIT' in df.index: val_e = df.loc['EBIT'].iloc[col_idx]
+                elif 'Operating Income' in df.index: val_e = df.loc['Operating Income'].iloc[col_idx]
+            
+            e = val_e
+            return r, e, ed, i
+
+        # --- Step 1: Annual (Current Year - 1) ---
+        if not a_fin.empty:
+            for idx, col in enumerate(a_fin.columns):
+                col_dt = pd.to_datetime(col)
+                if col_dt.year == target_y1:
+                    r, e, ed, i = extract_from_col(a_fin, idx)
+                    if pd.notna(r) and r > 0:
+                        return r, e, ed, abs(i), f"FY {target_y1}"
+
+        # --- Step 2: Yahoo Info TTM ---
         rev_ttm = info_dict.get('totalRevenue', 0)
         if rev_ttm is not None and rev_ttm > 0:
-            period_label = "TTM (Yahoo Info)"
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense (Sum from quarterly)
-            q_fin = ticker_obj.quarterly_income_stmt
+            # EBIT Logic for Info TTM
+            op_margin = info_dict.get('operatingMargins', 0)
+            if op_margin: ebit = rev * op_margin
+            elif ebitda: ebit = ebitda
+            
+            # Interest Expense (Info usually missing it, try quarterly sum overlay)
             if not q_fin.empty and q_fin.shape[1] >= 4:
                 recent_4 = q_fin.iloc[:, :4]
                 if 'Interest Expense' in recent_4.index: int_exp = recent_4.loc['Interest Expense'].sum()
                 elif 'Interest Expense Non Operating' in recent_4.index: int_exp = recent_4.loc['Interest Expense Non Operating'].sum()
                 
+                # If Financials, calculate PPNR TTM here to overwrite the weak Info proxy
                 if is_financial:
                     pretax = 0; provision = 0
                     if 'Pretax Income' in recent_4.index: pretax = recent_4.loc['Pretax Income'].sum()
                     if 'Provision For Credit Losses' in recent_4.index: provision = recent_4.loc['Provision For Credit Losses'].sum()
+                    elif 'Provision For Loan Losses' in recent_4.index: provision = recent_4.loc['Provision For Loan Losses'].sum()
                     if pretax != 0: ebit = pretax + provision
             
-            if ebit == 0:
-                op_margin = info_dict.get('operatingMargins', 0)
-                if op_margin: ebit = rev * op_margin
-                elif ebitda: ebit = ebitda
-            
-            return rev, ebit, ebitda, abs(int_exp), period_label
+            return rev, ebit, ebitda, abs(int_exp), "TTM (Yahoo)"
 
-        # --- Priority 3: Calc TTM ---
+        # --- Step 3: Calc TTM (Quarterly Sum) ---
         if not q_fin.empty and q_fin.shape[1] >= 4:
-            period_label = "TTM (Calc)"
             recent_4 = q_fin.iloc[:, :4]
-            
+            # Sum logic
             if 'Total Revenue' in recent_4.index: rev = recent_4.loc['Total Revenue'].sum()
             if 'EBITDA' in recent_4.index: ebitda = recent_4.loc['EBITDA'].sum()
             
+            # Interest
             if 'Interest Expense' in recent_4.index: int_exp = recent_4.loc['Interest Expense'].sum()
             elif 'Interest Expense Non Operating' in recent_4.index: int_exp = recent_4.loc['Interest Expense Non Operating'].sum()
             
-            val_e = 0
+            # EBIT / PPNR
+            val_ebit = 0
             if is_financial:
                 pretax = 0; provision = 0
                 if 'Pretax Income' in recent_4.index: pretax = recent_4.loc['Pretax Income'].sum()
                 if 'Provision For Credit Losses' in recent_4.index: provision = recent_4.loc['Provision For Credit Losses'].sum()
-                val_e = pretax + provision
+                elif 'Provision For Loan Losses' in recent_4.index: provision = recent_4.loc['Provision For Loan Losses'].sum()
+                val_ebit = pretax + provision
             else:
-                if 'EBIT' in recent_4.index: val_e = recent_4.loc['EBIT'].sum()
-                elif 'Operating Income' in recent_4.index: val_e = recent_4.loc['Operating Income'].sum()
+                if 'EBIT' in recent_4.index: val_ebit = recent_4.loc['EBIT'].sum()
+                elif 'Operating Income' in recent_4.index: val_ebit = recent_4.loc['Operating Income'].sum()
             
-            ebit = val_e
-            return rev, ebit, ebitda, abs(int_exp), period_label
+            ebit = val_ebit
+            return rev, ebit, ebitda, abs(int_exp), "TTM (Calc)"
+
+        # --- Step 4: Annual (Current Year - 2) ---
+        if not a_fin.empty:
+            for idx, col in enumerate(a_fin.columns):
+                col_dt = pd.to_datetime(col)
+                if col_dt.year == target_y2:
+                    r, e, ed, i = extract_from_col(a_fin, idx)
+                    if pd.notna(r) and r > 0:
+                        return r, e, ed, abs(i), f"FY {target_y2}"
+
+        # --- Step 5: Empty ---
+        return 0, 0, 0, 0, "No Data"
 
     except Exception:
         pass
     
-    return 0, 0, 0, 0, "No Data"
+    return 0, 0, 0, 0, "Error"
 
 # ==============================================================================
-# [MODULE] Data Fetcher: Consolidated FRED (New)
+# [MODULE] Data Fetcher: Consolidated FRED
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def fetch_all_fred_data():
-    """
-    Fetches GDP, Risk Free Rate, and OAS Spreads in a single, throttled loop.
-    Returns: latest_gdp, df_gdp_disp, latest_rf, df_rf_trend, df_oas
-    """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    # Target Definitions (Name, SeriesID, is_OAS)
     targets = [
         ("GDP", "A191RP1A027NBEA", False),
         ("RF", "DGS10", False),
@@ -175,38 +188,30 @@ def fetch_all_fred_data():
     
     results = {}
     
-    # 1. Fetch Loop
     for key, series_id, is_oas in targets:
-        time.sleep(random.uniform(1.2, 2.5)) # Robust throttling
+        time.sleep(random.uniform(1.2, 2.5)) 
         try:
             url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
             r = requests.get(url, headers=headers, timeout=10, verify=False)
             r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text))
-            
-            # Standardize columns
             df.columns = ["DATE", "VALUE"]
             df["DATE"] = pd.to_datetime(df["DATE"])
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors='coerce')
             df = df.dropna().sort_values(by="DATE", ascending=True)
-            
-            if not df.empty:
-                results[key] = df
-        except:
-            pass
+            if not df.empty: results[key] = df
+        except: pass
 
-    # 2. Process GDP
-    latest_gdp = 2.5 # Default
-    df_gdp_disp = None
+    # GDP
+    latest_gdp = 2.5; df_gdp_disp = None
     if "GDP" in results:
         df = results["GDP"]
         latest_gdp = float(df["VALUE"].iloc[-1])
         df_gdp_disp = df.sort_values(by="DATE", ascending=False).head(10)
         df_gdp_disp.columns = ["Date", "GDP Growth %"]
 
-    # 3. Process Risk Free Rate
-    latest_rf = 4.2 # Default
-    df_rf_trend = None
+    # RF
+    latest_rf = 4.2; df_rf_trend = None
     if "RF" in results:
         df = results["RF"]
         latest_rf = float(df["VALUE"].iloc[-1])
@@ -214,7 +219,7 @@ def fetch_all_fred_data():
         df_rf_trend = df[df["DATE"] >= cutoff].copy()
         df_rf_trend.columns = ["Date", "Rate"]
 
-    # 4. Process OAS Spreads
+    # OAS
     oas_map = {
         "AAA": "AAA US Corporate", "AA": "AA US Corporate", "A": "Single-A US Corporate",
         "BBB": "BBB US Corporate", "BB": "BB US High Yield", "B": "Single-B US High Yield",
@@ -226,7 +231,6 @@ def fetch_all_fred_data():
     for k, name in oas_map.items():
         val = fallback_map[k]
         date_str = "Fallback"
-        # Find series ID for link
         sid = next((t[1] for t in targets if t[0] == k), "")
         link = f"https://fred.stlouisfed.org/series/{sid}"
         
@@ -235,30 +239,23 @@ def fetch_all_fred_data():
             val = float(df["VALUE"].iloc[-1])
             date_str = df["DATE"].iloc[-1].strftime('%Y-%m-%d')
             
-        oas_rows.append({
-            "OAS Name": name,
-            "Latest Spread (%)": val,
-            "Date": date_str,
-            "Link": link
-        })
+        oas_rows.append({"OAS Name": name, "Latest Spread (%)": val, "Date": date_str, "Link": link})
     
     df_oas = pd.DataFrame(oas_rows)
-    
     return latest_gdp, df_gdp_disp, latest_rf, df_rf_trend, df_oas
 
 # ==============================================================================
-# [MODULE] Data Fetcher: NYU Stern & KPMG
+# [MODULE] Data Fetcher: NYU & KPMG
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_sp_buyback_data():
-    # ... (Same as before) ...
     url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         response = requests.get(url, headers=headers, timeout=15, verify=False)
         dfs = pd.read_html(io.StringIO(response.text), header=0)
         clean_df = dfs[0].dropna(subset=[dfs[0].columns[0]])
-        # Mock logic for brevity
+        # Mock logic
         return 2.0, 1.5, clean_df, []
     except: return 2.0, 1.5, None, ["Error"]
 
@@ -282,7 +279,6 @@ def get_kpmg_tax_rates():
 
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
-    # ... (Same fallback logic for stability) ...
     fallback_fin = pd.DataFrame([{"greater than": "3.0", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"}])
     return {
         "Large Firms": (fallback_fin, "Fallback"),
@@ -291,7 +287,7 @@ def get_damodaran_spreads():
     }
 
 # ==============================================================================
-# [MODULE] Peer Recommender & Financials
+# [MODULE] Peer Recommender
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
@@ -327,7 +323,7 @@ def get_target_financials(ticker):
         info = safe_yf_info(t, max_retries=5)
         
         country = info.get('country', 'Unknown')
-        country_norm = country.upper().strip()
+        country_norm = str(country).upper().strip()
         target_tax = tax_map.get(country_norm)
         if target_tax is None:
             if "UNITED STATES" in country_norm or "USA" in country_norm: target_tax = 25.57
@@ -436,7 +432,7 @@ class DetailWACCModel:
 # ==============================================================================
 # [UI] Dashboard
 # ==============================================================================
-# LOAD ALL FRED DATA ONCE (Consolidated)
+# FETCH FRED DATA (GLOBAL)
 latest_gdp, df_gdp_disp, latest_rf, df_rf_trend, df_oas = fetch_all_fred_data()
 
 with st.sidebar:
@@ -468,7 +464,7 @@ with st.sidebar:
         st.caption(f"📍 Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
         
         st.divider()
-        is_fin_target = 'Financial' in tf['category']
+        is_fin_target = 'Financial' in tf['category'] or 'Bank' in tf['category']
         ebit_label = "PPNR ($)" if is_fin_target else "EBIT ($)"
         
         st.markdown(f"**Target Financials** (for Credit Spread)")
@@ -579,18 +575,16 @@ if 'result' in st.session_state:
                 except: continue
         
         # 2. Map Rating to OAS
-        rating_map = {
-            "Aaa/AAA": "AAA US Corporate", "Aa2/AA": "AA US Corporate", 
-            "A1/A+": "Single-A US Corporate", "A2/A": "Single-A US Corporate", "A3/A-": "Single-A US Corporate",
-            "Baa2/BBB": "BBB US Corporate", 
-            "Ba1/BB+": "BB US High Yield", "Ba2/BB": "BB US High Yield",
-            "B1/B+": "Single-B US High Yield", "B2/B": "Single-B US High Yield", "B3/B-": "Single-B US High Yield",
-            "Caa/CCC": "CCC & Lower US High Yield", "Ca2/CC": "CCC & Lower US High Yield", "C2/C": "CCC & Lower US High Yield", "D2/D": "CCC & Lower US High Yield"
-        }
+        target_fred_key = "BB US High Yield" # Default
+        if "AAA" in implied_rating: target_fred_key = "AAA US Corporate"
+        elif "AA" in implied_rating: target_fred_key = "AA US Corporate"
+        elif "A" in implied_rating: target_fred_key = "Single-A US Corporate"
+        elif "BBB" in implied_rating: target_fred_key = "BBB US Corporate"
+        elif "BB" in implied_rating: target_fred_key = "BB US High Yield"
+        elif "B" in implied_rating: target_fred_key = "Single-B US High Yield"
+        elif "C" in implied_rating: target_fred_key = "CCC & Lower US High Yield"
         
-        target_fred_key = rating_map.get(implied_rating, "BB US High Yield") # Default to BB
         final_spread = implied_spread_val 
-        # Check from consolidated DF
         fred_row = df_oas[df_oas['OAS Name'] == target_fred_key]
         if not fred_row.empty:
             val = fred_row.iloc[0]['Latest Spread (%)']
@@ -723,11 +717,11 @@ if 'result' in st.session_state:
     t1, t2, t3, t4, t5, t6 = st.tabs(["📉 Risk Free Rate", "📈 US GDP Growth", "📊 S&P 500 Yields", "🏛️ KPMG Corp Tax", "📉 US Corp Spreads", "📊 Damodaran Ratings"])
     with t1:
         st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
-        if res.get('rf_trend') is not None: st.line_chart(res['rf_trend'].set_index("Date")["Rate"], color="#FF4B4B")
+        if df_rf_trend is not None: st.line_chart(df_rf_trend.set_index("Date")["Rate"], color="#FF4B4B")
     with t2:
         st.caption("Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA")
-        if res.get('gdp_df') is not None:
-            st.dataframe(res['gdp_df'], use_container_width=True, hide_index=True,
+        if df_gdp_disp is not None:
+            st.dataframe(df_gdp_disp, use_container_width=True, hide_index=True,
                 column_config={"Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"), "GDP Growth %": st.column_config.NumberColumn("GDP Growth (%)", format="%.2f%%")})
     with t3:
         st.caption("Source: Aswath Damodaran (NYU Stern)")
