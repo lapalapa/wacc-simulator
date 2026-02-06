@@ -18,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # ==============================================================================
-# [MODULE] Data Fetcher: Consolidated FRED
+# [MODULE] Data Fetcher: Consolidated FRED (Defined at TOP)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def fetch_all_fred_data():
@@ -247,14 +247,16 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v122.0 (Smart Filtering):
+    Priority Logic v123.0 (Cash Flow Fallback Logic):
+    Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
+    
     1. Annual (Year-1)
     2. Yahoo Info TTM
     3. Calc TTM (Manual Sum)
     
     * Ghost Column Eraser applied.
     * PPNR = Pretax + abs(Provision) 
-    * **Smart Filter**: Searches 'Provision', 'Credit Loss' etc. BUT Excludes 'Tax'.
+    * **Safety Net**: If Income Stmt Provision is 0, check Cash Flow (Date Matched).
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     raw_pretax = 0; raw_provision = 0
@@ -268,12 +270,15 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     target_year = current_year - 1 
     
     try:
-        # Load Statements
+        # Load Statements (Income + Cash Flow)
         a_fin = ticker_obj.income_stmt
         if a_fin.empty: a_fin = ticker_obj.financials
         
         q_fin = ticker_obj.quarterly_income_stmt
         if q_fin.empty: q_fin = ticker_obj.quarterly_financials
+        
+        a_cf = ticker_obj.cashflow
+        q_cf = ticker_obj.quarterly_cashflow
 
         # [STEP 0] GHOST COLUMN ERASER
         if not q_fin.empty:
@@ -285,45 +290,53 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if valid_cols:
                 q_fin = q_fin[valid_cols]
 
-        # Helper to extract from a specific column
-        def extract_from_col(df, col_idx):
-            r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
-            i = get_value_max_fuzzy(df, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
-            ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'])
+        # Helper to extract from a specific column index
+        # Requires corresponding CF dataframe for fallback
+        def extract_from_col_with_cf(df_in, df_cf, col_date_val, col_idx):
+            r = get_value_max_fuzzy(df_in, col_idx, ['Total Revenue', 'Revenue'])
+            i = get_value_max_fuzzy(df_in, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
+            ed = get_value_max_fuzzy(df_in, col_idx, ['EBITDA', 'Normalized EBITDA'])
             
             p_tax = 0; p_prov = 0; val_e = 0
             
             if is_financial:
-                p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
+                p_tax = get_value_max_fuzzy(df_in, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # [FIX v122] Smart Filtering: Include Broad Terms, Exclude 'Tax'
-                p_prov = get_value_max_fuzzy(df, col_idx, [
-                    'Provision For Credit Losses',
-                    'Credit Losses Provision', 
-                    'Provision For Loan Losses',
-                    'Provision For Loan And Lease Losses',
-                    'Provision for losses on loans',
-                    'Credit Loss', 
-                    'Loan Loss',
-                    'Bad Debt',
-                    'Impairment',
-                    'Provision' # Very broad, catches "Provision" row
-                ], exclusion_keywords=['Tax', 'Income Tax']) # But ignore taxes
+                # 1. Try Income Statement (Broad Keywords, Exclude Tax)
+                p_prov = get_value_max_fuzzy(df_in, col_idx, [
+                    'Provision For Credit Losses', 'Credit Losses Provision',
+                    'Provision For Loan Losses', 'Provision For Loan And Lease Losses',
+                    'Credit Loss', 'Loan Loss', 'Bad Debt', 'Impairment',
+                    'Provision'
+                ], exclusion_keywords=['Tax', 'Income Tax'])
+                
+                # 2. Fallback: Cash Flow Statement (Date Match)
+                # If Income Stmt failed (0) AND we have CF data
+                if p_prov == 0 and not df_cf.empty:
+                    # Find column in CF that matches the date
+                    if col_date_val in df_cf.columns:
+                        # Find the integer location of this date column
+                        cf_idx = df_cf.columns.get_loc(col_date_val)
+                        
+                        p_prov = get_value_max_fuzzy(df_cf, cf_idx, [
+                            'Provision For Credit Losses', 'Credit Losses Provision',
+                            'Provision For Loan Losses', 'Provision', 'Credit Loss'
+                        ], exclusion_keywords=['Tax', 'Deferred'])
                 
                 if p_tax != 0: 
                     val_e = p_tax + abs(p_prov)
             
             if val_e == 0:
-                val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
+                val_e = get_value_max_fuzzy(df_in, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
             
             return r, val_e, ed, i, p_tax, abs(p_prov)
 
-        # --- Priority 1: Annual (Year-1) with TRIPLE LOCK ---
+        # --- Priority 1: Annual (Year-1) ---
         if not a_fin.empty:
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
                 if col_dt.year == target_year:
-                    r_annual, e, ed, i, pt, pp = extract_from_col(a_fin, idx)
+                    r_annual, e, ed, i, pt, pp = extract_from_col_with_cf(a_fin, a_cf, col, idx)
                     
                     if pd.notna(r_annual) and r_annual > 1000:
                         # Validation
@@ -353,7 +366,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense Source
+            # Interest Expense
             int_exp = info_dict.get('interestExpense', 0)
             if int_exp is None or int_exp == 0:
                  int_exp = info_dict.get('totalInterestExpense', 0)
@@ -375,12 +388,15 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             # EBIT / PPNR Source
             ebit = 0
             if is_financial:
-                # Financials: Always calc PPNR from quarters
+                # Financials: Always calc PPNR from quarters (with CF fallback)
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
+                    
                     q_pretax = 0; q_prov = 0
                     for q_idx in range(4):
-                        r_dummy, e_dummy, ed_dummy, i_dummy, pt, pp = extract_from_col(recent_4, q_idx)
+                        col_val = recent_4.columns[q_idx]
+                        # Extract with CF fallback support
+                        r_d, e_d, ed_d, i_d, pt, pp = extract_from_col_with_cf(recent_4, q_cf, col_val, q_idx)
                         q_pretax += pt
                         q_prov += pp
                     
@@ -413,7 +429,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             rev = 0; ebitda = 0; int_exp = 0; ebit = 0
             
             for q_idx in range(4):
-                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col(recent_4, q_idx)
+                col_val = recent_4.columns[q_idx]
+                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col_with_cf(recent_4, q_cf, col_val, q_idx)
                 
                 rev += r_q
                 ebitda += ed_q
