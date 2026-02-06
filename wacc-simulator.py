@@ -247,16 +247,11 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v123.0 (Cash Flow Fallback Logic):
+    Priority Logic v124.0 (Robust Date Sync):
     Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
     
-    1. Annual (Year-1)
-    2. Yahoo Info TTM
-    3. Calc TTM (Manual Sum)
-    
-    * Ghost Column Eraser applied.
-    * PPNR = Pretax + abs(Provision) 
-    * **Safety Net**: If Income Stmt Provision is 0, check Cash Flow (Date Matched).
+    * Matches Cash Flow columns by STRING DATE to fix mismatch issues.
+    * Falls back to Cash Flow if Income Stmt Provision is 0.
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     raw_pretax = 0; raw_provision = 0
@@ -290,9 +285,9 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if valid_cols:
                 q_fin = q_fin[valid_cols]
 
-        # Helper to extract from a specific column index
-        # Requires corresponding CF dataframe for fallback
-        def extract_from_col_with_cf(df_in, df_cf, col_date_val, col_idx):
+        # Helper: Extract with Robust CF Fallback
+        def extract_with_cf_fallback(df_in, df_cf, target_col_date, col_idx):
+            # 1. Basic Income Stmt Data
             r = get_value_max_fuzzy(df_in, col_idx, ['Total Revenue', 'Revenue'])
             i = get_value_max_fuzzy(df_in, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
             ed = get_value_max_fuzzy(df_in, col_idx, ['EBITDA', 'Normalized EBITDA'])
@@ -302,23 +297,34 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if is_financial:
                 p_tax = get_value_max_fuzzy(df_in, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # 1. Try Income Statement (Broad Keywords, Exclude Tax)
+                # 2. Try Income Statement
                 p_prov = get_value_max_fuzzy(df_in, col_idx, [
                     'Provision For Credit Losses', 'Credit Losses Provision',
                     'Provision For Loan Losses', 'Provision For Loan And Lease Losses',
-                    'Credit Loss', 'Loan Loss', 'Bad Debt', 'Impairment',
-                    'Provision'
+                    'Credit Loss', 'Loan Loss', 'Bad Debt', 'Impairment', 'Provision'
                 ], exclusion_keywords=['Tax', 'Income Tax'])
                 
-                # 2. Fallback: Cash Flow Statement (Date Match)
-                # If Income Stmt failed (0) AND we have CF data
+                # 3. Fallback: Cash Flow (Date Sync)
                 if p_prov == 0 and not df_cf.empty:
-                    # Find column in CF that matches the date
-                    if col_date_val in df_cf.columns:
-                        # Find the integer location of this date column
-                        cf_idx = df_cf.columns.get_loc(col_date_val)
-                        
-                        p_prov = get_value_max_fuzzy(df_cf, cf_idx, [
+                    # Logic: Convert all columns to YYYY-MM-DD string
+                    target_date_str = pd.to_datetime(target_col_date).strftime('%Y-%m-%d')
+                    
+                    # Find matching column index in CF
+                    cf_col_idx = -1
+                    for c_i, c_val in enumerate(df_cf.columns):
+                        if pd.to_datetime(c_val).strftime('%Y-%m-%d') == target_date_str:
+                            cf_col_idx = c_i; break
+                    
+                    # If direct match not found, try +/- 5 days
+                    if cf_col_idx == -1:
+                         target_dt = pd.to_datetime(target_col_date)
+                         for c_i, c_val in enumerate(df_cf.columns):
+                             diff = abs((pd.to_datetime(c_val) - target_dt).days)
+                             if diff <= 5:
+                                 cf_col_idx = c_i; break
+
+                    if cf_col_idx != -1:
+                        p_prov = get_value_max_fuzzy(df_cf, cf_col_idx, [
                             'Provision For Credit Losses', 'Credit Losses Provision',
                             'Provision For Loan Losses', 'Provision', 'Credit Loss'
                         ], exclusion_keywords=['Tax', 'Deferred'])
@@ -336,10 +342,9 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
                 if col_dt.year == target_year:
-                    r_annual, e, ed, i, pt, pp = extract_from_col_with_cf(a_fin, a_cf, col, idx)
+                    r_annual, e, ed, i, pt, pp = extract_with_cf_fallback(a_fin, a_cf, col, idx)
                     
                     if pd.notna(r_annual) and r_annual > 1000:
-                        # Validation
                         is_valid = False
                         if not q_fin.empty:
                             cutoff_date = col_dt - timedelta(days=360)
@@ -350,7 +355,6 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                                 if cutoff_date < q_dt <= col_dt:
                                     valid_quarters.append(q_idx)
                                     q_rev_sum += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
-                            
                             if len(valid_quarters) >= 4:
                                 if 0.9 <= (q_rev_sum / r_annual) <= 1.1:
                                     is_valid = True
@@ -388,15 +392,12 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             # EBIT / PPNR Source
             ebit = 0
             if is_financial:
-                # Financials: Always calc PPNR from quarters (with CF fallback)
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
-                    
                     q_pretax = 0; q_prov = 0
                     for q_idx in range(4):
                         col_val = recent_4.columns[q_idx]
-                        # Extract with CF fallback support
-                        r_d, e_d, ed_d, i_d, pt, pp = extract_from_col_with_cf(recent_4, q_cf, col_val, q_idx)
+                        r_d, e_d, ed_d, i_d, pt, pp = extract_with_cf_fallback(recent_4, q_cf, col_val, q_idx)
                         q_pretax += pt
                         q_prov += pp
                     
@@ -430,7 +431,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             
             for q_idx in range(4):
                 col_val = recent_4.columns[q_idx]
-                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col_with_cf(recent_4, q_cf, col_val, q_idx)
+                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_with_cf_fallback(recent_4, q_cf, col_val, q_idx)
                 
                 rev += r_q
                 ebitda += ed_q
