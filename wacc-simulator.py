@@ -65,7 +65,6 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 
                 # Validation: Revenue must exist and be > 0
                 if pd.notna(temp_rev) and temp_rev > 1000:
-                    # [CHANGE] Use Specific Date Format YYYY-MM-DD
                     period_label = col.strftime('%Y-%m-%d')
                     rev = temp_rev
                     
@@ -132,7 +131,6 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         # --- Priority 3: Calc TTM (Manual Sum) ---
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
-            # [CHANGE] Use Specific Date of Latest Quarter
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
             period_label = f"TTM ({last_date})"
             
@@ -274,7 +272,14 @@ def get_kpmg_tax_rates():
 
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
-    # 2026 Updated Fallback Data
+    """
+    Updated Fallback Data to Jan 2026 Estimates.
+    Distinct Tables for Large, Small, and Financials.
+    """
+    url = "https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    # 1. Large Firms (> $5B)
     fallback_large = pd.DataFrame([
         {"greater than": "8.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
         {"greater than": "6.5", "≤ to": "8.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
@@ -293,10 +298,48 @@ def get_damodaran_spreads():
         {"greater than": "-100000", "≤ to": "0.19", "Rating": "D2/D", "Spread": "19.00%"}
     ])
     
+    # 2. Smaller/Risky Firms (Higher Thresholds)
+    fallback_small = pd.DataFrame([
+        {"greater than": "12.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
+        {"greater than": "9.5", "≤ to": "12.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
+        {"greater than": "7.5", "≤ to": "9.49", "Rating": "A1/A+", "Spread": "0.70%"},
+        {"greater than": "6.0", "≤ to": "7.49", "Rating": "A2/A", "Spread": "0.78%"},
+        {"greater than": "4.5", "≤ to": "5.99", "Rating": "A3/A-", "Spread": "0.89%"},
+        {"greater than": "4.0", "≤ to": "4.49", "Rating": "Baa2/BBB", "Spread": "1.11%"},
+        {"greater than": "3.5", "≤ to": "3.99", "Rating": "Ba1/BB+", "Spread": "1.38%"},
+        {"greater than": "3.0", "≤ to": "3.49", "Rating": "Ba2/BB", "Spread": "1.84%"},
+        {"greater than": "2.5", "≤ to": "2.99", "Rating": "B1/B+", "Spread": "2.75%"},
+        {"greater than": "2.0", "≤ to": "2.49", "Rating": "B2/B", "Spread": "3.21%"},
+        {"greater than": "1.5", "≤ to": "1.99", "Rating": "B3/B-", "Spread": "5.09%"},
+        {"greater than": "1.25", "≤ to": "1.49", "Rating": "Caa/CCC", "Spread": "8.85%"},
+        {"greater than": "0.8", "≤ to": "1.24", "Rating": "Ca2/CC", "Spread": "12.61%"},
+        {"greater than": "0.5", "≤ to": "0.79", "Rating": "C2/C", "Spread": "16.00%"},
+        {"greater than": "-100000", "≤ to": "0.49", "Rating": "D2/D", "Spread": "19.00%"}
+    ])
+    
+    # 3. Financial Services
+    fallback_fin = pd.DataFrame([
+        {"greater than": "3.0", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
+        {"greater than": "2.5", "≤ to": "2.99", "Rating": "Aa2/AA", "Spread": "0.55%"},
+        {"greater than": "2.0", "≤ to": "2.49", "Rating": "A1/A+", "Spread": "0.70%"},
+        {"greater than": "1.5", "≤ to": "1.99", "Rating": "A2/A", "Spread": "0.78%"},
+        {"greater than": "1.2", "≤ to": "1.49", "Rating": "A3/A-", "Spread": "0.89%"},
+        {"greater than": "0.9", "≤ to": "1.19", "Rating": "Baa2/BBB", "Spread": "1.11%"},
+        {"greater than": "0.75", "≤ to": "0.89", "Rating": "Ba1/BB+", "Spread": "1.38%"},
+        {"greater than": "0.6", "≤ to": "0.74", "Rating": "Ba2/BB", "Spread": "1.84%"},
+        {"greater than": "0.5", "≤ to": "0.59", "Rating": "B1/B+", "Spread": "2.75%"},
+        {"greater than": "0.4", "≤ to": "0.49", "Rating": "B2/B", "Spread": "3.21%"},
+        {"greater than": "0.3", "≤ to": "0.39", "Rating": "B3/B-", "Spread": "5.09%"},
+        {"greater than": "0.2", "≤ to": "0.29", "Rating": "Caa/CCC", "Spread": "8.85%"},
+        {"greater than": "0.1", "≤ to": "0.19", "Rating": "Ca2/CC", "Spread": "12.61%"},
+        {"greater than": "0.05", "≤ to": "0.09", "Rating": "C2/C", "Spread": "16.00%"},
+        {"greater than": "-100000", "≤ to": "0.04", "Rating": "D2/D", "Spread": "19.00%"}
+    ])
+
     result_dict = {
         "Large Firms": (fallback_large, "Source: Fallback (Offline, Jan 2026 Data)"),
-        "Small/Risky Firms": (fallback_large, "Source: Fallback (Offline, Jan 2026 Data)"), 
-        "Financial Firms": (fallback_large, "Source: Fallback (Offline, Jan 2026 Data)") # Using same for stable fallback
+        "Small/Risky Firms": (fallback_small, "Source: Fallback (Offline, Jan 2026 Data)"), 
+        "Financial Firms": (fallback_fin, "Source: Fallback (Offline, Jan 2026 Data)")
     }
 
     try:
@@ -346,25 +389,40 @@ def get_damodaran_spreads():
                     
                     if pd.isna(val_rating) or pd.isna(val_spread): break
                     
-                    if isinstance(val_spread, (int, float)): spread_fmt = f"{val_spread * 100:.2f}%"
-                    else: spread_fmt = str(val_spread)
+                    if isinstance(val_spread, (int, float)):
+                        spread_fmt = f"{val_spread * 100:.2f}%"
+                    else:
+                        spread_fmt = str(val_spread)
                         
                     start_str = str(val_start).strip()
                     if start_str == ">": start_str = "greater than"
                     
-                    entry = {"greater than": start_str, "≤ to": val_end, "Rating": str(val_rating), "Spread": spread_fmt}
+                    entry = {
+                        "greater than": start_str, 
+                        "≤ to": val_end,
+                        "Rating": str(val_rating), 
+                        "Spread": spread_fmt
+                    }
                     data_rows.append(entry)
                 except: continue
             return pd.DataFrame(data_rows) if data_rows else None
 
+        # Execute Extraction
         df_large = extract_block("for large")
-        if df_large is not None: result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
-        df_small = extract_block("for smaller")
-        if df_small is not None: result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
-        df_fin = extract_block("for financial")
-        if df_fin is not None: result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
+        if df_large is not None and not df_large.empty: 
+            result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
 
-    except Exception: pass 
+        df_small = extract_block("for smaller")
+        if df_small is not None and not df_small.empty: 
+            result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
+        
+        df_fin = extract_block("for financial")
+        if df_fin is not None and not df_fin.empty:
+             result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
+
+    except Exception as e:
+        pass 
+
     return result_dict
 
 # ==============================================================================
