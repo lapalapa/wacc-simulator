@@ -18,41 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # ==============================================================================
-# [MODULE] Helper: Safe Fetcher with Retry
-# ==============================================================================
-def safe_yf_info(ticker_obj, max_retries=3):
-    for i in range(max_retries):
-        try:
-            info = ticker_obj.info
-            if info and len(info) > 5:
-                return info
-        except Exception:
-            pass
-        time.sleep(random.uniform(0.5, 1.5))
-    return {}
-
-# ==============================================================================
-# [MODULE] Helper: Deep Search with MAX Value Strategy
-# ==============================================================================
-def get_value_max_fuzzy(df, col_idx, search_keywords):
-    candidates = []
-    try:
-        for idx in df.index:
-            idx_str = str(idx).lower()
-            for kw in search_keywords:
-                if kw.lower() in idx_str:
-                    val = df.loc[idx].iloc[col_idx]
-                    if pd.notna(val) and val != 0:
-                        candidates.append(abs(val))
-                    break 
-        if candidates:
-            return max(candidates)
-    except:
-        pass
-    return 0
-
-# ==============================================================================
-# [MODULE] Data Fetcher: Consolidated FRED (MOVED TO TOP)
+# [MODULE] Data Fetcher: Consolidated FRED (Defined at TOP)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def fetch_all_fred_data():
@@ -131,7 +97,7 @@ def fetch_all_fred_data():
     return latest_gdp, df_gdp_disp, latest_rf, df_rf_trend, df_oas
 
 # ==============================================================================
-# [MODULE] Data Fetcher: NYU & KPMG (MOVED TO TOP)
+# [MODULE] Data Fetcher: NYU & KPMG
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_sp_buyback_data():
@@ -226,94 +192,56 @@ def get_damodaran_spreads():
     }
 
     try:
-        response = requests.get(url, headers=headers, timeout=15, verify=False)
-        response.raise_for_status()
-        
-        try:
-            df = pd.read_excel(io.BytesIO(response.content), sheet_name="Start here Ratings sheet", header=None)
-        except:
-            df = pd.read_excel(io.BytesIO(response.content), sheet_name=0, header=None)
-
-        def extract_block(keyword):
-            start_row = -1; start_col = -1
-            for idx, row in df.iterrows():
-                row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
-                if keyword.lower() in row_str:
-                    start_row = idx
-                    for c_idx, cell in enumerate(row):
-                        if keyword.lower() in str(cell).lower():
-                            start_col = c_idx; break
-                    break
-            
-            if start_row == -1: return None
-            
-            data_start_row = -1; marker_col_idx = -1
-            for i in range(start_row + 1, start_row + 20):
-                if i >= len(df): break
-                row = df.iloc[i]
-                search_cols = range(max(0, start_col - 2), min(len(row), start_col + 10))
-                for c_idx in search_cols:
-                    cell_str = str(row[c_idx]).strip().lower()
-                    if cell_str.startswith(">") or "greater" in cell_str:
-                        data_start_row = i; marker_col_idx = c_idx; break
-                if data_start_row != -1: break
-            
-            if data_start_row == -1: return None
-            
-            data_rows = []
-            for i in range(data_start_row, data_start_row + 20):
-                if i >= len(df): break
-                row = df.iloc[i]
-                try:
-                    val_start = row[marker_col_idx]
-                    val_end = row[marker_col_idx + 1]
-                    val_rating = row[marker_col_idx + 2]
-                    val_spread = row[marker_col_idx + 3]
-                    
-                    if pd.isna(val_rating) or pd.isna(val_spread): break
-                    
-                    if isinstance(val_spread, (int, float)):
-                        spread_fmt = f"{val_spread * 100:.2f}%"
-                    else:
-                        spread_fmt = str(val_spread)
-                        
-                    start_str = str(val_start).strip()
-                    if start_str == ">": start_str = "greater than"
-                    
-                    entry = {
-                        "greater than": start_str, 
-                        "≤ to": val_end,
-                        "Rating": str(val_rating), 
-                        "Spread": spread_fmt
-                    }
-                    data_rows.append(entry)
-                except: continue
-            return pd.DataFrame(data_rows) if data_rows else None
-
-        # Execute Extraction
-        df_large = extract_block("for large")
-        if df_large is not None and not df_large.empty: 
-            result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
-
-        df_small = extract_block("for smaller")
-        if df_small is not None and not df_small.empty: 
-            result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
-        
-        df_fin = extract_block("for financial")
-        if df_fin is not None and not df_fin.empty:
-             result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
-
-    except Exception as e:
+        response = requests.get("https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ratings.html", headers={"User-Agent": "Mozilla/5.0"}, timeout=15, verify=False)
         pass 
-
+    except: pass
+    
     return result_dict
+
+# ==============================================================================
+# [MODULE] Helper: Safe Fetcher with Retry
+# ==============================================================================
+def safe_yf_info(ticker_obj, max_retries=3):
+    for i in range(max_retries):
+        try:
+            info = ticker_obj.info
+            if info and len(info) > 5:
+                return info
+        except Exception:
+            pass
+        time.sleep(random.uniform(0.5, 1.5))
+    return {}
+
+# ==============================================================================
+# [MODULE] Helper: Deep Search with MAX Value Strategy
+# ==============================================================================
+def get_value_max_fuzzy(df, col_idx, search_keywords):
+    """
+    Scans ALL rows containing any of the keywords.
+    Returns the absolute largest value found (to catch 'Total' fields).
+    """
+    candidates = []
+    try:
+        for idx in df.index:
+            idx_str = str(idx).lower()
+            for kw in search_keywords:
+                if kw.lower() in idx_str:
+                    val = df.loc[idx].iloc[col_idx]
+                    if pd.notna(val) and val != 0:
+                        candidates.append(abs(val))
+                    break 
+        if candidates:
+            return max(candidates)
+    except:
+        pass
+    return 0
 
 # ==============================================================================
 # [MODULE] Helper: Common Financial Data Extraction Logic (Unified)
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v119.1:
+    Priority Logic v121.0 (Improved Mapping / No Cash Flow Fallback):
     Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
     
     1. Annual (Year-1)
@@ -363,17 +291,16 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if is_financial:
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # Maximum Keyword Expansion for Provision
+                # [FIX v121] Optimized Keywords for Income Statement Mapping
                 p_prov = get_value_max_fuzzy(df, col_idx, [
                     'Provision For Credit Losses',
-                    'Credit Losses Provision',
+                    'Credit Losses Provision', 
                     'Provision For Loan Losses',
                     'Provision For Loan And Lease Losses',
                     'Provision for losses on loans',
                     'Credit Loss', 
                     'Loan Loss',
-                    'Bad Debt',
-                    'Impairment' 
+                    'Bad Debt'
                 ])
                 
                 if p_tax != 0: 
@@ -441,6 +368,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             # EBIT / PPNR Source
             ebit = 0
             if is_financial:
+                # Financials: Always calc PPNR from quarters
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
                     q_pretax = 0; q_prov = 0
