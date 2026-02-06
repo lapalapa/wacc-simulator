@@ -40,7 +40,6 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
     Returns the absolute largest value found (to catch 'Total' fields).
     """
     candidates = []
-    
     try:
         for idx in df.index:
             idx_str = str(idx).lower()
@@ -50,13 +49,10 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
                     if pd.notna(val) and val != 0:
                         candidates.append(abs(val))
                     break 
-        
         if candidates:
             return max(candidates)
-            
     except:
         pass
-        
     return 0
 
 # ==============================================================================
@@ -64,13 +60,12 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Extracts Financials with Priority & Validation:
-    1. Annual (Must pass 12-Month Validation Check)
+    Priority Logic v106.0:
+    1. Annual (Year-1) -> MUST verify if 4 corresponding quarterly columns exist.
     2. Yahoo Info TTM
-    3. Calc TTM (Quarterly Sum)
+    3. Calc TTM (Manual Sum)
     
-    * Financials PPNR Formula: Pretax Income - Provision
-    * Validation: Checks if Annual Revenue < 0.8 * TTM Revenue (to detect partial year)
+    * Financials PPNR = Pretax Income + Provision (Standard Formula)
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     period_label = "N/A"
@@ -79,7 +74,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     is_financial = 'financial' in sector or 'bank' in sector
     
     current_year = datetime.now().year
-    target_y1 = current_year - 1 
+    target_year = current_year - 1 # e.g., 2025
     
     try:
         # Load Statements
@@ -106,43 +101,37 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 pretax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 provision = get_value_max_fuzzy(df, col_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
                 
-                # [USER FORMULA v104] PPNR = Pretax - Provision
+                # [CORRECTED FORMULA v106] PPNR = Pretax + Provision
                 if pretax != 0: 
-                    val_e = pretax - provision
+                    val_e = pretax + provision
             
             if val_e == 0:
                 val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
             
             return r, val_e, ed, i
 
-        # --- PRE-CALCULATION: TTM Revenue for Validation ---
-        ttm_rev_benchmark = 0
-        latest_q_date = None
-        if not q_fin.empty and q_fin.shape[1] >= 4:
-            latest_q_date = q_fin.columns[0]
-            for q_idx in range(4):
-                ttm_rev_benchmark += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
-
-        # --- Priority 1: Annual (With 12-Month Validation) ---
+        # --- Priority 1: Annual (Current Year - 1) with 4-Quarter Validation ---
+        found_annual = False
         if not a_fin.empty:
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
-                if col_dt.year == target_y1:
-                    r, e, ed, i = extract_from_col(a_fin, idx)
+                
+                # Check 1: Is it the target year?
+                if col_dt.year == target_year:
                     
-                    # [VALIDATION STEP]
-                    is_valid = True
+                    # Check 2: Do we have 4 quarters for this fiscal year?
+                    q_count = 0
+                    if not q_fin.empty:
+                        cutoff_date = col_dt - timedelta(days=360) 
+                        for q_col in q_fin.columns:
+                            q_dt = pd.to_datetime(q_col)
+                            if cutoff_date < q_dt <= col_dt:
+                                q_count += 1
                     
-                    # 1. Size Check: If Annual Revenue is much smaller than TTM (e.g. < 80%), it's likely partial.
-                    if ttm_rev_benchmark > 0 and r < (ttm_rev_benchmark * 0.8):
-                        is_valid = False # Fail: Likely 9M or 6M data
-                    
-                    # 2. Date Check: If Annual Date == Latest Quarter Date, it's a duplicate partial entry.
-                    if latest_q_date is not None and col_dt == latest_q_date:
-                        is_valid = False # Fail: It's just the Q3 YTD report
-                        
-                    if is_valid and pd.notna(r) and r > 1000:
-                        return r, e, ed, abs(i), col.strftime('%Y-%m-%d')
+                    if q_count >= 4:
+                        r, e, ed, i = extract_from_col(a_fin, idx)
+                        if pd.notna(r) and r > 1000:
+                            return r, e, ed, abs(i), col.strftime('%Y-%m-%d')
         
         # --- Priority 2: Yahoo Info TTM ---
         rev_ttm = info_dict.get('totalRevenue', 0)
@@ -166,7 +155,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                         q_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
                         q_prov += get_value_max_fuzzy(recent_4, q_idx, ['Provision For Credit Losses'])
                     
-                    if q_pretax != 0: ebit = q_pretax - q_prov
+                    if q_pretax != 0: ebit = q_pretax + q_prov # v106 Formula
             
             if ebit == 0:
                 op_margin = info_dict.get('operatingMargins', 0)
@@ -195,7 +184,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 else:
                     sum_ebit_std += get_value_max_fuzzy(recent_4, q_idx, ['EBIT', 'Operating Income'])
             
-            if is_financial: ebit = sum_pretax - sum_prov
+            if is_financial: ebit = sum_pretax + sum_prov # v106 Formula
             else: ebit = sum_ebit_std
             
             return rev, ebit, ebitda, abs(int_exp), period_label
@@ -435,12 +424,7 @@ def get_damodaran_spreads():
                     start_str = str(val_start).strip()
                     if start_str == ">": start_str = "greater than"
                     
-                    entry = {
-                        "greater than": start_str, 
-                        "≤ to": val_end,
-                        "Rating": str(val_rating), 
-                        "Spread": spread_fmt
-                    }
+                    entry = {"greater than": start_str, "≤ to": val_end, "Rating": str(val_rating), "Spread": spread_fmt}
                     data_rows.append(entry)
                 except: continue
             return pd.DataFrame(data_rows) if data_rows else None
@@ -587,7 +571,7 @@ class DetailWACCModel:
                 d = fin['vals']; equity = d['Market Cap']; debt = d['Total Debt']; tic = equity + debt
                 de_ratio = debt / equity if equity > 0 else 0.0; dtic_ratio = debt / tic if tic > 0 else 0.0
                 peer_data.append({
-                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Company": fin['name'], "Country": fin['country'],
+                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Country": fin['country'],
                     "Tax Rate": fin['tax_rate'], "Currency": fin['currency'], "FX Rate": fin['fx_rate'],
                     "Revenue": d['Revenue'], "EBIT": d['EBIT'], "EBITDA": d['EBITDA'], "Total Debt": d['Total Debt'],
                     "Market Cap": d['Market Cap'], "D/E Ratio": de_ratio, "Debt/TIC Ratio": dtic_ratio,
@@ -648,7 +632,7 @@ with st.sidebar:
         st.caption(f"Data Source: {tf['date']}")
         
         int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
-        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="For Financial Firms, PPNR is calculated as: Pre-tax Income - Provision for Credit Losses")
+        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="For Financial Firms, PPNR is calculated as: Pre-tax Income + Provision for Credit Losses")
         
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
