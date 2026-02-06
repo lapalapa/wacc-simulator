@@ -102,13 +102,6 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, d
     except Exception as e:
         logger.warning(f"Fuzzy search failed: {str(e)}")
     return 0
-                    break 
-        
-        if candidates:
-            return max(candidates)
-    except Exception as e:
-        logger.warning(f"Fuzzy search failed: {str(e)}")
-    return 0
 
 # ==============================================================================
 # [MODULE] Data Fetcher: Consolidated FRED
