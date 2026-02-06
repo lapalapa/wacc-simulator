@@ -10,6 +10,7 @@ import random
 import re
 import urllib3
 import warnings
+from bs4 import BeautifulSoup
 import logging
 
 # Suppress SSL warnings
@@ -431,12 +432,49 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         a_cf = ticker_obj.cashflow
         q_cf = ticker_obj.quarterly_cashflow
         
+        # [NEW v130] Fallback: Web scraping if yfinance API doesn't provide provision
+        # This is necessary because yfinance API often omits detailed line items
+        scraped_provision_ttm = None
+        if is_financial:
+            try:
+                ticker_symbol = ticker_obj.ticker
+                url = f"https://finance.yahoo.com/quote/{ticker_symbol}/financials/"
+                
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                }
+                
+                response = requests.get(url, headers=headers, timeout=10, verify=False)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Find provision row in the table
+                # Look for text containing "Provision" and "Credit" or "Loan"
+                for row in soup.find_all('div', {'class': re.compile('row')}):
+                    row_text = row.get_text()
+                    row_lower = row_text.lower()
+                    
+                    if 'provision' in row_lower and ('credit' in row_lower or 'loan' in row_lower):
+                        # Extract TTM value (first numeric column)
+                        values = re.findall(r'[-]?\d+[\.,]?\d*', row_text)
+                        if values:
+                            # Convert string to float (handle commas and negatives)
+                            val_str = values[0].replace(',', '')
+                            scraped_provision_ttm = abs(float(val_str)) * 1000  # Yahoo shows in thousands
+                            logger.info(f"✓ Scraped Provision from Yahoo Finance: ${scraped_provision_ttm:,.0f}")
+                            break
+                
+            except Exception as e:
+                logger.warning(f"Web scraping failed: {str(e)}")
+        
         # Debug: Log Cash Flow availability (store for UI display)
         cf_status = {
             'a_cf_loaded': not a_cf.empty,
             'a_cf_shape': a_cf.shape if not a_cf.empty else None,
             'q_cf_loaded': not q_cf.empty,
             'q_cf_shape': q_cf.shape if not q_cf.empty else None,
+            'scraped_provision': scraped_provision_ttm
         }
         
         logger.info(f"Annual Cash Flow: {'Loaded' if cf_status['a_cf_loaded'] else 'Empty'} (shape: {cf_status['a_cf_shape']})")
@@ -599,8 +637,27 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             # EBIT / PPNR Source
             ebit = 0
             if is_financial:
-                # Financials: Always calc PPNR from quarters
-                if not q_fin.empty and q_fin.shape[1] >= 4:
+                # [PRIORITY] Use scraped provision if available
+                if scraped_provision_ttm is not None and scraped_provision_ttm > 0:
+                    logger.info(f"Using scraped Provision TTM: ${scraped_provision_ttm:,.0f}")
+                    raw_provision = scraped_provision_ttm
+                    
+                    # Get Pretax Income from quarterly data
+                    if not q_fin.empty and q_fin.shape[1] >= 4:
+                        recent_4 = q_fin.iloc[:, :4]
+                        q_pretax = 0
+                        for q_idx in range(4):
+                            q_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
+                        raw_pretax = q_pretax
+                    else:
+                        raw_pretax = info_dict.get('incomeBeforeTax', 0)
+                    
+                    if raw_pretax != 0:
+                        ebit = raw_pretax + raw_provision
+                    label_ebit = "TTM (Scraped + Calculated)"
+                
+                # Fallback: Calculate from quarters if scraping failed
+                elif not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
                     recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
                     
