@@ -60,13 +60,14 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v115.1:
+    Priority Logic v117.0 ( refined keywords):
     1. Annual (Year-1) -> Label: YYYY-MM-DD
     2. Yahoo Info TTM -> Label: TTM (Yahoo Info) OR TTM (Yahoo Info + Calc Interest)
     3. Calc TTM (Manual Sum) -> Label: TTM (Calculated: YYYY-MM-DD)
     
     * Ghost Column Eraser applied.
     * PPNR = Pretax + abs(Provision)
+    * Provision Keywords: Removed 'Loan Loss', 'Bad Debt'
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     label_ebit = "N/A"
@@ -111,7 +112,15 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             val_e = 0
             if is_financial:
                 pretax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
-                provision = get_value_max_fuzzy(df, col_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
+                
+                # [FIX v117] Removed broad terms 'Loan Loss', 'Bad Debt'
+                provision = get_value_max_fuzzy(df, col_idx, [
+                    'Provision For Credit Losses',
+                    'Provision For Loan Losses',
+                    'Credit Loss Provision',
+                    'Loan Loss Provision',
+                    'Credit Loss'
+                ])
                 
                 # [FORMULA: Pretax + abs(Provision)]
                 if pretax != 0: 
@@ -184,7 +193,11 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                     q_pretax = 0; q_prov = 0
                     for q_idx in range(4):
                         q_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
-                        q_prov += get_value_max_fuzzy(recent_4, q_idx, ['Provision For Credit Losses'])
+                        # [FIX v117] Updated keywords
+                        q_prov += get_value_max_fuzzy(recent_4, q_idx, [
+                            'Provision For Credit Losses', 'Provision For Loan Losses', 
+                            'Credit Loss Provision', 'Loan Loss Provision', 'Credit Loss'
+                        ])
                     
                     if q_pretax != 0: ebit = q_pretax + abs(q_prov)
                     label_ebit = "TTM (Calculated)"
@@ -220,7 +233,11 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 
                 if is_financial:
                     sum_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
-                    sum_prov += get_value_max_fuzzy(recent_4, q_idx, ['Provision For Credit Losses'])
+                    # [FIX v117] Updated keywords
+                    sum_prov += get_value_max_fuzzy(recent_4, q_idx, [
+                        'Provision For Credit Losses', 'Provision For Loan Losses', 
+                        'Credit Loss Provision', 'Loan Loss Provision', 'Credit Loss'
+                    ])
                 else:
                     sum_ebit_std += get_value_max_fuzzy(recent_4, q_idx, ['EBIT', 'Operating Income'])
             
@@ -681,7 +698,7 @@ with st.sidebar:
         int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
         st.caption(f"Source: **{tf.get('label_int', 'N/A')}**")
         
-        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="For Financial Firms, PPNR is calculated as: Pre-tax Income + |Provision|")
+        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="Formula: Pre-tax Income + |Provision|")
         st.caption(f"Source: **{tf.get('label_ebit', 'N/A')}**")
         
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
