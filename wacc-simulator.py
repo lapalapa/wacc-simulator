@@ -18,6 +18,61 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # ==============================================================================
+# [MODULE] Helper: Safe Fetcher with Retry
+# ==============================================================================
+def safe_yf_info(ticker_obj, max_retries=3):
+    for i in range(max_retries):
+        try:
+            info = ticker_obj.info
+            if info and len(info) > 5:
+                return info
+        except Exception:
+            pass
+        time.sleep(random.uniform(0.5, 1.5))
+    return {}
+
+# ==============================================================================
+# [MODULE] Helper: Deep Search with Normalization Strategy (NEW)
+# ==============================================================================
+def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None):
+    """
+    Scans ALL rows. Normalizes strings (remove spaces, lower case) for matching.
+    Returns the absolute largest value found.
+    """
+    candidates = []
+    try:
+        # Pre-process exclusion keywords
+        exclusions = [e.lower().replace(" ", "") for e in exclusion_keywords] if exclusion_keywords else []
+        
+        for idx in df.index:
+            # 1. Normalize Index: "Provision For Credit Losses" -> "provisionforcreditlosses"
+            raw_idx_str = str(idx)
+            norm_idx_str = raw_idx_str.lower().replace(" ", "").replace("-", "").replace("_", "")
+            
+            # Exclusion Check
+            if any(ex in norm_idx_str for ex in exclusions):
+                continue
+
+            # 2. Check Keywords
+            for kw in search_keywords:
+                # Normalize Keyword
+                norm_kw = kw.lower().replace(" ", "").replace("-", "").replace("_", "")
+                
+                if norm_kw in norm_idx_str:
+                    try:
+                        val = df.loc[idx].iloc[col_idx]
+                        if pd.notna(val) and val != 0:
+                            candidates.append(abs(val))
+                    except: pass
+                    break 
+        
+        if candidates:
+            return max(candidates)
+    except:
+        pass
+    return 0
+
+# ==============================================================================
 # [MODULE] Data Fetcher: Consolidated FRED (Defined at TOP)
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
@@ -196,62 +251,16 @@ def get_damodaran_spreads():
     return result_dict
 
 # ==============================================================================
-# [MODULE] Helper: Safe Fetcher with Retry
-# ==============================================================================
-def safe_yf_info(ticker_obj, max_retries=3):
-    for i in range(max_retries):
-        try:
-            info = ticker_obj.info
-            if info and len(info) > 5:
-                return info
-        except Exception:
-            pass
-        time.sleep(random.uniform(0.5, 1.5))
-    return {}
-
-# ==============================================================================
-# [MODULE] Helper: Deep Search with MAX Value Strategy (Updated)
-# ==============================================================================
-def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None):
-    """
-    Scans ALL rows containing any of the keywords.
-    Returns the absolute largest value found.
-    Supports exclusion_keywords (e.g. to avoid 'Tax').
-    """
-    candidates = []
-    try:
-        for idx in df.index:
-            idx_str = str(idx).lower()
-            
-            # [EXCLUSION LOGIC]
-            if exclusion_keywords:
-                if any(ex.lower() in idx_str for ex in exclusion_keywords):
-                    continue
-
-            for kw in search_keywords:
-                if kw.lower() in idx_str:
-                    try:
-                        val = df.loc[idx].iloc[col_idx]
-                        if pd.notna(val) and val != 0:
-                            candidates.append(abs(val))
-                    except: pass
-                    break 
-        if candidates:
-            return max(candidates)
-    except:
-        pass
-    return 0
-
-# ==============================================================================
 # [MODULE] Helper: Common Financial Data Extraction Logic (Unified)
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v124.0 (Robust Date Sync):
+    Priority Logic v125.0 (Normalization & Aggressive Search):
     Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
     
-    * Matches Cash Flow columns by STRING DATE to fix mismatch issues.
-    * Falls back to Cash Flow if Income Stmt Provision is 0.
+    * Ghost Column Eraser applied.
+    * PPNR = Pretax + abs(Provision) 
+    * **Search:** Uses 'get_value_max_fuzzy' with normalization (ignores case/spaces).
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     raw_pretax = 0; raw_provision = 0
@@ -265,86 +274,65 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     target_year = current_year - 1 
     
     try:
-        # Load Statements (Income + Cash Flow)
+        # Load Statements
         a_fin = ticker_obj.income_stmt
         if a_fin.empty: a_fin = ticker_obj.financials
         
         q_fin = ticker_obj.quarterly_income_stmt
         if q_fin.empty: q_fin = ticker_obj.quarterly_financials
-        
-        a_cf = ticker_obj.cashflow
-        q_cf = ticker_obj.quarterly_cashflow
 
         # [STEP 0] GHOST COLUMN ERASER
         if not q_fin.empty:
             valid_cols = []
             for i in range(len(q_fin.columns)):
-                r_check = get_value_max_fuzzy(q_fin, i, ['Total Revenue', 'Revenue'])
+                r_check = get_value_max_fuzzy(q_fin, i, ['TotalRevenue', 'Revenue'])
                 if r_check > 1000:
                     valid_cols.append(q_fin.columns[i])
             if valid_cols:
                 q_fin = q_fin[valid_cols]
 
-        # Helper: Extract with Robust CF Fallback
-        def extract_with_cf_fallback(df_in, df_cf, target_col_date, col_idx):
-            # 1. Basic Income Stmt Data
-            r = get_value_max_fuzzy(df_in, col_idx, ['Total Revenue', 'Revenue'])
-            i = get_value_max_fuzzy(df_in, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
-            ed = get_value_max_fuzzy(df_in, col_idx, ['EBITDA', 'Normalized EBITDA'])
+        # Helper to extract from a specific column
+        def extract_from_col(df, col_idx):
+            r = get_value_max_fuzzy(df, col_idx, ['TotalRevenue', 'Revenue'])
+            i = get_value_max_fuzzy(df, col_idx, ['InterestExpense', 'InterestExpenseNonOperating'])
+            ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'NormalizedEBITDA'])
             
             p_tax = 0; p_prov = 0; val_e = 0
             
             if is_financial:
-                p_tax = get_value_max_fuzzy(df_in, col_idx, ['Pretax Income', 'Income Before Tax'])
+                p_tax = get_value_max_fuzzy(df, col_idx, ['PretaxIncome', 'IncomeBeforeTax'])
                 
-                # 2. Try Income Statement
-                p_prov = get_value_max_fuzzy(df_in, col_idx, [
-                    'Provision For Credit Losses', 'Credit Losses Provision',
-                    'Provision For Loan Losses', 'Provision For Loan And Lease Losses',
-                    'Credit Loss', 'Loan Loss', 'Bad Debt', 'Impairment', 'Provision'
-                ], exclusion_keywords=['Tax', 'Income Tax'])
-                
-                # 3. Fallback: Cash Flow (Date Sync)
-                if p_prov == 0 and not df_cf.empty:
-                    # Logic: Convert all columns to YYYY-MM-DD string
-                    target_date_str = pd.to_datetime(target_col_date).strftime('%Y-%m-%d')
-                    
-                    # Find matching column index in CF
-                    cf_col_idx = -1
-                    for c_i, c_val in enumerate(df_cf.columns):
-                        if pd.to_datetime(c_val).strftime('%Y-%m-%d') == target_date_str:
-                            cf_col_idx = c_i; break
-                    
-                    # If direct match not found, try +/- 5 days
-                    if cf_col_idx == -1:
-                         target_dt = pd.to_datetime(target_col_date)
-                         for c_i, c_val in enumerate(df_cf.columns):
-                             diff = abs((pd.to_datetime(c_val) - target_dt).days)
-                             if diff <= 5:
-                                 cf_col_idx = c_i; break
-
-                    if cf_col_idx != -1:
-                        p_prov = get_value_max_fuzzy(df_cf, cf_col_idx, [
-                            'Provision For Credit Losses', 'Credit Losses Provision',
-                            'Provision For Loan Losses', 'Provision', 'Credit Loss'
-                        ], exclusion_keywords=['Tax', 'Deferred'])
+                # [FIX v125] Normalized Keywords (No spaces, lowercase)
+                p_prov = get_value_max_fuzzy(df, col_idx, [
+                    'provisionforcreditlosses', # JPM Exact match (normalized)
+                    'creditlossesprovision', 
+                    'provisionforloanlosses',
+                    'provisionforloanandleaselosses',
+                    'provisionforlossesonloans',
+                    'creditloss', 
+                    'loanloss',
+                    'baddebt',
+                    'impairment',
+                    'provision' # Broadest
+                ], exclusion_keywords=['tax', 'incometax']) 
                 
                 if p_tax != 0: 
                     val_e = p_tax + abs(p_prov)
             
             if val_e == 0:
-                val_e = get_value_max_fuzzy(df_in, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
+                val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'OperatingIncome', 'OperatingProfit'])
             
             return r, val_e, ed, i, p_tax, abs(p_prov)
 
-        # --- Priority 1: Annual (Year-1) ---
+        # --- Priority 1: Annual (Year-1) with TRIPLE LOCK ---
         if not a_fin.empty:
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
                 if col_dt.year == target_year:
-                    r_annual, e, ed, i, pt, pp = extract_with_cf_fallback(a_fin, a_cf, col, idx)
+                    r_annual, e, ed, i, pt, pp = extract_from_col(a_fin, idx)
                     
                     if pd.notna(r_annual) and r_annual > 1000:
+                        # Validation
                         is_valid = False
                         if not q_fin.empty:
                             cutoff_date = col_dt - timedelta(days=360)
@@ -354,7 +342,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                                 q_dt = pd.to_datetime(q_col)
                                 if cutoff_date < q_dt <= col_dt:
                                     valid_quarters.append(q_idx)
-                                    q_rev_sum += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
+                                    q_rev_sum += get_value_max_fuzzy(q_fin, q_idx, ['TotalRevenue', 'Revenue'])
+                            
                             if len(valid_quarters) >= 4:
                                 if 0.9 <= (q_rev_sum / r_annual) <= 1.1:
                                     is_valid = True
@@ -370,7 +359,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense
+            # Interest Expense Source
             int_exp = info_dict.get('interestExpense', 0)
             if int_exp is None or int_exp == 0:
                  int_exp = info_dict.get('totalInterestExpense', 0)
@@ -382,7 +371,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                     recent_4 = q_fin.iloc[:, :4]
                     q_int = 0
                     for q_idx in range(4):
-                        q_int += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
+                        q_int += get_value_max_fuzzy(recent_4, q_idx, ['InterestExpense'])
                     int_exp = q_int
                     label_int = "TTM (Yahoo Info + Calc Interest)"
                 else:
@@ -392,12 +381,12 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             # EBIT / PPNR Source
             ebit = 0
             if is_financial:
+                # Financials: Always calc PPNR from quarters
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
                     q_pretax = 0; q_prov = 0
                     for q_idx in range(4):
-                        col_val = recent_4.columns[q_idx]
-                        r_d, e_d, ed_d, i_d, pt, pp = extract_with_cf_fallback(recent_4, q_cf, col_val, q_idx)
+                        r_dummy, e_dummy, ed_dummy, i_dummy, pt, pp = extract_from_col(recent_4, q_idx)
                         q_pretax += pt
                         q_prov += pp
                     
@@ -430,8 +419,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             rev = 0; ebitda = 0; int_exp = 0; ebit = 0
             
             for q_idx in range(4):
-                col_val = recent_4.columns[q_idx]
-                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_with_cf_fallback(recent_4, q_cf, col_val, q_idx)
+                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col(recent_4, q_idx)
                 
                 rev += r_q
                 ebitda += ed_q
