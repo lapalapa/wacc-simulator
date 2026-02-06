@@ -37,23 +37,27 @@ def safe_yf_info(ticker_obj, max_retries=3):
 def get_value_fuzzy(df, col_idx, search_terms):
     """
     Mimics 'Expand All' by searching for rows that contain the search_term.
-    Returns the first non-zero match.
+    Returns the first non-zero match found.
     """
     try:
-        # Exact match first
+        # 1. Exact match attempt
         for term in search_terms:
             if term in df.index:
                 val = df.loc[term].iloc[col_idx]
                 if pd.notna(val) and val != 0:
                     return val
         
-        # Fuzzy match (contains string)
+        # 2. Fuzzy match (contains string) - simulates finding nested items
+        # Gather all indices that contain any of the search terms (case-insensitive)
+        candidates = []
         for term in search_terms:
-            matches = [idx for idx in df.index if term.lower() in str(idx).lower()]
-            for m in matches:
-                val = df.loc[m].iloc[col_idx]
-                if pd.notna(val) and val != 0:
-                    return val
+            candidates.extend([idx for idx in df.index if term.lower() in str(idx).lower()])
+        
+        # Check candidates
+        for idx_name in candidates:
+            val = df.loc[idx_name].iloc[col_idx]
+            if pd.notna(val) and val != 0:
+                return val
     except:
         pass
     return 0
@@ -68,7 +72,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     2. Yahoo Info TTM -> Label: TTM (Yahoo Info)
     3. Calc TTM (Quarterly Sum) -> Label: TTM (YYYY-MM-DD)
     
-    * Financials PPNR Formula: Pretax Income + Provision for Credit Losses
+    * Financials PPNR Formula: Pretax Income - Provision for Credit Losses
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     period_label = "N/A"
@@ -92,8 +96,14 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             # 1. Revenue
             r = get_value_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
             
-            # 2. Interest Expense (Deep Search)
-            i = get_value_fuzzy(df, col_idx, ['Interest Expense', 'Total Interest Expense', 'Interest Expense Non Operating'])
+            # 2. Interest Expense (Aggressive Deep Search)
+            i = get_value_fuzzy(df, col_idx, [
+                'Interest Expense', 
+                'Total Interest Expense', 
+                'Interest Expense Non Operating',
+                'Interest Expense Operating',
+                'Interest Expense Net'
+            ])
             
             # 3. EBITDA
             ed = get_value_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'])
@@ -102,13 +112,13 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             val_e = 0
             if is_financial:
                 pretax = get_value_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
-                provision = get_value_fuzzy(df, col_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
+                provision = get_value_fuzzy(df, col_idx, ['Provision For Credit Losses', 'Provision For Loan Losses', 'Credit Loss Provision'])
                 
-                # [CORRECTED FORMULA] PPNR = Pretax + Provision
+                # [USER FORMULA v102] PPNR = Pretax - Provision
                 if pretax != 0: 
-                    val_e = pretax + provision
+                    val_e = pretax - provision
             
-            # If standard firm OR financial calculation failed, try EBIT
+            # If standard firm OR financial calculation failed (and val_e is still 0), try standard EBIT
             if val_e == 0:
                 val_e = get_value_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
             
@@ -144,14 +154,14 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                     q_int += get_value_fuzzy(recent_4, q_idx, ['Interest Expense', 'Total Interest Expense', 'Interest Expense Non Operating'])
                 int_exp = q_int
                 
-                # Financials PPNR TTM Calc: Sum(Pretax) + Sum(Provision)
+                # Financials PPNR TTM Calc: Sum(Pretax) - Sum(Provision)
                 if is_financial:
                     q_pretax = 0; q_prov = 0
                     for q_idx in range(4):
                         q_pretax += get_value_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
                         q_prov += get_value_fuzzy(recent_4, q_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
                     
-                    if q_pretax != 0: ebit = q_pretax + q_prov
+                    if q_pretax != 0: ebit = q_pretax - q_prov
             
             # Standard EBIT Proxy if still 0
             if ebit == 0:
@@ -182,7 +192,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 else:
                     sum_ebit_std += get_value_fuzzy(recent_4, q_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
             
-            if is_financial: ebit = sum_pretax + sum_prov
+            if is_financial: ebit = sum_pretax - sum_prov # v102 Formula
             else: ebit = sum_ebit_std
             
             return rev, ebit, ebitda, abs(int_exp), period_label
@@ -635,7 +645,7 @@ with st.sidebar:
         st.caption(f"Data Source: {tf['date']}")
         
         int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
-        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="For Financial Firms, PPNR is calculated as: Pre-tax Income + Provision for Credit Losses")
+        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="For Financial Firms, PPNR is calculated as: Pre-tax Income - Provision for Credit Losses")
         
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
