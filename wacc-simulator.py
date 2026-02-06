@@ -11,10 +11,10 @@ import re
 import urllib3
 import warnings
 
-# SSL 경고 숨기기
+# Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# 페이지 설정
+# Page Config
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # ==============================================================================
@@ -60,7 +60,7 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v115.0 (Absolute Provision Formula):
+    Priority Logic v115.0:
     1. Annual (Year-1) -> Label: YYYY-MM-DD
     2. Yahoo Info TTM -> Label: TTM (Yahoo Info) OR TTM (Yahoo Info + Calc Interest)
     3. Calc TTM (Manual Sum) -> Label: TTM (Calculated: YYYY-MM-DD)
@@ -69,7 +69,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     * PPNR = Pretax + abs(Provision)
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
-    period_label = "N/A"
+    label_ebit = "N/A"
+    label_int = "N/A"
     
     sector = info_dict.get('sector', '').lower()
     is_financial = 'financial' in sector or 'bank' in sector
@@ -156,7 +157,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense
+            # Interest Expense Source
             int_exp = info_dict.get('interestExpense', 0)
             if int_exp is None or int_exp == 0:
                  int_exp = info_dict.get('totalInterestExpense', 0)
@@ -364,7 +365,7 @@ class DetailWACCModel:
                 d = fin['vals']; equity = d['Market Cap']; debt = d['Total Debt']; tic = equity + debt
                 de_ratio = debt / equity if equity > 0 else 0.0; dtic_ratio = debt / tic if tic > 0 else 0.0
                 peer_data.append({
-                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Country": fin['country'],
+                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Company": fin['name'], "Country": fin['country'],
                     "Tax Rate": fin['tax_rate'], "Currency": fin['currency'], "FX Rate": fin['fx_rate'],
                     "Revenue": d['Revenue'], "EBIT": d['EBIT'], "EBITDA": d['EBITDA'], "Total Debt": d['Total Debt'],
                     "Market Cap": d['Market Cap'], "D/E Ratio": de_ratio, "Debt/TIC Ratio": dtic_ratio,
@@ -423,7 +424,7 @@ with st.sidebar:
         
         st.markdown(f"**Target Financials** (for Credit Spread)")
         
-        # [MODIFIED] SIDEBAR SEPARATE LABELS
+        # [SEPARATE LABELS for Target]
         int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
         st.caption(f"Source: **{tf.get('label_int', 'N/A')}**")
         
