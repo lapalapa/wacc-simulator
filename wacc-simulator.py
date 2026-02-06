@@ -431,12 +431,19 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         a_cf = ticker_obj.cashflow
         q_cf = ticker_obj.quarterly_cashflow
         
-        # Debug: Log Cash Flow availability
-        logger.info(f"Annual Cash Flow: {'Loaded' if not a_cf.empty else 'Empty'} (shape: {a_cf.shape if not a_cf.empty else 'N/A'})")
-        logger.info(f"Quarterly Cash Flow: {'Loaded' if not q_cf.empty else 'Empty'} (shape: {q_cf.shape if not q_cf.empty else 'N/A'})")
+        # Debug: Log Cash Flow availability (store for UI display)
+        cf_status = {
+            'a_cf_loaded': not a_cf.empty,
+            'a_cf_shape': a_cf.shape if not a_cf.empty else None,
+            'q_cf_loaded': not q_cf.empty,
+            'q_cf_shape': q_cf.shape if not q_cf.empty else None,
+        }
         
-        if is_financial and q_cf.empty:
-            logger.warning("Financial company but Quarterly Cash Flow is EMPTY - Provision search may fail!")
+        logger.info(f"Annual Cash Flow: {'Loaded' if cf_status['a_cf_loaded'] else 'Empty'} (shape: {cf_status['a_cf_shape']})")
+        logger.info(f"Quarterly Cash Flow: {'Loaded' if cf_status['q_cf_loaded'] else 'Empty'} (shape: {cf_status['q_cf_shape']})")
+        
+        if is_financial and not cf_status['q_cf_loaded']:
+            logger.warning("⚠ Financial company but Quarterly Cash Flow is EMPTY - Provision search may fail!")
 
         # [STEP 0] GHOST COLUMN ERASER
         if not q_fin.empty:
@@ -461,11 +468,9 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if is_financial:
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # [FIX v128] Enhanced Provision Search with Priority Matching
-                # Yahoo Finance patterns (in order of priority):
-                # 1. "Provision For Credit Losses" (most common for US banks)
-                # 2. "Credit Losses Provision" 
-                # 3. "Provision For Loan Losses"
+                # [FIX v129] Comprehensive Provision Search
+                # Search in BOTH statements with fallback logic
+                
                 provision_keywords = [
                     # High priority - exact matches
                     ('provisionforcreditlosses', 10),           # JPM, GS, etc.
@@ -477,6 +482,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                     ('creditlossprovision', 7),                 # Shortened
                     ('loanlossesprovision', 7),
                     ('provisionforlossesonloans', 7),
+                    ('loanlossprovision', 6),
                     
                     # Lower priority - broad matches (may catch wrong items)
                     ('creditloss', 5),
@@ -490,32 +496,35 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                     'incometax',              # "Provision For Income Tax"
                     'taxespayable',           # Tax-related
                     'deferredtax',            # Deferred items
+                    'taxbenefit',             # Tax benefit
                     'changein',               # "Change In Provision" (balance sheet item)
                     'beginningbalance',       # Balance sheet
                     'endingbalance',          # Balance sheet
                 ]
                 
-                # 1. Try Income Statement first with priority matching
-                p_prov = get_value_max_fuzzy_with_priority(
-                    df, col_idx, provision_keywords, exclusion_keywords
-                )
+                # Strategy: Try multiple sources in order
+                # 1. Cash Flow Statement (most common for banks)
+                # 2. Income Statement (some banks report here)
+                p_prov = 0
                 
-                # Debug log for Income Statement search
-                if p_prov > 0:
-                    logger.info(f"Found provision in Income Statement: ${p_prov:,.0f}")
-                
-                # 2. If not found and Cash Flow Statement is available, try there
-                if p_prov == 0 and df_cf is not None and not df_cf.empty and col_idx_cf is not None:
-                    logger.info("Provision not found in Income Statement, searching Cash Flow...")
+                if df_cf is not None and not df_cf.empty and col_idx_cf is not None:
+                    logger.info("Searching for Provision in Cash Flow Statement...")
                     p_prov = get_value_max_fuzzy_with_priority(
                         df_cf, col_idx_cf, provision_keywords, exclusion_keywords
                     )
                     if p_prov > 0:
-                        logger.info(f"Found provision in Cash Flow: ${p_prov:,.0f}")
+                        logger.info(f"✓ Found provision in Cash Flow: ${p_prov:,.0f}")
+                
+                # 2. If not found in CF, try Income Statement
+                if p_prov == 0:
+                    logger.info("Provision not found in Cash Flow, searching Income Statement...")
+                    p_prov = get_value_max_fuzzy_with_priority(
+                        df, col_idx, provision_keywords, exclusion_keywords
+                    )
+                    if p_prov > 0:
+                        logger.info(f"✓ Found provision in Income Statement: ${p_prov:,.0f}")
                     else:
-                        logger.warning("Provision not found in either Income Statement or Cash Flow")
-                elif p_prov == 0:
-                    logger.warning(f"Cash Flow Statement not available or empty (df_cf empty: {df_cf is None or df_cf.empty}, col_idx_cf: {col_idx_cf})")
+                        logger.warning("⚠ Provision not found in either statement")
                 
                 if p_tax != 0: 
                     val_e = p_tax + abs(p_prov)
@@ -593,18 +602,12 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 # Financials: Always calc PPNR from quarters
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
-                    # Use Cash Flow if available (even with fewer than 4 columns)
-                    recent_4_cf = None
-                    if not q_cf.empty and q_cf.shape[1] > 0:
-                        # Get up to 4 most recent quarters from CF
-                        cf_cols = min(4, q_cf.shape[1])
-                        recent_4_cf = q_cf.iloc[:, :cf_cols]
+                    recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
                     
                     q_pretax = 0
                     q_prov = 0
                     for q_idx in range(4):
-                        # Match CF index to income statement quarter
-                        cf_idx = q_idx if recent_4_cf is not None and q_idx < recent_4_cf.shape[1] else None
+                        cf_idx = q_idx if recent_4_cf is not None else None
                         r_dummy, e_dummy, ed_dummy, i_dummy, pt, pp = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
                         q_pretax += pt
                         q_prov += pp
@@ -634,12 +637,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         # --- Priority 3: Calc TTM (Manual Sum) ---
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
-            # Use Cash Flow if available (even with fewer columns)
-            recent_4_cf = None
-            if not q_cf.empty and q_cf.shape[1] > 0:
-                cf_cols = min(4, q_cf.shape[1])
-                recent_4_cf = q_cf.iloc[:, :cf_cols]
-            
+            recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
             common_label = f"TTM (Calculated: {last_date})"
             
@@ -649,7 +647,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             ebit = 0
             
             for q_idx in range(4):
-                cf_idx = q_idx if recent_4_cf is not None and q_idx < recent_4_cf.shape[1] else None
+                cf_idx = q_idx if recent_4_cf is not None else None
                 r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
                 
                 rev += r_q
