@@ -60,7 +60,7 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v111.0 (Clear Source Labeling):
+    Priority Logic v111.1 (Clear Source Labeling):
     1. Annual (Year-1) -> Label: YYYY-MM-DD
     2. Yahoo Info TTM -> Label: TTM (Yahoo Info)
     3. Calc TTM (Manual Sum) -> Label: TTM (Calculated: YYYY-MM-DD)
@@ -190,7 +190,6 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
-            # [LABEL CHANGE] Explicitly mark as Calculated
             period_label = f"TTM (Calculated: {last_date})"
             
             rev = 0; ebitda = 0; int_exp = 0; ebit = 0
@@ -447,7 +446,12 @@ def get_damodaran_spreads():
                     start_str = str(val_start).strip()
                     if start_str == ">": start_str = "greater than"
                     
-                    entry = {"greater than": start_str, "≤ to": val_end, "Rating": str(val_rating), "Spread": spread_fmt}
+                    entry = {
+                        "greater than": start_str, 
+                        "≤ to": val_end,
+                        "Rating": str(val_rating), 
+                        "Spread": spread_fmt
+                    }
                     data_rows.append(entry)
                 except: continue
             return pd.DataFrame(data_rows) if data_rows else None
@@ -665,7 +669,7 @@ with st.sidebar:
     with st.expander("Cost of Equity / Debt", expanded=True):
         rf_in = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
         crp_in = st.number_input("Country Risk Premium (%)", value=0.0, step=0.1)
-        size_in = number_input("Size Premium (%)", value=0.0, step=0.1)
+        size_in = st.number_input("Size Premium (%)", value=0.0, step=0.1)
     
     # [SECTION] Implied Return
     with st.expander("Implied Return", expanded=True):
