@@ -32,34 +32,31 @@ def safe_yf_info(ticker_obj, max_retries=3):
     return {}
 
 # ==============================================================================
-# [MODULE] Helper: Deep Search for Financial Keys ("Expand All" Logic)
+# [MODULE] Helper: Deep Search with MAX Value Strategy
 # ==============================================================================
-def get_value_fuzzy(df, col_idx, search_terms):
+def get_value_max_fuzzy(df, col_idx, search_keywords):
     """
-    Mimics 'Expand All' by searching for rows that contain the search_term.
-    Returns the first non-zero match found.
+    Scans ALL rows containing any of the keywords.
+    Returns the absolute largest value found (to catch 'Total' fields).
     """
+    candidates = []
+    
     try:
-        # 1. Exact match attempt
-        for term in search_terms:
-            if term in df.index:
-                val = df.loc[term].iloc[col_idx]
-                if pd.notna(val) and val != 0:
-                    return val
+        for idx in df.index:
+            idx_str = str(idx).lower()
+            for kw in search_keywords:
+                if kw.lower() in idx_str:
+                    val = df.loc[idx].iloc[col_idx]
+                    if pd.notna(val) and val != 0:
+                        candidates.append(abs(val))
+                    break 
         
-        # 2. Fuzzy match (contains string) - simulates finding nested items
-        # Gather all indices that contain any of the search terms (case-insensitive)
-        candidates = []
-        for term in search_terms:
-            candidates.extend([idx for idx in df.index if term.lower() in str(idx).lower()])
-        
-        # Check candidates
-        for idx_name in candidates:
-            val = df.loc[idx_name].iloc[col_idx]
-            if pd.notna(val) and val != 0:
-                return val
+        if candidates:
+            return max(candidates)
+            
     except:
         pass
+        
     return 0
 
 # ==============================================================================
@@ -67,12 +64,13 @@ def get_value_fuzzy(df, col_idx, search_terms):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Extracts Financials with Priority:
-    1. Annual (Latest VALID year with Revenue > 0) -> Label: YYYY-MM-DD
-    2. Yahoo Info TTM -> Label: TTM (Yahoo Info)
-    3. Calc TTM (Quarterly Sum) -> Label: TTM (YYYY-MM-DD)
+    Extracts Financials with Priority & Validation:
+    1. Annual (Must pass 12-Month Validation Check)
+    2. Yahoo Info TTM
+    3. Calc TTM (Quarterly Sum)
     
-    * Financials PPNR Formula: Pretax Income - Provision for Credit Losses
+    * Financials PPNR Formula: Pretax Income - Provision
+    * Validation: Checks if Annual Revenue < 0.8 * TTM Revenue (to detect partial year)
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     period_label = "N/A"
@@ -81,7 +79,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     is_financial = 'financial' in sector or 'bank' in sector
     
     current_year = datetime.now().year
-    target_y1 = current_year - 1 # e.g., 2025
+    target_y1 = current_year - 1 
     
     try:
         # Load Statements
@@ -91,79 +89,85 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         q_fin = ticker_obj.quarterly_income_stmt
         if q_fin.empty: q_fin = ticker_obj.quarterly_financials
 
-        # Helper to extract from a specific column in dataframe
+        # Helper to extract from a specific column
         def extract_from_col(df, col_idx):
             # 1. Revenue
-            r = get_value_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
+            r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
             
-            # 2. Interest Expense (Aggressive Deep Search)
-            i = get_value_fuzzy(df, col_idx, [
-                'Interest Expense', 
-                'Total Interest Expense', 
-                'Interest Expense Non Operating',
-                'Interest Expense Operating',
-                'Interest Expense Net'
-            ])
+            # 2. Interest Expense
+            i = get_value_max_fuzzy(df, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
             
             # 3. EBITDA
-            ed = get_value_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'])
+            ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'])
             
             # 4. EBIT / PPNR
             val_e = 0
             if is_financial:
-                pretax = get_value_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
-                provision = get_value_fuzzy(df, col_idx, ['Provision For Credit Losses', 'Provision For Loan Losses', 'Credit Loss Provision'])
+                pretax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
+                provision = get_value_max_fuzzy(df, col_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
                 
-                # [USER FORMULA v102] PPNR = Pretax - Provision
+                # [USER FORMULA v104] PPNR = Pretax - Provision
                 if pretax != 0: 
                     val_e = pretax - provision
             
-            # If standard firm OR financial calculation failed (and val_e is still 0), try standard EBIT
             if val_e == 0:
-                val_e = get_value_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
+                val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
             
             return r, val_e, ed, i
 
-        # --- Priority 1: Annual (Current Year - 1) ---
-        # Logic: Check if column for (Current-1) exists AND has valid data
+        # --- PRE-CALCULATION: TTM Revenue for Validation ---
+        ttm_rev_benchmark = 0
+        latest_q_date = None
+        if not q_fin.empty and q_fin.shape[1] >= 4:
+            latest_q_date = q_fin.columns[0]
+            for q_idx in range(4):
+                ttm_rev_benchmark += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
+
+        # --- Priority 1: Annual (With 12-Month Validation) ---
         if not a_fin.empty:
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
-                if col_dt.year == target_y1: # e.g. 2025
+                if col_dt.year == target_y1:
                     r, e, ed, i = extract_from_col(a_fin, idx)
                     
-                    # VALIDATION: Revenue must be significant (>1000) to consider it "Released"
-                    if pd.notna(r) and r > 1000:
+                    # [VALIDATION STEP]
+                    is_valid = True
+                    
+                    # 1. Size Check: If Annual Revenue is much smaller than TTM (e.g. < 80%), it's likely partial.
+                    if ttm_rev_benchmark > 0 and r < (ttm_rev_benchmark * 0.8):
+                        is_valid = False # Fail: Likely 9M or 6M data
+                    
+                    # 2. Date Check: If Annual Date == Latest Quarter Date, it's a duplicate partial entry.
+                    if latest_q_date is not None and col_dt == latest_q_date:
+                        is_valid = False # Fail: It's just the Q3 YTD report
+                        
+                    if is_valid and pd.notna(r) and r > 1000:
                         return r, e, ed, abs(i), col.strftime('%Y-%m-%d')
         
         # --- Priority 2: Yahoo Info TTM ---
-        # If Annual (Current-1) is missing/empty, fall back to Info TTM
         rev_ttm = info_dict.get('totalRevenue', 0)
-        
         if rev_ttm is not None and rev_ttm > 0:
             period_label = "TTM (Yahoo Info)"
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense: Info is often missing this. Try to sum quarterly.
+            # Interest Expense TTM (Sum 4 Quarters)
             if not q_fin.empty and q_fin.shape[1] >= 4:
                 recent_4 = q_fin.iloc[:, :4]
-                # Sum 4 quarters using Fuzzy Search
                 q_int = 0
                 for q_idx in range(4):
-                    q_int += get_value_fuzzy(recent_4, q_idx, ['Interest Expense', 'Total Interest Expense', 'Interest Expense Non Operating'])
+                    q_int += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
                 int_exp = q_int
                 
-                # Financials PPNR TTM Calc: Sum(Pretax) - Sum(Provision)
+                # Financials PPNR TTM
                 if is_financial:
                     q_pretax = 0; q_prov = 0
                     for q_idx in range(4):
-                        q_pretax += get_value_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
-                        q_prov += get_value_fuzzy(recent_4, q_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
+                        q_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
+                        q_prov += get_value_max_fuzzy(recent_4, q_idx, ['Provision For Credit Losses'])
                     
                     if q_pretax != 0: ebit = q_pretax - q_prov
             
-            # Standard EBIT Proxy if still 0
             if ebit == 0:
                 op_margin = info_dict.get('operatingMargins', 0)
                 if op_margin: ebit = rev * op_margin
@@ -177,22 +181,21 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
             period_label = f"TTM ({last_date})"
             
-            # Sum Loop
             rev = 0; ebitda = 0; int_exp = 0; ebit = 0
             sum_pretax = 0; sum_prov = 0; sum_ebit_std = 0
             
             for q_idx in range(4):
-                rev += get_value_fuzzy(recent_4, q_idx, ['Total Revenue', 'Revenue'])
-                ebitda += get_value_fuzzy(recent_4, q_idx, ['EBITDA', 'Normalized EBITDA'])
-                int_exp += get_value_fuzzy(recent_4, q_idx, ['Interest Expense', 'Total Interest Expense', 'Interest Expense Non Operating'])
+                rev += get_value_max_fuzzy(recent_4, q_idx, ['Total Revenue', 'Revenue'])
+                ebitda += get_value_max_fuzzy(recent_4, q_idx, ['EBITDA', 'Normalized EBITDA'])
+                int_exp += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
                 
                 if is_financial:
-                    sum_pretax += get_value_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
-                    sum_prov += get_value_fuzzy(recent_4, q_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
+                    sum_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
+                    sum_prov += get_value_max_fuzzy(recent_4, q_idx, ['Provision For Credit Losses'])
                 else:
-                    sum_ebit_std += get_value_fuzzy(recent_4, q_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
+                    sum_ebit_std += get_value_max_fuzzy(recent_4, q_idx, ['EBIT', 'Operating Income'])
             
-            if is_financial: ebit = sum_pretax - sum_prov # v102 Formula
+            if is_financial: ebit = sum_pretax - sum_prov
             else: ebit = sum_ebit_std
             
             return rev, ebit, ebitda, abs(int_exp), period_label
@@ -584,7 +587,7 @@ class DetailWACCModel:
                 d = fin['vals']; equity = d['Market Cap']; debt = d['Total Debt']; tic = equity + debt
                 de_ratio = debt / equity if equity > 0 else 0.0; dtic_ratio = debt / tic if tic > 0 else 0.0
                 peer_data.append({
-                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Country": fin['country'],
+                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Company": fin['name'], "Country": fin['country'],
                     "Tax Rate": fin['tax_rate'], "Currency": fin['currency'], "FX Rate": fin['fx_rate'],
                     "Revenue": d['Revenue'], "EBIT": d['EBIT'], "EBITDA": d['EBITDA'], "Total Debt": d['Total Debt'],
                     "Market Cap": d['Market Cap'], "D/E Ratio": de_ratio, "Debt/TIC Ratio": dtic_ratio,
