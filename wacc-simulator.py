@@ -42,12 +42,17 @@ def safe_yf_info(ticker_obj, max_retries=3):
 # ==============================================================================
 # [MODULE] Helper: Deep Search with Normalization (v125 Logic)
 # ==============================================================================
-def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None):
+def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, debug_provision=False):
     """
     Scans ALL rows. Normalizes strings (remove spaces, lower case) for matching.
     Returns the absolute largest value found.
+    
+    Args:
+        debug_provision: If True, prints all provision-related rows found (for debugging)
     """
     candidates = []
+    debug_matches = []  # Store debug info
+    
     try:
         # Pre-process exclusion keywords
         exclusions = [e.lower().replace(" ", "") for e in exclusion_keywords] if exclusion_keywords else []
@@ -57,8 +62,14 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None):
             raw_idx_str = str(idx)
             norm_idx_str = raw_idx_str.lower().replace(" ", "").replace("-", "").replace("_", "")
             
+            # Debug: Check if this is a provision-related row
+            if debug_provision and 'provision' in norm_idx_str:
+                debug_matches.append(f"  Found: '{raw_idx_str}' -> normalized: '{norm_idx_str}'")
+            
             # Exclusion Check
             if any(ex in norm_idx_str for ex in exclusions):
+                if debug_provision and 'provision' in norm_idx_str:
+                    debug_matches.append(f"    ❌ EXCLUDED by keyword: {[ex for ex in exclusions if ex in norm_idx_str]}")
                 continue
 
             # 2. Check Keywords
@@ -71,8 +82,26 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None):
                         val = df.loc[idx].iloc[col_idx]
                         if pd.notna(val) and val != 0:
                             candidates.append(abs(val))
+                            if debug_provision:
+                                debug_matches.append(f"    ✓ MATCHED '{norm_kw}' -> Value: {abs(val):,.0f}")
+                        elif debug_provision:
+                            debug_matches.append(f"    ⚠ MATCHED '{norm_kw}' but value is 0 or NaN")
                     except Exception as e:
                         logger.debug(f"Value extraction failed: {str(e)}")
+                    break 
+        
+        # Print debug info if requested
+        if debug_provision and debug_matches:
+            logger.info("=== PROVISION DEBUG ===")
+            for match in debug_matches:
+                logger.info(match)
+            logger.info(f"Final candidates: {candidates}")
+        
+        if candidates:
+            return max(candidates)
+    except Exception as e:
+        logger.warning(f"Fuzzy search failed: {str(e)}")
+    return 0
                     break 
         
         if candidates:
@@ -351,6 +380,10 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         q_fin = ticker_obj.quarterly_income_stmt
         if q_fin.empty: 
             q_fin = ticker_obj.quarterly_financials
+        
+        # [NEW] Load Cash Flow Statements (where provision often appears for banks)
+        a_cf = ticker_obj.cashflow
+        q_cf = ticker_obj.quarterly_cashflow
 
         # [STEP 0] GHOST COLUMN ERASER
         if not q_fin.empty:
@@ -363,7 +396,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 q_fin = q_fin[valid_cols]
 
         # Helper to extract from a specific column
-        def extract_from_col(df, col_idx):
+        def extract_from_col(df, col_idx, df_cf=None, col_idx_cf=None):
             r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
             i = get_value_max_fuzzy(df, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
             ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'])
@@ -375,19 +408,38 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if is_financial:
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # [FIX v125] Normalized Keywords (No spaces, lowercase)
-                p_prov = get_value_max_fuzzy(df, col_idx, [
-                    'provisionforcreditlosses',
-                    'creditlossesprovision', 
-                    'provisionforloanlosses',
-                    'provisionforloanandleaselosses',
-                    'provisionforlossesonloans',
-                    'creditloss', 
-                    'loanloss',
-                    'baddebt',
-                    'impairment',
-                    'provision'
-                ], exclusion_keywords=['tax', 'incometax']) 
+                # [FIX v127] Search in BOTH Income Statement AND Cash Flow Statement
+                provision_keywords = [
+                    'creditlossesprovision',              # "Credit Losses Provision" (JPM pattern)
+                    'provisionforcreditlosses',           # "Provision For Credit Losses"
+                    'provisionforloanandleaselosses',     # "Provision For Loan And Lease Losses"
+                    'provisionforloanlosses',             # "Provision For Loan Losses"
+                    'loanandleaselossesprovision',        # Reverse pattern
+                    'creditlossprovisio',                 # Partial match (typo-tolerant)
+                    'provisionforlossesonloans',          # Alternative wording
+                    'creditlossprovision',                # Without 'es'
+                    'provisioncreditloss',                # Reversed order
+                    'creditloss',                         # Broad match
+                    'loanloss',                           # Broad match
+                    'baddebt',                            # Alternative term
+                    'impairment',                         # IFRS term
+                    'provision'                           # Last resort (catches all)
+                ]
+                
+                # 1. Try Income Statement first
+                p_prov = get_value_max_fuzzy(
+                    df, col_idx, provision_keywords,
+                    exclusion_keywords=['tax', 'incometax', 'deferredtax'], 
+                    debug_provision=False
+                )
+                
+                # 2. If not found and Cash Flow Statement is available, try there
+                if p_prov == 0 and df_cf is not None and not df_cf.empty and col_idx_cf is not None:
+                    p_prov = get_value_max_fuzzy(
+                        df_cf, col_idx_cf, provision_keywords,
+                        exclusion_keywords=['tax', 'incometax', 'deferredtax'], 
+                        debug_provision=False
+                    )
                 
                 if p_tax != 0: 
                     val_e = p_tax + abs(p_prov)
@@ -402,7 +454,15 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
                 if col_dt.year == target_year:
-                    r_annual, e, ed, i, pt, pp = extract_from_col(a_fin, idx)
+                    # Find matching cash flow column by date
+                    cf_idx = None
+                    if not a_cf.empty:
+                        for cf_col_idx, cf_col in enumerate(a_cf.columns):
+                            if pd.to_datetime(cf_col).year == target_year:
+                                cf_idx = cf_col_idx
+                                break
+                    
+                    r_annual, e, ed, i, pt, pp = extract_from_col(a_fin, idx, a_cf, cf_idx)
                     
                     if pd.notna(r_annual) and r_annual > 1000:
                         # Validation
@@ -457,10 +517,13 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 # Financials: Always calc PPNR from quarters
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
+                    recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
+                    
                     q_pretax = 0
                     q_prov = 0
                     for q_idx in range(4):
-                        r_dummy, e_dummy, ed_dummy, i_dummy, pt, pp = extract_from_col(recent_4, q_idx)
+                        cf_idx = q_idx if recent_4_cf is not None else None
+                        r_dummy, e_dummy, ed_dummy, i_dummy, pt, pp = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
                         q_pretax += pt
                         q_prov += pp
                     
@@ -489,6 +552,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         # --- Priority 3: Calc TTM (Manual Sum) ---
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
+            recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
             common_label = f"TTM (Calculated: {last_date})"
             
@@ -498,7 +562,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             ebit = 0
             
             for q_idx in range(4):
-                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col(recent_4, q_idx)
+                cf_idx = q_idx if recent_4_cf is not None else None
+                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
                 
                 rev += r_q
                 ebitda += ed_q
@@ -812,10 +877,15 @@ with st.sidebar:
     # [SECTION] Target Assumptions
     with st.expander("Target Assumptions", expanded=True):
         if 'target_fin' not in st.session_state or st.session_state.get('last_ticker') != target_ticker:
-            st.session_state['target_fin'] = get_target_financials(target_ticker)
-            st.session_state['last_ticker'] = target_ticker
+            with st.spinner(f"Loading {target_ticker} financial data..."):
+                st.session_state['target_fin'] = get_target_financials(target_ticker)
+                st.session_state['last_ticker'] = target_ticker
         
         tf = st.session_state['target_fin']
+        
+        # [DEBUG] Show provision fetch status
+        if tf.get('raw_provision', 0) == 0 and 'Financial' in tf.get('category', ''):
+            st.info("⚠️ Note: Credit Losses Provision was not found or is zero. Check if the company reports this metric.")
         
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, float(tf.get('tax_rate', 25.0)), 0.1)
         st.caption(f"Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
