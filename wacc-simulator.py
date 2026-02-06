@@ -60,13 +60,13 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v113.0 (Mixed Labeling):
+    Priority Logic v115.0 (Absolute Provision Formula):
     1. Annual (Year-1) -> Label: YYYY-MM-DD
-    2. Yahoo Info TTM -> Label: TTM (Yahoo Info) OR TTM (Yahoo Info + 이자비용 자체계산)
-    3. Calc TTM (Manual Sum) -> Label: TTM (자체계산: YYYY-MM-DD)
+    2. Yahoo Info TTM -> Label: TTM (Yahoo Info) OR TTM (Yahoo Info + Calc Interest)
+    3. Calc TTM (Manual Sum) -> Label: TTM (Calculated: YYYY-MM-DD)
     
     * Ghost Column Eraser applied.
-    * PPNR = Pretax + Provision
+    * PPNR = Pretax + abs(Provision)
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     period_label = "N/A"
@@ -112,7 +112,9 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 pretax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 provision = get_value_max_fuzzy(df, col_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
                 
-                if pretax != 0: val_e = pretax + provision
+                # [FORMULA UPDATE v115] PPNR = Pretax + abs(Provision)
+                if pretax != 0: 
+                    val_e = pretax + abs(provision)
             
             if val_e == 0:
                 val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
@@ -144,33 +146,40 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                                     is_valid = True
                         
                         if is_valid:
-                            return r_annual, e, ed, abs(i), col.strftime('%Y-%m-%d')
+                            lbl = col.strftime('%Y-%m-%d')
+                            return r_annual, e, ed, abs(i), lbl, lbl
         
         # --- Priority 2: Yahoo Info TTM ---
         rev_ttm = info_dict.get('totalRevenue', 0)
         
         if rev_ttm is not None and rev_ttm > 0:
-            period_label = "TTM (Yahoo Info)"
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense: Try 'interestExpense' key first
+            # Interest Expense
             int_exp = info_dict.get('interestExpense', 0)
             if int_exp is None or int_exp == 0:
                  int_exp = info_dict.get('totalInterestExpense', 0)
             
-            # Fallback to Sum if Info missing
-            if (int_exp is None or int_exp == 0) and not q_fin.empty and q_fin.shape[1] >= 4:
-                recent_4 = q_fin.iloc[:, :4]
-                q_int = 0
-                for q_idx in range(4):
-                    q_int += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
-                int_exp = q_int
-                # [LABEL UPDATE] Explicitly mark Interest as Calculated
-                period_label = "TTM (Yahoo Info + 이자비용 자체계산)"
-            
-            # Financials PPNR TTM Calc
+            if int_exp is not None and int_exp > 0:
+                label_int = "TTM (Yahoo Info)"
+            else:
+                # Fallback to Sum
+                if not q_fin.empty and q_fin.shape[1] >= 4:
+                    recent_4 = q_fin.iloc[:, :4]
+                    q_int = 0
+                    for q_idx in range(4):
+                        q_int += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
+                    int_exp = q_int
+                    label_int = "TTM (Yahoo Info + Calc Interest)"
+                else:
+                    int_exp = 0
+                    label_int = "N/A"
+
+            # EBIT / PPNR Source
+            ebit = 0
             if is_financial:
+                # Financials: Always calc PPNR from quarters
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
                     q_pretax = 0; q_prov = 0
@@ -178,22 +187,31 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                         q_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
                         q_prov += get_value_max_fuzzy(recent_4, q_idx, ['Provision For Credit Losses'])
                     
-                    if q_pretax != 0: ebit = q_pretax + q_prov
-            
-            if ebit == 0:
+                    # [FORMULA UPDATE v115]
+                    if q_pretax != 0: ebit = q_pretax + abs(q_prov)
+                    label_ebit = "TTM (Calculated)"
+                else:
+                    label_ebit = "N/A"
+            else:
+                # Non-Financials
                 op_margin = info_dict.get('operatingMargins', 0)
-                if op_margin: ebit = rev * op_margin
-                elif ebitda: ebit = ebitda
+                if op_margin: 
+                    ebit = rev * op_margin
+                    label_ebit = "TTM (Yahoo Info)"
+                elif ebitda: 
+                    ebit = ebitda
+                    label_ebit = "TTM (Yahoo Info Proxy)"
+                else:
+                    label_ebit = "N/A"
             
             if int_exp is None: int_exp = 0
-            return rev, ebit, ebitda, abs(int_exp), period_label
+            return rev, ebit, ebitda, abs(int_exp), label_ebit, label_int
 
         # --- Priority 3: Calc TTM (Manual Sum) ---
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
-            # [LABEL UPDATE] Fully Calculated
-            period_label = f"TTM (자체계산: {last_date})"
+            common_label = f"TTM (Calculated: {last_date})"
             
             rev = 0; ebitda = 0; int_exp = 0; ebit = 0
             sum_pretax = 0; sum_prov = 0; sum_ebit_std = 0
@@ -209,273 +227,15 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 else:
                     sum_ebit_std += get_value_max_fuzzy(recent_4, q_idx, ['EBIT', 'Operating Income'])
             
-            if is_financial: ebit = sum_pretax + sum_prov
+            if is_financial: ebit = sum_pretax + abs(sum_prov) # v115 Formula
             else: ebit = sum_ebit_std
             
-            return rev, ebit, ebitda, abs(int_exp), period_label
+            return rev, ebit, ebitda, abs(int_exp), common_label, common_label
 
     except Exception:
         pass
     
-    return 0, 0, 0, 0, "No Data"
-
-# ==============================================================================
-# [MODULE] Data Fetcher: Consolidated FRED
-# ==============================================================================
-@st.cache_data(ttl=3600*24)
-def fetch_all_fred_data():
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
-    
-    targets = [
-        ("GDP", "A191RP1A027NBEA", False),
-        ("RF", "DGS10", False),
-        ("AAA", "BAMLC0A1CAAA", True),
-        ("AA", "BAMLC0A2CAA", True),
-        ("A", "BAMLC0A3CA", True),
-        ("BBB", "BAMLC0A4CBBB", True),
-        ("BB", "BAMLH0A1HYBB", True),
-        ("B", "BAMLH0A2HYB", True),
-        ("CCC", "BAMLH0A3HYC", True)
-    ]
-    
-    results = {}
-    
-    for key, series_id, is_oas in targets:
-        time.sleep(random.uniform(1.2, 2.5)) 
-        try:
-            url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-            r = requests.get(url, headers=headers, timeout=10, verify=False)
-            r.raise_for_status()
-            df = pd.read_csv(io.StringIO(r.text))
-            df.columns = ["DATE", "VALUE"]
-            df["DATE"] = pd.to_datetime(df["DATE"])
-            df["VALUE"] = pd.to_numeric(df["VALUE"], errors='coerce')
-            df = df.dropna().sort_values(by="DATE", ascending=True)
-            if not df.empty: results[key] = df
-        except: pass
-
-    # GDP
-    latest_gdp = 2.5; df_gdp_disp = None
-    if "GDP" in results:
-        df = results["GDP"]
-        latest_gdp = float(df["VALUE"].iloc[-1])
-        df_gdp_disp = df.sort_values(by="DATE", ascending=False).head(10)
-        df_gdp_disp.columns = ["Date", "GDP Growth %"]
-
-    # RF
-    latest_rf = 4.2; df_rf_trend = None
-    if "RF" in results:
-        df = results["RF"]
-        latest_rf = float(df["VALUE"].iloc[-1])
-        cutoff = df["DATE"].iloc[-1] - timedelta(days=365*5)
-        df_rf_trend = df[df["DATE"] >= cutoff].copy()
-        df_rf_trend.columns = ["Date", "Rate"]
-
-    # OAS
-    oas_map = {
-        "AAA": "AAA US Corporate", "AA": "AA US Corporate", "A": "Single-A US Corporate",
-        "BBB": "BBB US Corporate", "BB": "BB US High Yield", "B": "Single-B US High Yield",
-        "CCC": "CCC & Lower US High Yield"
-    }
-    fallback_map = {"AAA": 0.45, "AA": 0.55, "A": 0.75, "BBB": 1.05, "BB": 1.95, "B": 3.10, "CCC": 8.50}
-    oas_rows = []
-    
-    for k, name in oas_map.items():
-        val = fallback_map[k]
-        date_str = "Fallback"
-        sid = next((t[1] for t in targets if t[0] == k), "")
-        link = f"https://fred.stlouisfed.org/series/{sid}"
-        
-        if k in results:
-            df = results[k]
-            val = float(df["VALUE"].iloc[-1])
-            date_str = df["DATE"].iloc[-1].strftime('%Y-%m-%d')
-            
-        oas_rows.append({"OAS Name": name, "Latest Spread (%)": val, "Date": date_str, "Link": link})
-    
-    df_oas = pd.DataFrame(oas_rows)
-    return latest_gdp, df_gdp_disp, latest_rf, df_rf_trend, df_oas
-
-# ==============================================================================
-# [MODULE] Data Fetcher: NYU & KPMG
-# ==============================================================================
-@st.cache_data(ttl=3600*24)
-def get_sp_buyback_data():
-    url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        response = requests.get(url, headers=headers, timeout=15, verify=False)
-        dfs = pd.read_html(io.StringIO(response.text), header=0)
-        clean_df = dfs[0].dropna(subset=[dfs[0].columns[0]])
-        # Mock logic
-        return 2.0, 1.5, clean_df, []
-    except: return 2.0, 1.5, None, ["Error"]
-
-@st.cache_data(ttl=3600*24)
-def get_kpmg_tax_rates():
-    url = "https://kpmg.com/dk/en/services/tax/corporate-tax/corporate-tax-rates-table.html"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    try:
-        r = requests.get(url, headers=headers, timeout=15, verify=False)
-        dfs = pd.read_html(io.StringIO(r.text))
-        target_df = dfs[0]
-        target_df.rename(columns={target_df.columns[0]: "Country"}, inplace=True)
-        col_name = target_df.columns[-1]
-        result_df = target_df[["Country", col_name]].copy()
-        result_df.columns = ["Country", f"Rate"]
-        result_df["Rate"] = pd.to_numeric(result_df["Rate"], errors='coerce')
-        tax_dict = dict(zip(result_df["Country"].str.upper().str.strip(), result_df["Rate"]))
-        tax_dict["UNITED STATES"] = 25.57; tax_dict["USA"] = 25.57; tax_dict["KOREA"] = 26.40
-        return result_df, tax_dict, 2025
-    except: return None, {}, 2025
-
-@st.cache_data(ttl=3600*24)
-def get_damodaran_spreads():
-    # 2026 Updated Fallback Data
-    fallback_large = pd.DataFrame([
-        {"greater than": "8.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
-        {"greater than": "6.5", "≤ to": "8.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {"greater than": "5.5", "≤ to": "6.49", "Rating": "A1/A+", "Spread": "0.70%"},
-        {"greater than": "4.25", "≤ to": "5.49", "Rating": "A2/A", "Spread": "0.78%"},
-        {"greater than": "3.0", "≤ to": "4.24", "Rating": "A3/A-", "Spread": "0.89%"},
-        {"greater than": "2.5", "≤ to": "2.99", "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {"greater than": "2.25", "≤ to": "2.49", "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {"greater than": "2.0", "≤ to": "2.24", "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {"greater than": "1.75", "≤ to": "1.99", "Rating": "B1/B+", "Spread": "2.75%"},
-        {"greater than": "1.5", "≤ to": "1.74", "Rating": "B2/B", "Spread": "3.21%"},
-        {"greater than": "1.25", "≤ to": "1.49", "Rating": "B3/B-", "Spread": "5.09%"},
-        {"greater than": "0.8", "≤ to": "1.24", "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {"greater than": "0.65", "≤ to": "0.79", "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {"greater than": "0.2", "≤ to": "0.64", "Rating": "C2/C", "Spread": "16.00%"},
-        {"greater than": "-100000", "≤ to": "0.19", "Rating": "D2/D", "Spread": "19.00%"}
-    ])
-    
-    fallback_small = pd.DataFrame([
-        {"greater than": "12.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
-        {"greater than": "9.5", "≤ to": "12.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {"greater than": "7.5", "≤ to": "9.49", "Rating": "A1/A+", "Spread": "0.70%"},
-        {"greater than": "6.0", "≤ to": "7.49", "Rating": "A2/A", "Spread": "0.78%"},
-        {"greater than": "4.5", "≤ to": "5.99", "Rating": "A3/A-", "Spread": "0.89%"},
-        {"greater than": "4.0", "≤ to": "4.49", "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {"greater than": "3.5", "≤ to": "3.99", "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {"greater than": "3.0", "≤ to": "3.49", "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {"greater than": "2.5", "≤ to": "2.99", "Rating": "B1/B+", "Spread": "2.75%"},
-        {"greater than": "2.0", "≤ to": "2.49", "Rating": "B2/B", "Spread": "3.21%"},
-        {"greater than": "1.5", "≤ to": "1.99", "Rating": "B3/B-", "Spread": "5.09%"},
-        {"greater than": "1.25", "≤ to": "1.49", "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {"greater than": "0.8", "≤ to": "1.24", "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {"greater than": "0.5", "≤ to": "0.79", "Rating": "C2/C", "Spread": "16.00%"},
-        {"greater than": "-100000", "≤ to": "0.49", "Rating": "D2/D", "Spread": "19.00%"}
-    ])
-    
-    fallback_fin = pd.DataFrame([
-        {"greater than": "3.0", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
-        {"greater than": "2.5", "≤ to": "2.99", "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {"greater than": "2.0", "≤ to": "2.49", "Rating": "A1/A+", "Spread": "0.70%"},
-        {"greater than": "1.5", "≤ to": "1.99", "Rating": "A2/A", "Spread": "0.78%"},
-        {"greater than": "1.2", "≤ to": "1.49", "Rating": "A3/A-", "Spread": "0.89%"},
-        {"greater than": "0.9", "≤ to": "1.19", "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {"greater than": "0.75", "≤ to": "0.89", "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {"greater than": "0.6", "≤ to": "0.74", "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {"greater than": "0.5", "≤ to": "0.59", "Rating": "B1/B+", "Spread": "2.75%"},
-        {"greater than": "0.4", "≤ to": "0.49", "Rating": "B2/B", "Spread": "3.21%"},
-        {"greater than": "0.3", "≤ to": "0.39", "Rating": "B3/B-", "Spread": "5.09%"},
-        {"greater than": "0.2", "≤ to": "0.29", "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {"greater than": "0.1", "≤ to": "0.19", "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {"greater than": "0.05", "≤ to": "0.09", "Rating": "C2/C", "Spread": "16.00%"},
-        {"greater than": "-100000", "≤ to": "0.04", "Rating": "D2/D", "Spread": "19.00%"}
-    ])
-
-    result_dict = {
-        "Large Firms": (fallback_large, "Source: Fallback (Offline, Jan 2026 Data)"),
-        "Small/Risky Firms": (fallback_small, "Source: Fallback (Offline, Jan 2026 Data)"), 
-        "Financial Firms": (fallback_fin, "Source: Fallback (Offline, Jan 2026 Data)")
-    }
-
-    try:
-        response = requests.get(url, headers=headers, timeout=15, verify=False)
-        response.raise_for_status()
-        
-        try:
-            df = pd.read_excel(io.BytesIO(response.content), sheet_name="Start here Ratings sheet", header=None)
-        except:
-            df = pd.read_excel(io.BytesIO(response.content), sheet_name=0, header=None)
-
-        def extract_block(keyword):
-            start_row = -1; start_col = -1
-            for idx, row in df.iterrows():
-                row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
-                if keyword.lower() in row_str:
-                    start_row = idx
-                    for c_idx, cell in enumerate(row):
-                        if keyword.lower() in str(cell).lower():
-                            start_col = c_idx; break
-                    break
-            
-            if start_row == -1: return None
-            
-            data_start_row = -1; marker_col_idx = -1
-            for i in range(start_row + 1, start_row + 20):
-                if i >= len(df): break
-                row = df.iloc[i]
-                search_cols = range(max(0, start_col - 2), min(len(row), start_col + 10))
-                for c_idx in search_cols:
-                    cell_str = str(row[c_idx]).strip().lower()
-                    if cell_str.startswith(">") or "greater" in cell_str:
-                        data_start_row = i; marker_col_idx = c_idx; break
-                if data_start_row != -1: break
-            
-            if data_start_row == -1: return None
-            
-            data_rows = []
-            for i in range(data_start_row, data_start_row + 20):
-                if i >= len(df): break
-                row = df.iloc[i]
-                try:
-                    val_start = row[marker_col_idx]
-                    val_end = row[marker_col_idx + 1]
-                    val_rating = row[marker_col_idx + 2]
-                    val_spread = row[marker_col_idx + 3]
-                    
-                    if pd.isna(val_rating) or pd.isna(val_spread): break
-                    
-                    if isinstance(val_spread, (int, float)):
-                        spread_fmt = f"{val_spread * 100:.2f}%"
-                    else:
-                        spread_fmt = str(val_spread)
-                        
-                    start_str = str(val_start).strip()
-                    if start_str == ">": start_str = "greater than"
-                    
-                    entry = {
-                        "greater than": start_str, 
-                        "≤ to": val_end,
-                        "Rating": str(val_rating), 
-                        "Spread": spread_fmt
-                    }
-                    data_rows.append(entry)
-                except: continue
-            return pd.DataFrame(data_rows) if data_rows else None
-
-        # Execute Extraction
-        df_large = extract_block("for large")
-        if df_large is not None and not df_large.empty: 
-            result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
-
-        df_small = extract_block("for smaller")
-        if df_small is not None and not df_small.empty: 
-            result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
-        
-        df_fin = extract_block("for financial")
-        if df_fin is not None and not df_fin.empty:
-             result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
-
-    except Exception as e:
-        pass 
-
-    return result_dict
+    return 0, 0, 0, 0, "No Data", "No Data"
 
 # ==============================================================================
 # [MODULE] Peer Recommender & Financials
@@ -521,7 +281,7 @@ def get_target_financials(ticker):
             elif "KOREA" in country_norm: target_tax = 26.40
             else: target_tax = 25.0
         
-        rev, ebit, ebitda, int_exp, date_str = get_financial_data_with_priority(t, info)
+        rev, ebit, ebitda, int_exp, label_ebit, label_int = get_financial_data_with_priority(t, info)
         
         mkt_cap = info.get('marketCap', 0)
         sector = info.get('sector', '')
@@ -530,11 +290,12 @@ def get_target_financials(ticker):
         else: category = "Small/Risky Firms"
         
         return {
-            "int_exp": int_exp, "ebit": ebit, "date": date_str,
+            "int_exp": int_exp, "ebit": ebit, 
+            "label_int": label_int, "label_ebit": label_ebit,
             "category": category, "tax_rate": target_tax, "country_name": country
         }
     except: pass
-    return {"int_exp": 0.0, "ebit": 0.0, "date": "N/A", "category": "Small/Risky Firms", "tax_rate": 25.0, "country_name": "Unknown"}
+    return {"int_exp": 0.0, "ebit": 0.0, "label_int": "N/A", "label_ebit": "N/A", "category": "Small/Risky Firms", "tax_rate": 25.0, "country_name": "Unknown"}
 
 # ==============================================================================
 # [LOGIC] WACC Engine
@@ -567,15 +328,17 @@ class DetailWACCModel:
                 try: mkt_cap = t.fast_info['market_cap']
                 except: return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)."
 
-            rev, ebit, ebitda, int_exp_dummy, period_label = get_financial_data_with_priority(t, info)
+            rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int = get_financial_data_with_priority(t, info)
             
             if rev == 0: return None, f"⚠️ {ticker}: Excluded (Missing Revenue)."
+
+            period_display = label_ebit if "Calculated" in label_ebit else label_int
 
             tax_rate = self.kpmg_map.get(str(country).upper(), 25.0) 
             data = {
                 "name": info.get('longName', ticker), "country": country, "currency": curr_code, "fx_rate": fx, "tax_rate": tax_rate,
                 "vals": { "Revenue": rev * fx, "EBIT": ebit * fx, "EBITDA": ebitda * fx, "Total Debt": debt * fx, "Market Cap": mkt_cap * fx },
-                "period": period_label
+                "period": period_display
             }
             return data, None
         except Exception as e: return None, f"⚠️ {ticker}: Error {str(e)}"
@@ -601,7 +364,7 @@ class DetailWACCModel:
                 d = fin['vals']; equity = d['Market Cap']; debt = d['Total Debt']; tic = equity + debt
                 de_ratio = debt / equity if equity > 0 else 0.0; dtic_ratio = debt / tic if tic > 0 else 0.0
                 peer_data.append({
-                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Company": fin['name'], "Country": fin['country'],
+                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Country": fin['country'],
                     "Tax Rate": fin['tax_rate'], "Currency": fin['currency'], "FX Rate": fin['fx_rate'],
                     "Revenue": d['Revenue'], "EBIT": d['EBIT'], "EBITDA": d['EBITDA'], "Total Debt": d['Total Debt'],
                     "Market Cap": d['Market Cap'], "D/E Ratio": de_ratio, "Debt/TIC Ratio": dtic_ratio,
@@ -635,7 +398,7 @@ with st.sidebar:
             rec = PeerRecommender()
             res_peers, group, logs = rec.recommend(target_ticker)
             if res_peers: st.session_state['peers'] = res_peers
-            else: st.warning("추천 실패")
+            else: st.warning("Recommendation Failed")
             
     peers_input = st.text_area("Peer Tickers", value=st.session_state.get('peers', "ON, STM, IFX.DE"), height=100)
     st.caption("※ Top 5 revenue companies in the industry\n(Source: Yahoo Finance Industry/Sector Data)")
@@ -659,11 +422,13 @@ with st.sidebar:
         ebit_label = "PPNR ($)" if is_fin_target else "EBIT ($)"
         
         st.markdown(f"**Target Financials** (for Credit Spread)")
-        # [MODIFIED] SIDEBAR SOURCE LABEL
-        st.caption(f"Data Source: **{tf['date']}**")
         
+        # [MODIFIED] SIDEBAR SEPARATE LABELS
         int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
-        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="For Financial Firms, PPNR is calculated as: Pre-tax Income + Provision for Credit Losses")
+        st.caption(f"Source: **{tf.get('label_int', 'N/A')}**")
+        
+        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="For Financial Firms, PPNR is calculated as: Pre-tax Income + |Provision|")
+        st.caption(f"Source: **{tf.get('label_ebit', 'N/A')}**")
         
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
