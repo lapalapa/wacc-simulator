@@ -18,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # ==============================================================================
-# [MODULE] Data Fetcher: Consolidated FRED (Defined at TOP)
+# [MODULE] Data Fetcher: Consolidated FRED
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def fetch_all_fred_data():
@@ -130,7 +130,6 @@ def get_kpmg_tax_rates():
 
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
-    # 2026 Updated Fallback Data
     fallback_large = pd.DataFrame([
         {"greater than": "8.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
         {"greater than": "6.5", "≤ to": "8.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
@@ -148,7 +147,6 @@ def get_damodaran_spreads():
         {"greater than": "0.2", "≤ to": "0.64", "Rating": "C2/C", "Spread": "16.00%"},
         {"greater than": "-100000", "≤ to": "0.19", "Rating": "D2/D", "Spread": "19.00%"}
     ])
-    
     fallback_small = pd.DataFrame([
         {"greater than": "12.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
         {"greater than": "9.5", "≤ to": "12.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
@@ -166,7 +164,6 @@ def get_damodaran_spreads():
         {"greater than": "0.5", "≤ to": "0.79", "Rating": "C2/C", "Spread": "16.00%"},
         {"greater than": "-100000", "≤ to": "0.49", "Rating": "D2/D", "Spread": "19.00%"}
     ])
-    
     fallback_fin = pd.DataFrame([
         {"greater than": "3.0", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
         {"greater than": "2.5", "≤ to": "2.99", "Rating": "Aa2/AA", "Spread": "0.55%"},
@@ -213,22 +210,31 @@ def safe_yf_info(ticker_obj, max_retries=3):
     return {}
 
 # ==============================================================================
-# [MODULE] Helper: Deep Search with MAX Value Strategy
+# [MODULE] Helper: Deep Search with MAX Value Strategy (Updated)
 # ==============================================================================
-def get_value_max_fuzzy(df, col_idx, search_keywords):
+def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None):
     """
     Scans ALL rows containing any of the keywords.
-    Returns the absolute largest value found (to catch 'Total' fields).
+    Returns the absolute largest value found.
+    Supports exclusion_keywords (e.g. to avoid 'Tax').
     """
     candidates = []
     try:
         for idx in df.index:
             idx_str = str(idx).lower()
+            
+            # [EXCLUSION LOGIC]
+            if exclusion_keywords:
+                if any(ex.lower() in idx_str for ex in exclusion_keywords):
+                    continue
+
             for kw in search_keywords:
                 if kw.lower() in idx_str:
-                    val = df.loc[idx].iloc[col_idx]
-                    if pd.notna(val) and val != 0:
-                        candidates.append(abs(val))
+                    try:
+                        val = df.loc[idx].iloc[col_idx]
+                        if pd.notna(val) and val != 0:
+                            candidates.append(abs(val))
+                    except: pass
                     break 
         if candidates:
             return max(candidates)
@@ -241,15 +247,14 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v121.0 (Improved Mapping / No Cash Flow Fallback):
-    Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
-    
+    Priority Logic v122.0 (Smart Filtering):
     1. Annual (Year-1)
     2. Yahoo Info TTM
     3. Calc TTM (Manual Sum)
     
     * Ghost Column Eraser applied.
-    * PPNR = Pretax + abs(Provision) (Breakdown returned for Sidebar)
+    * PPNR = Pretax + abs(Provision) 
+    * **Smart Filter**: Searches 'Provision', 'Credit Loss' etc. BUT Excludes 'Tax'.
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     raw_pretax = 0; raw_provision = 0
@@ -291,7 +296,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if is_financial:
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # [FIX v121] Optimized Keywords for Income Statement Mapping
+                # [FIX v122] Smart Filtering: Include Broad Terms, Exclude 'Tax'
                 p_prov = get_value_max_fuzzy(df, col_idx, [
                     'Provision For Credit Losses',
                     'Credit Losses Provision', 
@@ -300,8 +305,10 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                     'Provision for losses on loans',
                     'Credit Loss', 
                     'Loan Loss',
-                    'Bad Debt'
-                ])
+                    'Bad Debt',
+                    'Impairment',
+                    'Provision' # Very broad, catches "Provision" row
+                ], exclusion_keywords=['Tax', 'Income Tax']) # But ignore taxes
                 
                 if p_tax != 0: 
                     val_e = p_tax + abs(p_prov)
