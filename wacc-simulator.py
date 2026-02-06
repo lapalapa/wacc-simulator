@@ -60,9 +60,9 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v112.0 (Labeling Update):
+    Priority Logic v113.0 (Mixed Labeling):
     1. Annual (Year-1) -> Label: YYYY-MM-DD
-    2. Yahoo Info TTM -> Label: TTM (Yahoo Info)
+    2. Yahoo Info TTM -> Label: TTM (Yahoo Info) OR TTM (Yahoo Info + 이자비용 자체계산)
     3. Calc TTM (Manual Sum) -> Label: TTM (자체계산: YYYY-MM-DD)
     
     * Ghost Column Eraser applied.
@@ -166,6 +166,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 for q_idx in range(4):
                     q_int += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
                 int_exp = q_int
+                # [LABEL UPDATE] Explicitly mark Interest as Calculated
+                period_label = "TTM (Yahoo Info + 이자비용 자체계산)"
             
             # Financials PPNR TTM Calc
             if is_financial:
@@ -190,7 +192,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
-            # [LABEL CHANGE: 자체계산]
+            # [LABEL UPDATE] Fully Calculated
             period_label = f"TTM (자체계산: {last_date})"
             
             rev = 0; ebitda = 0; int_exp = 0; ebit = 0
@@ -599,7 +601,7 @@ class DetailWACCModel:
                 d = fin['vals']; equity = d['Market Cap']; debt = d['Total Debt']; tic = equity + debt
                 de_ratio = debt / equity if equity > 0 else 0.0; dtic_ratio = debt / tic if tic > 0 else 0.0
                 peer_data.append({
-                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Country": fin['country'],
+                    "Ticker": p, "Company Name": fin['name'], "Company": fin['name'], "Company": fin['name'], "Country": fin['country'],
                     "Tax Rate": fin['tax_rate'], "Currency": fin['currency'], "FX Rate": fin['fx_rate'],
                     "Revenue": d['Revenue'], "EBIT": d['EBIT'], "EBITDA": d['EBITDA'], "Total Debt": d['Total Debt'],
                     "Market Cap": d['Market Cap'], "D/E Ratio": de_ratio, "Debt/TIC Ratio": dtic_ratio,
