@@ -69,12 +69,13 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if 'EBITDA' in df.index: ed = df.loc['EBITDA'].iloc[col_idx]
             elif 'Normalized EBITDA' in df.index: ed = df.loc['Normalized EBITDA'].iloc[col_idx]
             
-            # EBIT / PPNR
+            # EBIT / PPNR (EBIT First Strategy)
             val_e = 0
+            # 1. Try Standard EBIT First (Even for Financials)
             if 'EBIT' in df.index: val_e = df.loc['EBIT'].iloc[col_idx]
             elif 'Operating Income' in df.index: val_e = df.loc['Operating Income'].iloc[col_idx]
             
-            # If Financials & EBIT is missing/zero, try PPNR fallback
+            # 2. If Financials AND EBIT is missing/zero -> PPNR Fallback
             if is_financial and (pd.isna(val_e) or val_e == 0):
                 pretax = 0; provision = 0
                 if 'Pretax Income' in df.index: pretax = df.loc['Pretax Income'].iloc[col_idx]
@@ -112,14 +113,14 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 if 'Interest Expense' in recent_4.index: int_exp = recent_4.loc['Interest Expense'].sum()
                 elif 'Interest Expense Non Operating' in recent_4.index: int_exp = recent_4.loc['Interest Expense Non Operating'].sum()
                 
-                # If Financials, calculate PPNR TTM here to overwrite the weak Info proxy
-                if is_financial:
+                # If Financials, calculate PPNR TTM here to overwrite the weak Info proxy if EBIT was 0
+                if is_financial and ebit == 0:
                     pretax = 0; provision = 0
                     if 'Pretax Income' in recent_4.index: pretax = recent_4.loc['Pretax Income'].sum()
                     if 'Provision For Credit Losses' in recent_4.index: provision = recent_4.loc['Provision For Credit Losses'].sum()
                     elif 'Provision For Loan Losses' in recent_4.index: provision = recent_4.loc['Provision For Loan Losses'].sum()
                     
-                    if pretax != 0: ebit = pretax + provision # Overwrite proxy
+                    if pretax != 0: ebit = pretax + provision
             
             return rev, ebit, ebitda, abs(int_exp), "TTM (Yahoo)"
 
@@ -134,11 +135,13 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if 'Interest Expense' in recent_4.index: int_exp = recent_4.loc['Interest Expense'].sum()
             elif 'Interest Expense Non Operating' in recent_4.index: int_exp = recent_4.loc['Interest Expense Non Operating'].sum()
             
-            # EBIT / PPNR
+            # EBIT / PPNR (EBIT First Strategy)
             val_e = 0
+            # 1. Try Standard EBIT
             if 'EBIT' in recent_4.index: val_e = recent_4.loc['EBIT'].sum()
             elif 'Operating Income' in recent_4.index: val_e = recent_4.loc['Operating Income'].sum()
             
+            # 2. Financials Fallback
             if is_financial and val_e == 0:
                 pretax = 0; provision = 0
                 if 'Pretax Income' in recent_4.index: pretax = recent_4.loc['Pretax Income'].sum()
@@ -280,12 +283,138 @@ def get_kpmg_tax_rates():
 
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
-    fallback_fin = pd.DataFrame([{"greater than": "3.0", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"}])
-    return {
-        "Large Firms": (fallback_fin, "Fallback"),
-        "Small/Risky Firms": (fallback_fin, "Fallback"),
-        "Financial Firms": (fallback_fin, "Fallback")
+    """
+    Updated Fallback Data to Jan 2026 Estimates.
+    """
+    url = "https://pages.stern.nyu.edu/~adamodar/pc/ratings.xls"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    # 2026 Updated Fallback Data
+    fallback_large = pd.DataFrame([
+        {"greater than": "8.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
+        {"greater than": "6.5", "≤ to": "8.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
+        {"greater than": "5.5", "≤ to": "6.49", "Rating": "A1/A+", "Spread": "0.70%"},
+        {"greater than": "4.25", "≤ to": "5.49", "Rating": "A2/A", "Spread": "0.78%"},
+        {"greater than": "3.0", "≤ to": "4.24", "Rating": "A3/A-", "Spread": "0.89%"},
+        {"greater than": "2.5", "≤ to": "2.99", "Rating": "Baa2/BBB", "Spread": "1.11%"},
+        {"greater than": "2.25", "≤ to": "2.49", "Rating": "Ba1/BB+", "Spread": "1.38%"},
+        {"greater than": "2.0", "≤ to": "2.24", "Rating": "Ba2/BB", "Spread": "1.84%"},
+        {"greater than": "1.75", "≤ to": "1.99", "Rating": "B1/B+", "Spread": "2.75%"},
+        {"greater than": "1.5", "≤ to": "1.74", "Rating": "B2/B", "Spread": "3.21%"},
+        {"greater than": "1.25", "≤ to": "1.49", "Rating": "B3/B-", "Spread": "5.09%"},
+        {"greater than": "0.8", "≤ to": "1.24", "Rating": "Caa/CCC", "Spread": "8.85%"},
+        {"greater than": "0.65", "≤ to": "0.79", "Rating": "Ca2/CC", "Spread": "12.61%"},
+        {"greater than": "0.2", "≤ to": "0.64", "Rating": "C2/C", "Spread": "16.00%"},
+        {"greater than": "-100000", "≤ to": "0.19", "Rating": "D2/D", "Spread": "19.00%"}
+    ])
+    
+    # Financials (Jan 2026)
+    fallback_fin = pd.DataFrame([
+        {"greater than": "3.0", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
+        {"greater than": "2.5", "≤ to": "2.99", "Rating": "Aa2/AA", "Spread": "0.55%"},
+        {"greater than": "2.0", "≤ to": "2.49", "Rating": "A1/A+", "Spread": "0.70%"},
+        {"greater than": "1.5", "≤ to": "1.99", "Rating": "A2/A", "Spread": "0.78%"},
+        {"greater than": "1.2", "≤ to": "1.49", "Rating": "A3/A-", "Spread": "0.89%"},
+        {"greater than": "0.9", "≤ to": "1.19", "Rating": "Baa2/BBB", "Spread": "1.11%"},
+        {"greater than": "0.75", "≤ to": "0.89", "Rating": "Ba1/BB+", "Spread": "1.38%"},
+        {"greater than": "0.6", "≤ to": "0.74", "Rating": "Ba2/BB", "Spread": "1.84%"},
+        {"greater than": "0.5", "≤ to": "0.59", "Rating": "B1/B+", "Spread": "2.75%"},
+        {"greater than": "0.4", "≤ to": "0.49", "Rating": "B2/B", "Spread": "3.21%"},
+        {"greater than": "0.3", "≤ to": "0.39", "Rating": "B3/B-", "Spread": "5.09%"},
+        {"greater than": "0.2", "≤ to": "0.29", "Rating": "Caa/CCC", "Spread": "8.85%"},
+        {"greater than": "0.1", "≤ to": "0.19", "Rating": "Ca2/CC", "Spread": "12.61%"},
+        {"greater than": "0.05", "≤ to": "0.09", "Rating": "C2/C", "Spread": "16.00%"},
+        {"greater than": "-100000", "≤ to": "0.04", "Rating": "D2/D", "Spread": "19.00%"}
+    ])
+
+    result_dict = {
+        "Large Firms": (fallback_large, "Source: Fallback (Offline, Jan 2026 Data)"),
+        "Small/Risky Firms": (fallback_large, "Source: Fallback (Offline, Jan 2026 Data)"), # Using same table for robust fallback
+        "Financial Firms": (fallback_fin, "Source: Fallback (Offline, Jan 2026 Data)")
     }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15, verify=False)
+        response.raise_for_status()
+        
+        try:
+            df = pd.read_excel(io.BytesIO(response.content), sheet_name="Start here Ratings sheet", header=None)
+        except:
+            df = pd.read_excel(io.BytesIO(response.content), sheet_name=0, header=None)
+
+        def extract_block(keyword):
+            start_row = -1; start_col = -1
+            for idx, row in df.iterrows():
+                row_str = " ".join([str(x) for x in row.values if pd.notna(x)]).lower()
+                if keyword.lower() in row_str:
+                    start_row = idx
+                    for c_idx, cell in enumerate(row):
+                        if keyword.lower() in str(cell).lower():
+                            start_col = c_idx; break
+                    break
+            
+            if start_row == -1: return None
+            
+            data_start_row = -1; marker_col_idx = -1
+            for i in range(start_row + 1, start_row + 20):
+                if i >= len(df): break
+                row = df.iloc[i]
+                search_cols = range(max(0, start_col - 2), min(len(row), start_col + 10))
+                for c_idx in search_cols:
+                    cell_str = str(row[c_idx]).strip().lower()
+                    if cell_str.startswith(">") or "greater" in cell_str:
+                        data_start_row = i; marker_col_idx = c_idx; break
+                if data_start_row != -1: break
+            
+            if data_start_row == -1: return None
+            
+            data_rows = []
+            for i in range(data_start_row, data_start_row + 20):
+                if i >= len(df): break
+                row = df.iloc[i]
+                try:
+                    val_start = row[marker_col_idx]
+                    val_end = row[marker_col_idx + 1]
+                    val_rating = row[marker_col_idx + 2]
+                    val_spread = row[marker_col_idx + 3]
+                    
+                    if pd.isna(val_rating) or pd.isna(val_spread): break
+                    
+                    if isinstance(val_spread, (int, float)):
+                        spread_fmt = f"{val_spread * 100:.2f}%"
+                    else:
+                        spread_fmt = str(val_spread)
+                        
+                    start_str = str(val_start).strip()
+                    if start_str == ">": start_str = "greater than"
+                    
+                    entry = {
+                        "greater than": start_str, 
+                        "≤ to": val_end,
+                        "Rating": str(val_rating), 
+                        "Spread": spread_fmt
+                    }
+                    data_rows.append(entry)
+                except: continue
+            return pd.DataFrame(data_rows) if data_rows else None
+
+        # Execute Extraction
+        df_large = extract_block("for large")
+        if df_large is not None and not df_large.empty: 
+            result_dict["Large Firms"] = (df_large, "Source: NYU Stern (Live Extract)")
+
+        df_small = extract_block("for smaller")
+        if df_small is not None and not df_small.empty: 
+            result_dict["Small/Risky Firms"] = (df_small, "Source: NYU Stern (Live Extract)")
+        
+        df_fin = extract_block("for financial")
+        if df_fin is not None and not df_fin.empty:
+             result_dict["Financial Firms"] = (df_fin, "Source: NYU Stern (Live Extract)")
+
+    except Exception as e:
+        pass 
+
+    return result_dict
 
 # ==============================================================================
 # [MODULE] Peer Recommender & Financials
@@ -331,8 +460,10 @@ def get_target_financials(ticker):
             elif "KOREA" in country_norm: target_tax = 26.40
             else: target_tax = 25.0
         
+        # USE COMMON LOGIC
         rev, ebit, ebitda, int_exp, date_str = get_financial_data_with_priority(t, info)
         
+        # Category
         mkt_cap = info.get('marketCap', 0)
         sector = info.get('sector', '')
         if 'Financial' in sector or 'Bank' in sector: category = "Financial Firms"
@@ -377,6 +508,7 @@ class DetailWACCModel:
                 try: mkt_cap = t.fast_info['market_cap']
                 except: return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)."
 
+            # USE COMMON LOGIC
             rev, ebit, ebitda, int_exp_dummy, period_label = get_financial_data_with_priority(t, info)
             
             if rev == 0: return None, f"⚠️ {ticker}: Excluded (Missing Revenue)."
@@ -495,7 +627,7 @@ with st.sidebar:
     if st.button("Calculate WACC", type="primary", use_container_width=True):
         model = DetailWACCModel(
             target_ticker, peers_input, rf_in, crp_in, size_in, 
-            bb_in, div_in, g_in, tax_in, df_rf_trend, df_gdp_disp # Fixed var names here
+            bb_in, div_in, g_in, tax_in, df_rf_trend, df_gdp_disp
         )
         with st.spinner("Calculating..."):
             st.session_state['result'] = model.run()
