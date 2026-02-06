@@ -60,10 +60,10 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v111.1 (Clear Source Labeling):
+    Priority Logic v112.0 (Labeling Update):
     1. Annual (Year-1) -> Label: YYYY-MM-DD
     2. Yahoo Info TTM -> Label: TTM (Yahoo Info)
-    3. Calc TTM (Manual Sum) -> Label: TTM (Calculated: YYYY-MM-DD)
+    3. Calc TTM (Manual Sum) -> Label: TTM (자체계산: YYYY-MM-DD)
     
     * Ghost Column Eraser applied.
     * PPNR = Pretax + Provision
@@ -190,7 +190,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
-            period_label = f"TTM (Calculated: {last_date})"
+            # [LABEL CHANGE: 자체계산]
+            period_label = f"TTM (자체계산: {last_date})"
             
             rev = 0; ebitda = 0; int_exp = 0; ebit = 0
             sum_pretax = 0; sum_prov = 0; sum_ebit_std = 0
@@ -656,7 +657,8 @@ with st.sidebar:
         ebit_label = "PPNR ($)" if is_fin_target else "EBIT ($)"
         
         st.markdown(f"**Target Financials** (for Credit Spread)")
-        st.caption(f"Data Source: {tf['date']}")
+        # [MODIFIED] SIDEBAR SOURCE LABEL
+        st.caption(f"Data Source: **{tf['date']}**")
         
         int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
         ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f", help="For Financial Firms, PPNR is calculated as: Pre-tax Income + Provision for Credit Losses")
