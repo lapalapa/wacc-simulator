@@ -441,29 +441,59 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 url = f"https://finance.yahoo.com/quote/{ticker_symbol}/financials/"
                 
                 headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 }
                 
-                response = requests.get(url, headers=headers, timeout=10, verify=False)
+                logger.info(f"Attempting to scrape provision from {url}")
+                response = requests.get(url, headers=headers, timeout=15, verify=False)
                 response.raise_for_status()
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # Find provision row in the table
-                # Look for text containing "Provision" and "Credit" or "Loan"
-                for row in soup.find_all('div', {'class': re.compile('row')}):
-                    row_text = row.get_text()
-                    row_lower = row_text.lower()
+                # Strategy: Find all table rows and look for provision
+                # Yahoo Finance structure: <tr><td><span>Label</span></td><td>Value</td>...</tr>
+                found_rows = []
+                
+                for row in soup.find_all('tr'):
+                    # Get all text in the row
+                    cells = row.find_all(['td', 'th'])
+                    if len(cells) < 2:  # Need at least label + value
+                        continue
                     
-                    if 'provision' in row_lower and ('credit' in row_lower or 'loan' in row_lower):
-                        # Extract TTM value (first numeric column)
-                        values = re.findall(r'[-]?\d+[\.,]?\d*', row_text)
+                    # First cell is usually the label
+                    label_text = cells[0].get_text(strip=True)
+                    label_lower = label_text.lower()
+                    
+                    # Check if this is a provision row
+                    is_provision = 'provision' in label_lower
+                    is_credit = 'credit' in label_lower or 'loan' in label_lower
+                    is_tax = 'income' in label_lower and 'tax' in label_lower
+                    
+                    if is_provision and is_credit and not is_tax:
+                        found_rows.append({
+                            'label': label_text,
+                            'cells': cells
+                        })
+                        logger.info(f"Found provision row: '{label_text}'")
+                
+                # Extract value from first matching row
+                if found_rows:
+                    row_data = found_rows[0]
+                    # TTM value is usually in the 2nd cell (index 1)
+                    for cell in row_data['cells'][1:]:
+                        cell_text = cell.get_text(strip=True)
+                        # Match numbers with commas: 3,091,000 or -3,091,000
+                        values = re.findall(r'[-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?', cell_text)
                         if values:
-                            # Convert string to float (handle commas and negatives)
                             val_str = values[0].replace(',', '')
                             scraped_provision_ttm = abs(float(val_str)) * 1000  # Yahoo shows in thousands
-                            logger.info(f"✓ Scraped Provision from Yahoo Finance: ${scraped_provision_ttm:,.0f}")
+                            logger.info(f"✓ Scraped '{row_data['label']}': ${scraped_provision_ttm:,.0f}")
                             break
+                    
+                    if scraped_provision_ttm is None:
+                        logger.warning(f"Found provision row but couldn't extract value: {row_data}")
+                else:
+                    logger.warning("No provision row found in HTML")
                 
             except Exception as e:
                 logger.warning(f"Web scraping failed: {str(e)}")
