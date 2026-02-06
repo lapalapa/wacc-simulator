@@ -60,10 +60,11 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v109.0 (Ghost Column Protection):
-    1. Annual (Year-1) -> Strict Check: If Revenue is 0 or too small (<80% of TTM), DISCARD.
-    2. Yahoo Info TTM -> This is the PRIMARY fallback if Annual is invalid.
-    3. Calc TTM (Manual Sum) -> Last resort.
+    Priority Logic v110.0 (Ghost Column Eraser):
+    * STEP 0: Clean "Ghost" Columns (Empty Revenue) from Quarterly Data.
+    1. Annual (Year-1) -> Strict Validation
+    2. Yahoo Info TTM -> Primary Fallback
+    3. Calc TTM (Manual Sum) -> Uses cleaned quarterly data (shifts window if needed).
     
     * Financials PPNR = Pretax Income + Provision
     """
@@ -83,6 +84,20 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         
         q_fin = ticker_obj.quarterly_income_stmt
         if q_fin.empty: q_fin = ticker_obj.quarterly_financials
+
+        # [STEP 0] GHOST COLUMN ERASER
+        # Filter out quarterly columns that exist but have 0 Revenue (Shells)
+        if not q_fin.empty:
+            valid_cols = []
+            for i in range(len(q_fin.columns)):
+                # Use deep search to find ANY revenue
+                r_check = get_value_max_fuzzy(q_fin, i, ['Total Revenue', 'Revenue'])
+                if r_check > 1000: # Threshold for valid data
+                    valid_cols.append(q_fin.columns[i])
+            
+            if valid_cols:
+                q_fin = q_fin[valid_cols] # Keep only valid columns
+            # Note: q_fin columns are usually sorted Newest -> Oldest
 
         # Helper to extract from a specific column
         def extract_from_col(df, col_idx):
@@ -110,53 +125,39 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             
             return r, val_e, ed, i
 
-        # --- PRE-CHECK: Benchmark TTM Revenue for Validation ---
-        ttm_rev_benchmark = 0
-        if not q_fin.empty and q_fin.shape[1] >= 4:
-            for q_idx in range(4):
-                ttm_rev_benchmark += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
-
-        # --- Priority 1: Annual (Year-1) with GHOST DATA Protection ---
+        # --- Priority 1: Annual (Year-1) with TRIPLE LOCK Validation ---
         if not a_fin.empty:
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
                 
-                # Check 1: Target Year Match
                 if col_dt.year == target_year:
                     r_annual, e, ed, i = extract_from_col(a_fin, idx)
                     
-                    # [VALIDATION START]
-                    is_valid = True
-                    
-                    # Rule A: Empty Data Check
-                    if pd.isna(r_annual) or r_annual <= 1000:
-                        is_valid = False # It's an empty placeholder column
-                    
-                    # Rule B: Partial Year Check
-                    # If Annual Revenue is < 80% of Quarterly Sum, it's likely a 9-month report.
-                    elif ttm_rev_benchmark > 0 and r_annual < (ttm_rev_benchmark * 0.8):
-                        is_valid = False # It's partial data (e.g. Q3 YTD)
-                    
-                    # Rule C: 4-Quarter Existence Check
-                    if is_valid:
-                        valid_quarters = 0
+                    if pd.notna(r_annual) and r_annual > 1000:
+                        # [VALIDATION START]
+                        is_valid = False
+                        
                         if not q_fin.empty:
                             cutoff_date = col_dt - timedelta(days=360)
-                            for q_col in q_fin.columns:
+                            valid_quarters = []
+                            q_rev_sum = 0
+                            
+                            for q_idx, q_col in enumerate(q_fin.columns):
                                 q_dt = pd.to_datetime(q_col)
+                                # Check date range
                                 if cutoff_date < q_dt <= col_dt:
-                                    valid_quarters += 1
+                                    valid_quarters.append(q_idx)
+                                    q_rev_sum += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
+                            
+                            if len(valid_quarters) >= 4:
+                                # Revenue Sum Match (within 10% margin)
+                                if 0.9 <= (q_rev_sum / r_annual) <= 1.1:
+                                    is_valid = True
                         
-                        if valid_quarters < 4:
-                            is_valid = False
-
-                    if is_valid:
-                        return r_annual, e, ed, abs(i), col.strftime('%Y-%m-%d')
-                    
-                    # If invalid, loop breaks and falls through to Priority 2
+                        if is_valid:
+                            return r_annual, e, ed, abs(i), col.strftime('%Y-%m-%d')
         
-        # --- Priority 2: Yahoo Info TTM (PRIMARY FALLBACK) ---
-        # This is used when Annual data is missing, empty, or partial.
+        # --- Priority 2: Yahoo Info TTM ---
         rev_ttm = info_dict.get('totalRevenue', 0)
         
         if rev_ttm is not None and rev_ttm > 0:
@@ -169,7 +170,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if int_exp is None or int_exp == 0:
                  int_exp = info_dict.get('totalInterestExpense', 0)
             
-            # If Info key is missing (common for banks), use Deep Search on Quarters
+            # If Info key is missing, use Deep Search on Cleaned Quarters
             if (int_exp is None or int_exp == 0) and not q_fin.empty and q_fin.shape[1] >= 4:
                 recent_4 = q_fin.iloc[:, :4]
                 q_int = 0
@@ -177,7 +178,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                     q_int += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
                 int_exp = q_int
             
-            # Financials PPNR TTM Calc (Manual Sum necessary)
+            # Financials PPNR TTM Calc (Always Manual Sum as Info lacks PPNR)
             if is_financial:
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
@@ -197,7 +198,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             
             return rev, ebit, ebitda, abs(int_exp), period_label
 
-        # --- Priority 3: Calc TTM (Manual Sum - Last Resort) ---
+        # --- Priority 3: Calc TTM (Manual Sum) ---
+        # Because we cleaned q_fin in Step 0, iloc[:, :4] now grabs actual data
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
             last_date = recent_4.columns[0].strftime('%Y-%m-%d')
