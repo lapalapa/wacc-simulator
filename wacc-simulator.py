@@ -60,9 +60,9 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v107.0 (Triple Lock Validation):
+    Priority Logic v108.0:
     1. Annual (Year-1) -> MUST verify 4 quarters exist AND Revenue Sum matches.
-    2. Yahoo Info TTM
+    2. Yahoo Info TTM -> Prioritize 'interestExpense' key in info.
     3. Calc TTM (Manual Sum)
     
     * Financials PPNR = Pretax Income + Provision
@@ -115,7 +115,6 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
                 
-                # Check 1: Target Year Match
                 if col_dt.year == target_year:
                     r_annual, e, ed, i = extract_from_col(a_fin, idx)
                     
@@ -124,7 +123,6 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                         is_valid = False
                         
                         if not q_fin.empty:
-                            # Find quarters within [Annual Date - 1 Year, Annual Date]
                             cutoff_date = col_dt - timedelta(days=360)
                             valid_quarters = []
                             q_rev_sum = 0
@@ -135,34 +133,38 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                                     valid_quarters.append(q_idx)
                                     q_rev_sum += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
                             
-                            # Check 2: Must have exactly 4 quarters
                             if len(valid_quarters) >= 4:
-                                # Check 3: Revenue Sum Match (within 10% margin)
-                                # This prevents using "9-month YTD" as "Annual"
                                 if 0.9 <= (q_rev_sum / r_annual) <= 1.1:
                                     is_valid = True
                         
                         if is_valid:
                             return r_annual, e, ed, abs(i), col.strftime('%Y-%m-%d')
-                        # If validation fails, LOOP breaks/continues to Fallback
         
         # --- Priority 2: Yahoo Info TTM ---
         rev_ttm = info_dict.get('totalRevenue', 0)
+        
         if rev_ttm is not None and rev_ttm > 0:
             period_label = "TTM (Yahoo Info)"
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense TTM (Sum 4 Quarters)
-            if not q_fin.empty and q_fin.shape[1] >= 4:
+            # [FIXED] Interest Expense: Try 'interestExpense' key first!
+            int_exp = info_dict.get('interestExpense', 0)
+            if int_exp is None or int_exp == 0:
+                 int_exp = info_dict.get('totalInterestExpense', 0)
+            
+            # If Info key is missing, fallback to Quarterly Sum (Deep Search)
+            if (int_exp is None or int_exp == 0) and not q_fin.empty and q_fin.shape[1] >= 4:
                 recent_4 = q_fin.iloc[:, :4]
                 q_int = 0
                 for q_idx in range(4):
                     q_int += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
                 int_exp = q_int
-                
-                # Financials PPNR TTM
-                if is_financial:
+            
+            # Financials PPNR TTM Calc (Always Manual Sum as Info lacks PPNR)
+            if is_financial:
+                if not q_fin.empty and q_fin.shape[1] >= 4:
+                    recent_4 = q_fin.iloc[:, :4]
                     q_pretax = 0; q_prov = 0
                     for q_idx in range(4):
                         q_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
@@ -174,6 +176,9 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 op_margin = info_dict.get('operatingMargins', 0)
                 if op_margin: ebit = rev * op_margin
                 elif ebitda: ebit = ebitda
+            
+            # Abs check
+            if int_exp is None: int_exp = 0
             
             return rev, ebit, ebitda, abs(int_exp), period_label
 
