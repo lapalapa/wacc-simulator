@@ -783,18 +783,18 @@ class DetailWACCModel:
 latest_gdp, df_gdp_disp, latest_rf, df_rf_trend, df_oas = fetch_all_fred_data()
 
 with st.sidebar:
-    st.header("🎯 Target & Peers")
+    st.header("Target & Peers")
     target_ticker = st.text_input("Target Ticker", "WOLF")
     
-    if st.button("🤖 Auto-Recommend Peers (Top 5)", type="secondary", use_container_width=True):
+    if st.button("Auto-Recommend Peers (Top 5)", type="secondary", use_container_width=True):
         with st.spinner("Finding peers..."):
             rec = PeerRecommender()
             res_peers, group, logs = rec.recommend(target_ticker)
             if res_peers: 
                 st.session_state['peers'] = res_peers
-                st.success(f"✅ Found peers in {group}")
+                st.success(f"Found peers in {group}")
             else: 
-                st.warning("❌ Recommendation Failed")
+                st.warning("Recommendation Failed")
                 if logs:
                     for log in logs:
                         st.error(log)
@@ -807,10 +807,10 @@ with st.sidebar:
     st.caption("※ Top 5 revenue companies in the industry\n(Source: Yahoo Finance Industry/Sector Data)")
     
     st.divider()
-    st.header("⚙️ Assumptions")
+    st.header("Assumptions")
     
     # [SECTION] Target Assumptions
-    with st.expander("🎯 Target Assumptions", expanded=True):
+    with st.expander("Target Assumptions", expanded=True):
         if 'target_fin' not in st.session_state or st.session_state.get('last_ticker') != target_ticker:
             st.session_state['target_fin'] = get_target_financials(target_ticker)
             st.session_state['last_ticker'] = target_ticker
@@ -818,7 +818,7 @@ with st.sidebar:
         tf = st.session_state['target_fin']
         
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, float(tf.get('tax_rate', 25.0)), 0.1)
-        st.caption(f"📍 Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
+        st.caption(f"Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
         
         st.divider()
         is_fin_target = 'Financial' in tf['category'] or 'Bank' in tf['category']
@@ -858,20 +858,20 @@ with st.sidebar:
         category_in = st.selectbox("Firm Category", cat_options, index=cat_default_idx)
 
     # [SECTION] Cost of Equity / Debt
-    with st.expander("💰 Cost of Equity / Debt", expanded=True):
+    with st.expander("Cost of Equity / Debt", expanded=True):
         rf_in = st.number_input(f"Risk Free Rate (Latest: {latest_rf:.2f}%)", value=latest_rf, step=0.01)
         crp_in = st.number_input("Country Risk Premium (%)", value=0.0, step=0.1)
         size_in = st.number_input("Size Premium (%)", value=0.0, step=0.1)
     
     # [SECTION] Implied Return
-    with st.expander("📊 Implied Return", expanded=True):
+    with st.expander("Implied Return", expanded=True):
         avg_bb, avg_div, _, _ = get_sp_buyback_data()
         bb_in = st.number_input(f"Buyback Yield (5Y Avg: {avg_bb:.2f}%)", value=avg_bb, step=0.1)
         div_in = st.number_input(f"Dividend Yield (5Y Avg: {avg_div:.2f}%)", value=avg_div, step=0.1)
         g_in = st.number_input(f"Growth Rate (Latest GDP: {latest_gdp:.2f}%)", value=latest_gdp, step=0.1)
 
     st.divider()
-    if st.button("🚀 Calculate WACC", type="primary", use_container_width=True):
+    if st.button("Calculate WACC", type="primary", use_container_width=True):
         model = DetailWACCModel(
             target_ticker, peers_input, rf_in, crp_in, size_in, 
             bb_in, div_in, g_in, tax_in, df_rf_trend, df_gdp_disp
@@ -883,7 +883,7 @@ with st.sidebar:
                 'bb': bb_in, 'div': div_in, 'g': g_in,
                 'int_exp': int_exp_in, 'ebit': ebit_in, 'category': category_in
             }
-        st.success("✅ Calculation completed!")
+        st.success("Calculation completed!")
 
 # ==============================================================================
 # [RESULTS DISPLAY]
@@ -896,7 +896,7 @@ if 'result' in st.session_state:
     
     # 1. Beta & Structure
     results_container = st.container()
-    st.subheader("📈 Beta Analysis")
+    st.subheader("Beta Analysis")
     sens_method = st.radio(
         "Sensitivity Selection (Aggregation Method)", 
         ["Average", "Median", "Maximum", "Minimum"], 
@@ -1007,7 +1007,7 @@ if 'result' in st.session_state:
         we = 1 - sel_dtic
         wacc = (we * ke) + (wd * kd)
 
-        with st.expander("📋 5-Year Monthly Beta Analysis Table", expanded=True):
+        with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
             cols_show = [
                 "Ticker", "Company Name", "Country", "Period", "Total Debt", "Market Cap", 
                 "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", 
@@ -1037,7 +1037,7 @@ if 'result' in st.session_state:
             )
             
             st.divider()
-            st.markdown("##### 📐 Beta Calculation Methodologies")
+            st.markdown("##### Beta Calculation Methodologies")
             mc1, mc2, mc3 = st.columns(3)
             with mc1: 
                 st.markdown("**1. Adjusted Beta**")
@@ -1050,7 +1050,7 @@ if 'result' in st.session_state:
                 st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
 
             st.divider()
-            st.markdown("##### ⚙️ Adjust Peer Tax Rates")
+            st.markdown("##### Adjust Peer Tax Rates")
             cols = st.columns(len(df_init))
             for idx, row in df_init.iterrows():
                 with cols[idx % len(cols)]:
@@ -1063,10 +1063,10 @@ if 'result' in st.session_state:
                     )
             st.caption("※ Note: If the headquarter location is not available in the KPMG tax table, a default rate of 25.00% is applied.")
     else:
-        st.warning("⚠️ No valid peer data available for calculation.")
+        st.warning("No valid peer data available for calculation.")
 
     with results_container:
-        st.subheader("🎯 WACC Calculation & Results")
+        st.subheader("WACC Calculation & Results")
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Final WACC", f"{wacc:.2%}")
         c2.metric("Cost of Equity", f"{ke:.2%}")
@@ -1077,7 +1077,7 @@ if 'result' in st.session_state:
         )
         
         st.divider()
-        with st.expander("👉 WACC Calculation Details (Methodology)", expanded=False):
+        with st.expander("WACC Calculation Details (Methodology)", expanded=False):
             ce, cd, cw = st.columns(3)
             with ce:
                 st.markdown("**Cost of Equity ($K_e$)**")
@@ -1101,7 +1101,7 @@ if 'result' in st.session_state:
         st.markdown("---")
 
     st.markdown("---")
-    st.subheader("💼 Cost of Equity")
+    st.subheader("Cost of Equity")
     st.latex(r"K_e = R_f + \beta_{L} \times (R_m - R_f) + CRP + SP")
     st.info(
         f"**Calculation:** {inp['rf']:.2f}% + ({target_relevered_beta:.2f} × {(m['MRP']*100):.2f}%) + "
@@ -1114,7 +1114,7 @@ if 'result' in st.session_state:
     k4.metric("Country Risk Prem", f"{inp['crp']:.2f}%")
     k5.metric("Size Premium", f"{inp['sp']:.2f}%")
     
-    with st.expander("📊 Implied Market Return Details"):
+    with st.expander("Implied Market Return Details"):
         st.write(f"**Implied Market Return ($R_m$): {m['Rm']:.2%}**")
         st.write(
             f"= Buyback Yield ({inp['bb']:.2f}%) + Dividend Yield ({inp['div']:.2f}%) + "
@@ -1122,9 +1122,9 @@ if 'result' in st.session_state:
         )
 
     st.markdown("---")
-    st.subheader("🏦 Cost of Debt")
+    st.subheader("Cost of Debt")
     
-    with st.expander("🎯 Target Credit Spread Calculation", expanded=True):
+    with st.expander("Target Credit Spread Calculation", expanded=True):
         sc1, sc2, sc3, sc4 = st.columns(4)
         sc1.metric("Interest Coverage Ratio", f"{icr:.2f}x")
         sc2.metric("Firm Category", category)
@@ -1148,7 +1148,7 @@ if 'result' in st.session_state:
     d5.metric("After-tax Cost of Debt", f"{kd:.2%}")
 
     st.markdown("---")
-    st.subheader("📊 Peer Group Analysis (Financials)")
+    st.subheader("Peer Group Analysis (Financials)")
     if not df_init.empty:
         fin_cols = [
             "Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", 
@@ -1174,18 +1174,18 @@ if 'result' in st.session_state:
         )
         st.caption("Note: Converted to USD Billions.")
         
-        with st.expander("💱 Applied FX Rates Details"):
+        with st.expander("Applied FX Rates Details"):
             st.dataframe(df_init[["Ticker", "Currency", "FX Rate"]].T, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📚 Market Data Reference")
+    st.subheader("Market Data Reference")
     t1, t2, t3, t4, t5, t6 = st.tabs([
-        "📉 Risk Free Rate", 
-        "📈 US GDP Growth", 
-        "📊 S&P 500 Yields", 
-        "🏛️ KPMG Corp Tax", 
-        "📉 US Corp Spreads", 
-        "📊 Damodaran Ratings"
+        "Risk Free Rate", 
+        "US GDP Growth", 
+        "S&P 500 Yields", 
+        "KPMG Corp Tax", 
+        "US Corp Spreads", 
+        "Damodaran Ratings"
     ])
     
     with t1:
@@ -1253,7 +1253,7 @@ if 'result' in st.session_state:
         source_note = damodaran_dict["Large Firms"][1]
         st.caption(f"{source_note}")
         
-        dt1, dt2, dt3 = st.tabs(["🏭 Large Firms", "🚀 Smaller/Risky Firms", "🏦 Financial Firms"])
+        dt1, dt2, dt3 = st.tabs(["Large Firms", "Smaller/Risky Firms", "Financial Firms"])
         
         with dt1:
             df1, _ = damodaran_dict["Large Firms"]
