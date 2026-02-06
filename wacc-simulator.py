@@ -71,17 +71,17 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             
             # EBIT / PPNR
             val_e = 0
-            if is_financial:
+            if 'EBIT' in df.index: val_e = df.loc['EBIT'].iloc[col_idx]
+            elif 'Operating Income' in df.index: val_e = df.loc['Operating Income'].iloc[col_idx]
+            
+            # If Financials & EBIT is missing/zero, try PPNR fallback
+            if is_financial and (pd.isna(val_e) or val_e == 0):
                 pretax = 0; provision = 0
                 if 'Pretax Income' in df.index: pretax = df.loc['Pretax Income'].iloc[col_idx]
                 if 'Provision For Credit Losses' in df.index: provision = df.loc['Provision For Credit Losses'].iloc[col_idx]
                 elif 'Provision For Loan Losses' in df.index: provision = df.loc['Provision For Loan Losses'].iloc[col_idx]
                 
                 if pd.notna(pretax): val_e = pretax + (provision if pd.notna(provision) else 0)
-                if val_e == 0 and 'EBIT' in df.index: val_e = df.loc['EBIT'].iloc[col_idx] # Fallback
-            else:
-                if 'EBIT' in df.index: val_e = df.loc['EBIT'].iloc[col_idx]
-                elif 'Operating Income' in df.index: val_e = df.loc['Operating Income'].iloc[col_idx]
             
             e = val_e
             return r, e, ed, i
@@ -118,7 +118,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                     if 'Pretax Income' in recent_4.index: pretax = recent_4.loc['Pretax Income'].sum()
                     if 'Provision For Credit Losses' in recent_4.index: provision = recent_4.loc['Provision For Credit Losses'].sum()
                     elif 'Provision For Loan Losses' in recent_4.index: provision = recent_4.loc['Provision For Loan Losses'].sum()
-                    if pretax != 0: ebit = pretax + provision
+                    
+                    if pretax != 0: ebit = pretax + provision # Overwrite proxy
             
             return rev, ebit, ebitda, abs(int_exp), "TTM (Yahoo)"
 
@@ -134,18 +135,18 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             elif 'Interest Expense Non Operating' in recent_4.index: int_exp = recent_4.loc['Interest Expense Non Operating'].sum()
             
             # EBIT / PPNR
-            val_ebit = 0
-            if is_financial:
+            val_e = 0
+            if 'EBIT' in recent_4.index: val_e = recent_4.loc['EBIT'].sum()
+            elif 'Operating Income' in recent_4.index: val_e = recent_4.loc['Operating Income'].sum()
+            
+            if is_financial and val_e == 0:
                 pretax = 0; provision = 0
                 if 'Pretax Income' in recent_4.index: pretax = recent_4.loc['Pretax Income'].sum()
                 if 'Provision For Credit Losses' in recent_4.index: provision = recent_4.loc['Provision For Credit Losses'].sum()
                 elif 'Provision For Loan Losses' in recent_4.index: provision = recent_4.loc['Provision For Loan Losses'].sum()
-                val_ebit = pretax + provision
-            else:
-                if 'EBIT' in recent_4.index: val_ebit = recent_4.loc['EBIT'].sum()
-                elif 'Operating Income' in recent_4.index: val_ebit = recent_4.loc['Operating Income'].sum()
+                val_e = pretax + provision
             
-            ebit = val_ebit
+            ebit = val_e
             return rev, ebit, ebitda, abs(int_exp), "TTM (Calc)"
 
         # --- Step 4: Annual (Current Year - 2) ---
@@ -287,7 +288,7 @@ def get_damodaran_spreads():
     }
 
 # ==============================================================================
-# [MODULE] Peer Recommender
+# [MODULE] Peer Recommender & Financials
 # ==============================================================================
 class PeerRecommender:
     def get_revenue(self, ticker):
@@ -494,7 +495,7 @@ with st.sidebar:
     if st.button("Calculate WACC", type="primary", use_container_width=True):
         model = DetailWACCModel(
             target_ticker, peers_input, rf_in, crp_in, size_in, 
-            bb_in, div_in, g_in, tax_in, rf_trend_df, df_gdp_disp
+            bb_in, div_in, g_in, tax_in, df_rf_trend, df_gdp_disp # Fixed var names here
         )
         with st.spinner("Calculating..."):
             st.session_state['result'] = model.run()
