@@ -60,12 +60,12 @@ def get_value_max_fuzzy(df, col_idx, search_keywords):
 # ==============================================================================
 def get_financial_data_with_priority(ticker_obj, info_dict):
     """
-    Priority Logic v106.0:
-    1. Annual (Year-1) -> MUST verify if 4 corresponding quarterly columns exist.
+    Priority Logic v107.0 (Triple Lock Validation):
+    1. Annual (Year-1) -> MUST verify 4 quarters exist AND Revenue Sum matches.
     2. Yahoo Info TTM
     3. Calc TTM (Manual Sum)
     
-    * Financials PPNR = Pretax Income + Provision (Standard Formula)
+    * Financials PPNR = Pretax Income + Provision
     """
     rev = 0; ebit = 0; ebitda = 0; int_exp = 0
     period_label = "N/A"
@@ -101,7 +101,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 pretax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 provision = get_value_max_fuzzy(df, col_idx, ['Provision For Credit Losses', 'Provision For Loan Losses'])
                 
-                # [CORRECTED FORMULA v106] PPNR = Pretax + Provision
+                # [STANDARD FORMULA] PPNR = Pretax + Provision
                 if pretax != 0: 
                     val_e = pretax + provision
             
@@ -110,28 +110,41 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             
             return r, val_e, ed, i
 
-        # --- Priority 1: Annual (Current Year - 1) with 4-Quarter Validation ---
-        found_annual = False
+        # --- Priority 1: Annual (Year-1) with TRIPLE LOCK Validation ---
         if not a_fin.empty:
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
                 
-                # Check 1: Is it the target year?
+                # Check 1: Target Year Match
                 if col_dt.year == target_year:
+                    r_annual, e, ed, i = extract_from_col(a_fin, idx)
                     
-                    # Check 2: Do we have 4 quarters for this fiscal year?
-                    q_count = 0
-                    if not q_fin.empty:
-                        cutoff_date = col_dt - timedelta(days=360) 
-                        for q_col in q_fin.columns:
-                            q_dt = pd.to_datetime(q_col)
-                            if cutoff_date < q_dt <= col_dt:
-                                q_count += 1
-                    
-                    if q_count >= 4:
-                        r, e, ed, i = extract_from_col(a_fin, idx)
-                        if pd.notna(r) and r > 1000:
-                            return r, e, ed, abs(i), col.strftime('%Y-%m-%d')
+                    if pd.notna(r_annual) and r_annual > 1000:
+                        # [VALIDATION START]
+                        is_valid = False
+                        
+                        if not q_fin.empty:
+                            # Find quarters within [Annual Date - 1 Year, Annual Date]
+                            cutoff_date = col_dt - timedelta(days=360)
+                            valid_quarters = []
+                            q_rev_sum = 0
+                            
+                            for q_idx, q_col in enumerate(q_fin.columns):
+                                q_dt = pd.to_datetime(q_col)
+                                if cutoff_date < q_dt <= col_dt:
+                                    valid_quarters.append(q_idx)
+                                    q_rev_sum += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
+                            
+                            # Check 2: Must have exactly 4 quarters
+                            if len(valid_quarters) >= 4:
+                                # Check 3: Revenue Sum Match (within 10% margin)
+                                # This prevents using "9-month YTD" as "Annual"
+                                if 0.9 <= (q_rev_sum / r_annual) <= 1.1:
+                                    is_valid = True
+                        
+                        if is_valid:
+                            return r_annual, e, ed, abs(i), col.strftime('%Y-%m-%d')
+                        # If validation fails, LOOP breaks/continues to Fallback
         
         # --- Priority 2: Yahoo Info TTM ---
         rev_ttm = info_dict.get('totalRevenue', 0)
@@ -155,7 +168,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                         q_pretax += get_value_max_fuzzy(recent_4, q_idx, ['Pretax Income', 'Income Before Tax'])
                         q_prov += get_value_max_fuzzy(recent_4, q_idx, ['Provision For Credit Losses'])
                     
-                    if q_pretax != 0: ebit = q_pretax + q_prov # v106 Formula
+                    if q_pretax != 0: ebit = q_pretax + q_prov
             
             if ebit == 0:
                 op_margin = info_dict.get('operatingMargins', 0)
@@ -184,7 +197,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                 else:
                     sum_ebit_std += get_value_max_fuzzy(recent_4, q_idx, ['EBIT', 'Operating Income'])
             
-            if is_financial: ebit = sum_pretax + sum_prov # v106 Formula
+            if is_financial: ebit = sum_pretax + sum_prov
             else: ebit = sum_ebit_std
             
             return rev, ebit, ebitda, abs(int_exp), period_label
