@@ -42,6 +42,59 @@ def safe_yf_info(ticker_obj, max_retries=3):
 # ==============================================================================
 # [MODULE] Helper: Deep Search with Normalization (v125 Logic)
 # ==============================================================================
+def get_value_max_fuzzy_with_priority(df, col_idx, keyword_priority_list, exclusion_keywords=None):
+    """
+    Enhanced fuzzy search with priority scoring.
+    Returns the value from the highest-priority match.
+    
+    Args:
+        keyword_priority_list: List of tuples (keyword, priority_score)
+        exclusion_keywords: List of keywords to exclude
+    
+    Returns:
+        Absolute value from the highest priority match, or 0 if none found
+    """
+    matches = []  # Store (priority, value, row_name)
+    
+    try:
+        # Pre-process exclusion keywords
+        exclusions = [e.lower().replace(" ", "").replace("-", "").replace("_", "") 
+                      for e in exclusion_keywords] if exclusion_keywords else []
+        
+        for idx in df.index:
+            # Normalize Index
+            raw_idx_str = str(idx)
+            norm_idx_str = raw_idx_str.lower().replace(" ", "").replace("-", "").replace("_", "")
+            
+            # Exclusion Check
+            if any(ex in norm_idx_str for ex in exclusions):
+                continue
+            
+            # Check Keywords with Priority
+            for kw, priority in keyword_priority_list:
+                norm_kw = kw.lower().replace(" ", "").replace("-", "").replace("_", "")
+                
+                if norm_kw in norm_idx_str:
+                    try:
+                        val = df.loc[idx].iloc[col_idx]
+                        if pd.notna(val) and val != 0:
+                            matches.append((priority, abs(val), raw_idx_str))
+                    except Exception as e:
+                        logger.debug(f"Value extraction failed: {str(e)}")
+                    break  # Only match once per row
+        
+        # Return value from highest priority match
+        if matches:
+            matches.sort(key=lambda x: x[0], reverse=True)  # Sort by priority (highest first)
+            best_match = matches[0]
+            logger.info(f"Provision matched: '{best_match[2]}' (priority: {best_match[0]}, value: ${best_match[1]:,.0f})")
+            return best_match[1]
+    
+    except Exception as e:
+        logger.warning(f"Priority fuzzy search failed: {str(e)}")
+    
+    return 0
+
 def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, debug_provision=False):
     """
     Scans ALL rows. Normalizes strings (remove spaces, lower case) for matching.
@@ -401,37 +454,49 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if is_financial:
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # [FIX v127] Search in BOTH Income Statement AND Cash Flow Statement
+                # [FIX v128] Enhanced Provision Search with Priority Matching
+                # Yahoo Finance patterns (in order of priority):
+                # 1. "Provision For Credit Losses" (most common for US banks)
+                # 2. "Credit Losses Provision" 
+                # 3. "Provision For Loan Losses"
                 provision_keywords = [
-                    'creditlossesprovision',              # "Credit Losses Provision" (JPM pattern)
-                    'provisionforcreditlosses',           # "Provision For Credit Losses"
-                    'provisionforloanandleaselosses',     # "Provision For Loan And Lease Losses"
-                    'provisionforloanlosses',             # "Provision For Loan Losses"
-                    'loanandleaselossesprovision',        # Reverse pattern
-                    'creditlossprovisio',                 # Partial match (typo-tolerant)
-                    'provisionforlossesonloans',          # Alternative wording
-                    'creditlossprovision',                # Without 'es'
-                    'provisioncreditloss',                # Reversed order
-                    'creditloss',                         # Broad match
-                    'loanloss',                           # Broad match
-                    'baddebt',                            # Alternative term
-                    'impairment',                         # IFRS term
-                    'provision'                           # Last resort (catches all)
+                    # High priority - exact matches
+                    ('provisionforcreditlosses', 10),           # JPM, GS, etc.
+                    ('creditlossesprovision', 10),              # Alternative order
+                    ('provisionforloanlosses', 9),              # Traditional banks
+                    ('provisionforloanandleaselosses', 9),      # Full wording
+                    
+                    # Medium priority - partial matches
+                    ('creditlossprovision', 7),                 # Shortened
+                    ('loanlossesprovision', 7),
+                    ('provisionforlossesonloans', 7),
+                    
+                    # Lower priority - broad matches (may catch wrong items)
+                    ('creditloss', 5),
+                    ('loanloss', 5),
+                    ('baddebt', 4),
+                    ('impairment', 3),
                 ]
                 
-                # 1. Try Income Statement first
-                p_prov = get_value_max_fuzzy(
-                    df, col_idx, provision_keywords,
-                    exclusion_keywords=['tax', 'incometax', 'deferredtax'], 
-                    debug_provision=False
+                # Enhanced exclusion list
+                exclusion_keywords = [
+                    'incometax',              # "Provision For Income Tax"
+                    'taxespayable',           # Tax-related
+                    'deferredtax',            # Deferred items
+                    'changein',               # "Change In Provision" (balance sheet item)
+                    'beginningbalance',       # Balance sheet
+                    'endingbalance',          # Balance sheet
+                ]
+                
+                # 1. Try Income Statement first with priority matching
+                p_prov = get_value_max_fuzzy_with_priority(
+                    df, col_idx, provision_keywords, exclusion_keywords
                 )
                 
                 # 2. If not found and Cash Flow Statement is available, try there
                 if p_prov == 0 and df_cf is not None and not df_cf.empty and col_idx_cf is not None:
-                    p_prov = get_value_max_fuzzy(
-                        df_cf, col_idx_cf, provision_keywords,
-                        exclusion_keywords=['tax', 'incometax', 'deferredtax'], 
-                        debug_provision=False
+                    p_prov = get_value_max_fuzzy_with_priority(
+                        df_cf, col_idx_cf, provision_keywords, exclusion_keywords
                     )
                 
                 if p_tax != 0: 
@@ -876,10 +941,6 @@ with st.sidebar:
         
         tf = st.session_state['target_fin']
         
-        # [DEBUG] Show provision fetch status
-        if tf.get('raw_provision', 0) == 0 and 'Financial' in tf.get('category', ''):
-            st.info("⚠️ Note: Credit Losses Provision was not found or is zero. Check if the company reports this metric.")
-        
         tax_in = st.slider("Tax Rate (%)", 0.0, 40.0, float(tf.get('tax_rate', 25.0)), 0.1)
         st.caption(f"Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
         
@@ -913,6 +974,12 @@ with st.sidebar:
                 f"<div class='small-font'>• Source: <b>{tf.get('label_ebit', 'N/A')}</b></div>", 
                 unsafe_allow_html=True
             )
+            
+            # Show TTM calculation details
+            if tf.get('raw_provision', 0) > 0:
+                st.success(f"✓ Credit Losses Provision detected: ${tf.get('raw_provision', 0):,.0f}")
+            else:
+                st.warning("⚠ Credit Losses Provision = $0 (Check if company reports this metric)")
         else:
             st.caption(f"Source: **{tf.get('label_ebit', 'N/A')}**")
         
