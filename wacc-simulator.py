@@ -5,12 +5,17 @@
 # 
 # Changelog:
 # v1.4.0 (2025-02-09)
-# - [NEW] Fetch Credit Losses Provision via Yahoo Finance Timeseries JSON API
+# - [NEW] fetch_financial_ttm_from_api(): single API call fetches both
+#   CreditLossesProvision AND PretaxIncome TTM from Yahoo Timeseries API
 #   (same endpoint as yfinance: query2.finance.yahoo.com/ws/fundamentals-timeseries)
-#   yfinance omits CreditLossesProvision from its key list, so we call
-#   the API directly with this key. No JS rendering or HTML scraping needed.
-# - Cached per-ticker to avoid redundant HTTP requests
-# - Falls back to yfinance-based fuzzy search if API call fails
+# - [REFACTOR] Priority logic now strictly follows:
+#   P1: Annual (Year-1) from yfinance income_stmt + API annual provision fallback
+#   P2: TTM from info_dict (rev/ebitda/int_exp) + API TTM (pretax/provision)
+#       No more quarterly loop in P2; API provides TTM directly
+#   P3: Sum of 4 most recent quarters from yfinance + API TTM fallback
+# - [FIX] 4x multiplication bug: TTM provision was returned per-quarter in loop
+#   extract_from_col() now uses yfinance-only provision (no API TTM)
+#   API TTM applied once at the priority level, outside loops
 #
 # v1.3.1 (2025-02-09)
 # - [FIX] NameError: Initialize final_spread, icr, implied_rating, category,
@@ -83,43 +88,40 @@ def safe_yf_info(ticker_obj, max_retries=3):
     return {}
 
 # ==============================================================================
-# [MODULE] Helper: Yahoo Finance Timeseries API for Credit Losses Provision
+# [MODULE] Helper: Yahoo Finance Timeseries API for Financial TTM Data
 # ==============================================================================
-# yfinance does not include CreditLossesProvision in its key list.
-# We call the same Yahoo Finance timeseries API endpoint that yfinance uses,
-# but with the CreditLossesProvision key added.
+# yfinance does not include CreditLossesProvision in its key list, and
+# info_dict does not have PretaxIncome TTM. We call Yahoo's timeseries
+# API directly to get both fields in a single request.
 #
 # API Endpoint (same as yfinance internal):
 #   https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{SYMBOL}
-#   ?symbol={SYMBOL}&type=annualCreditLossesProvision,trailingCreditLossesProvision&period1=...&period2=...
-#
-# The field "CreditLossesProvision" is the exact internal key Yahoo uses for the
-# "Credit Losses Provision" row shown on the Income Statement page.
 # ==============================================================================
-_provision_cache = {}
+_financial_ttm_cache = {}
 
-def fetch_credit_losses_provision(ticker):
+def fetch_financial_ttm_from_api(ticker):
     """
-    Fetch Credit Losses Provision directly from Yahoo Finance's
-    fundamentals-timeseries API endpoint.
+    Fetch TTM financial data from Yahoo Finance's fundamentals-timeseries API.
     
-    This is the SAME endpoint that yfinance uses internally for all
-    financial statements. The only difference is we request the
-    'CreditLossesProvision' key, which yfinance omits from its key list.
+    Fields fetched (not available through yfinance info_dict):
+      - CreditLossesProvision (TTM + Annual)
+      - PretaxIncome (TTM + Annual)
     
     Args:
         ticker: Stock ticker symbol (e.g., 'JPM', 'GS', 'BAC')
     
     Returns:
         dict with:
-            'ttm': Trailing 12-month provision value (actual dollars)
-            'annual': list of (date_str, value) for annual periods
+            'provision_ttm': TTM Credit Losses Provision (actual dollars, raw sign)
+            'provision_annual': list of (date_str, value)
+            'pretax_ttm': TTM Pretax Income (actual dollars)
+            'pretax_annual': list of (date_str, value)
             'source': description string
-        Returns None if fetch fails or field not available for this ticker.
+        Returns None if fetch fails.
     """
     cache_key = ticker.upper()
-    if cache_key in _provision_cache:
-        return _provision_cache[cache_key]
+    if cache_key in _financial_ttm_cache:
+        return _financial_ttm_cache[cache_key]
     
     try:
         headers = {
@@ -127,10 +129,12 @@ def fetch_credit_losses_provision(ticker):
                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
         
-        # Try multiple possible field names (Yahoo may use either)
+        # Request both provision and pretax income in a single API call
         keys = [
-            "annualCreditLossesProvision",
             "trailingCreditLossesProvision",
+            "annualCreditLossesProvision",
+            "trailingPretaxIncome",
+            "annualPretaxIncome",
         ]
         
         end_ts = int(time.time())
@@ -143,7 +147,7 @@ def fetch_credit_losses_provision(ticker):
             f"&period1={start_ts}&period2={end_ts}"
         )
         
-        logger.info(f"[Provision API] Fetching {cache_key} from timeseries API...")
+        logger.info(f"[Financial API] Fetching {cache_key} (Provision + PretaxIncome)...")
         
         r = requests.get(url, headers=headers, timeout=15, verify=False)
         r.raise_for_status()
@@ -152,60 +156,79 @@ def fetch_credit_losses_provision(ticker):
         results = data.get("timeseries", {}).get("result", [])
         
         if not results:
-            logger.info(f"[Provision API] No timeseries results for {cache_key}")
-            _provision_cache[cache_key] = None
+            logger.info(f"[Financial API] No timeseries results for {cache_key}")
+            _financial_ttm_cache[cache_key] = None
             return None
         
-        provision_data = {"ttm": 0, "annual": [], "source": f"Yahoo Timeseries API ({cache_key})"}
+        api_data = {
+            "provision_ttm": 0,
+            "provision_annual": [],
+            "pretax_ttm": 0,
+            "pretax_annual": [],
+            "source": f"Yahoo Timeseries API ({cache_key})"
+        }
         
         for item in results:
             meta = item.get("meta", {})
-            # meta.type can be a list like ["annualCreditLossesProvision"]
             type_list = meta.get("type", [])
             type_name = type_list[0] if isinstance(type_list, list) and type_list else str(type_list)
             
-            # Extract values from the item (key matches type_name)
             values = item.get(type_name, [])
             if not values:
                 continue
             
-            if "trailing" in type_name.lower():
-                # TTM value: take the last (most recent) entry
+            type_lower = type_name.lower()
+            
+            # --- Parse trailing (TTM) values ---
+            if "trailing" in type_lower:
                 for v in reversed(values):
                     if isinstance(v, dict) and "reportedValue" in v:
                         raw_val = v["reportedValue"].get("raw", 0)
                         if raw_val != 0:
-                            provision_data["ttm"] = raw_val
-                            logger.info(f"[Provision API] {cache_key} TTM: ${raw_val:,.0f}")
+                            if "creditloss" in type_lower or "provision" in type_lower:
+                                api_data["provision_ttm"] = raw_val
+                                logger.info(f"[Financial API] {cache_key} TTM Provision: ${raw_val:,.0f}")
+                            elif "pretax" in type_lower:
+                                api_data["pretax_ttm"] = raw_val
+                                logger.info(f"[Financial API] {cache_key} TTM PretaxIncome: ${raw_val:,.0f}")
                             break
             
-            elif "annual" in type_name.lower():
+            # --- Parse annual values ---
+            elif "annual" in type_lower:
+                annual_list = []
                 for v in values:
                     if isinstance(v, dict) and "reportedValue" in v:
                         date_str = v.get("asOfDate", "Unknown")
                         raw_val = v["reportedValue"].get("raw", 0)
-                        provision_data["annual"].append((date_str, raw_val))
-                        
-                if provision_data["annual"]:
-                    logger.info(f"[Provision API] {cache_key} Annual: {len(provision_data['annual'])} periods found")
+                        annual_list.append((date_str, raw_val))
+                
+                if annual_list:
+                    if "creditloss" in type_lower or "provision" in type_lower:
+                        api_data["provision_annual"] = annual_list
+                    elif "pretax" in type_lower:
+                        api_data["pretax_annual"] = annual_list
         
-        # If we got any data, cache and return
-        if provision_data["ttm"] != 0 or provision_data["annual"]:
-            _provision_cache[cache_key] = provision_data
-            return provision_data
+        # Cache and return if we got any data
+        has_data = (api_data["provision_ttm"] != 0 or api_data["pretax_ttm"] != 0 
+                    or api_data["provision_annual"] or api_data["pretax_annual"])
+        if has_data:
+            logger.info(f"[Financial API] {cache_key}: provision_ttm=${api_data['provision_ttm']:,.0f}, "
+                        f"pretax_ttm=${api_data['pretax_ttm']:,.0f}")
+            _financial_ttm_cache[cache_key] = api_data
+            return api_data
         
-        logger.info(f"[Provision API] {cache_key}: Field exists but no values returned (non-financial company?)")
-        _provision_cache[cache_key] = None
+        logger.info(f"[Financial API] {cache_key}: No relevant data returned")
+        _financial_ttm_cache[cache_key] = None
         return None
         
     except requests.RequestException as e:
-        logger.warning(f"[Provision API] HTTP error for {cache_key}: {str(e)}")
+        logger.warning(f"[Financial API] HTTP error for {cache_key}: {str(e)}")
     except (KeyError, ValueError, TypeError) as e:
-        logger.warning(f"[Provision API] Parse error for {cache_key}: {str(e)}")
+        logger.warning(f"[Financial API] Parse error for {cache_key}: {str(e)}")
     except Exception as e:
-        logger.error(f"[Provision API] Unexpected error for {cache_key}: {str(e)}")
+        logger.error(f"[Financial API] Unexpected error for {cache_key}: {str(e)}")
     
-    _provision_cache[cache_key] = None
+    _financial_ttm_cache[cache_key] = None
     return None
 
 # ==============================================================================
@@ -587,16 +610,17 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     current_year = datetime.now().year
     target_year = current_year - 1
     
-    # [v1.4.0] Pre-fetch Credit Losses Provision from Yahoo Finance Timeseries API
-    # yfinance does NOT include this field in its key list.
-    # We call the same API endpoint with the CreditLossesProvision key.
-    scraped_provision = None
+    # [v1.4.0] Pre-fetch TTM data from Yahoo Finance Timeseries API
+    # Gets CreditLossesProvision and PretaxIncome (not available via yfinance info_dict)
+    api_data = None
     if is_financial and ticker_symbol:
-        scraped_provision = fetch_credit_losses_provision(ticker_symbol)
-        if scraped_provision:
-            logger.info(f"[v1.4.0] Provision data available for {ticker_symbol}: TTM=${scraped_provision['ttm']:,.0f}")
+        api_data = fetch_financial_ttm_from_api(ticker_symbol)
+        if api_data:
+            logger.info(f"[v1.4.0] API data for {ticker_symbol}: "
+                        f"provision_ttm=${api_data['provision_ttm']:,.0f}, "
+                        f"pretax_ttm=${api_data['pretax_ttm']:,.0f}")
         else:
-            logger.info(f"[v1.4.0] Provision API returned no data for {ticker_symbol}, will use yfinance fallback")
+            logger.info(f"[v1.4.0] API returned no data for {ticker_symbol}, will use yfinance fallback")
     
     try:
         # Load Statements
@@ -608,18 +632,16 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
         if q_fin.empty: 
             q_fin = ticker_obj.quarterly_financials
         
-        # [NEW] Load Cash Flow Statements (where provision often appears for banks)
+        # Load Cash Flow Statements (where provision often appears for banks)
         a_cf = ticker_obj.cashflow
         q_cf = ticker_obj.quarterly_cashflow
         
-        # Debug: Log Cash Flow availability
-        logger.info(f"Annual Cash Flow: {'Loaded' if not a_cf.empty else 'Empty'} (shape: {a_cf.shape if not a_cf.empty else 'N/A'})")
-        logger.info(f"Quarterly Cash Flow: {'Loaded' if not q_cf.empty else 'Empty'} (shape: {q_cf.shape if not q_cf.empty else 'N/A'})")
-        
-        if is_financial and q_cf.empty:
-            logger.warning("Financial company but Quarterly Cash Flow is EMPTY - Provision search may fail!")
+        logger.info(f"Annual Income: {'Loaded' if not a_fin.empty else 'Empty'} | "
+                     f"Quarterly Income: {'Loaded' if not q_fin.empty else 'Empty'} | "
+                     f"Annual CF: {'Loaded' if not a_cf.empty else 'Empty'} | "
+                     f"Quarterly CF: {'Loaded' if not q_cf.empty else 'Empty'}")
 
-        # [STEP 0] GHOST COLUMN ERASER
+        # [STEP 0] GHOST COLUMN ERASER - remove columns with no revenue
         if not q_fin.empty:
             valid_cols = []
             for i in range(len(q_fin.columns)):
@@ -629,8 +651,11 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             if valid_cols:
                 q_fin = q_fin[valid_cols]
 
-        # Helper to extract from a specific column
+        # Helper: extract values from a single column of a statement
         def extract_from_col(df, col_idx, df_cf=None, col_idx_cf=None):
+            """Extract rev, ebit, ebitda, int_exp, pretax, provision from one column.
+            Provision uses yfinance fuzzy search only (NOT API TTM).
+            API TTM is applied at the priority level, not per-column."""
             r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
             i = get_value_max_fuzzy(df, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
             ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'])
@@ -642,64 +667,37 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             if is_financial:
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # [v1.4.0] Credit Losses Provision: Web Scraping (Primary) + yfinance (Fallback)
-                # Yahoo Finance's yfinance library does NOT provide this field.
-                # Primary source: scrape from https://finance.yahoo.com/quote/{TICKER}/financials/
-                p_prov = 0
+                # Provision: yfinance fuzzy search only (per-column)
+                provision_keywords = [
+                    ('provisionforcreditlosses', 10),
+                    ('creditlossesprovision', 10),
+                    ('provisionforloanlosses', 9),
+                    ('provisionforloanandleaselosses', 9),
+                    ('creditlossprovision', 7),
+                    ('loanlossesprovision', 7),
+                    ('provisionforlossesonloans', 7),
+                    ('loanlossprovision', 6),
+                    ('creditloss', 5),
+                    ('loanloss', 5),
+                    ('baddebt', 4),
+                    ('impairment', 3),
+                ]
+                exclusion_keywords = [
+                    'incometax', 'taxespayable', 'deferredtax',
+                    'taxbenefit', 'changein', 'beginningbalance', 'endingbalance',
+                ]
                 
-                # --- PRIMARY: Use scraped provision data ---
-                if scraped_provision is not None:
-                    # scraped_provision contains TTM and annual values
-                    # TTM is used for TTM-based calculations, annual[0] for latest annual
-                    scraped_ttm = abs(scraped_provision.get('ttm', 0))
-                    scraped_annuals = scraped_provision.get('annual', [])
-                    
-                    # Use TTM value as default (most common use case)
-                    if scraped_ttm > 0:
-                        p_prov = scraped_ttm
-                        logger.info(f"[v1.4.0] Using scraped TTM provision: ${p_prov:,.0f}")
+                # Try Cash Flow Statement first
+                if df_cf is not None and not df_cf.empty and col_idx_cf is not None:
+                    p_prov = get_value_max_fuzzy_with_priority(
+                        df_cf, col_idx_cf, provision_keywords, exclusion_keywords
+                    )
                 
-                # --- FALLBACK: yfinance fuzzy search (Cash Flow + Income Statement) ---
+                # Then Income Statement
                 if p_prov == 0:
-                    logger.info("[v1.4.0] Scraped provision unavailable, trying yfinance fallback...")
-                    
-                    provision_keywords = [
-                        ('provisionforcreditlosses', 10),
-                        ('creditlossesprovision', 10),
-                        ('provisionforloanlosses', 9),
-                        ('provisionforloanandleaselosses', 9),
-                        ('creditlossprovision', 7),
-                        ('loanlossesprovision', 7),
-                        ('provisionforlossesonloans', 7),
-                        ('loanlossprovision', 6),
-                        ('creditloss', 5),
-                        ('loanloss', 5),
-                        ('baddebt', 4),
-                        ('impairment', 3),
-                    ]
-                    
-                    exclusion_keywords = [
-                        'incometax', 'taxespayable', 'deferredtax',
-                        'taxbenefit', 'changein', 'beginningbalance', 'endingbalance',
-                    ]
-                    
-                    # Try Cash Flow Statement first
-                    if df_cf is not None and not df_cf.empty and col_idx_cf is not None:
-                        p_prov = get_value_max_fuzzy_with_priority(
-                            df_cf, col_idx_cf, provision_keywords, exclusion_keywords
-                        )
-                        if p_prov > 0:
-                            logger.info(f"[Fallback] Found provision in Cash Flow: ${p_prov:,.0f}")
-                    
-                    # Try Income Statement
-                    if p_prov == 0:
-                        p_prov = get_value_max_fuzzy_with_priority(
-                            df, col_idx, provision_keywords, exclusion_keywords
-                        )
-                        if p_prov > 0:
-                            logger.info(f"[Fallback] Found provision in Income Statement: ${p_prov:,.0f}")
-                        else:
-                            logger.warning("Provision not found in any source")
+                    p_prov = get_value_max_fuzzy_with_priority(
+                        df, col_idx, provision_keywords, exclusion_keywords
+                    )
                 
                 if p_tax != 0: 
                     val_e = p_tax + abs(p_prov)
@@ -709,12 +707,14 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             
             return r, val_e, ed, i, p_tax, abs(p_prov)
 
-        # --- Priority 1: Annual (Year-1) with TRIPLE LOCK ---
+        # =================================================================
+        # --- Priority 1: Annual (Year-1) from yfinance income_stmt ---
+        # =================================================================
         if not a_fin.empty:
             for idx, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
                 if col_dt.year == target_year:
-                    # Find matching cash flow column by date
+                    # Find matching cash flow column
                     cf_idx = None
                     if not a_cf.empty:
                         for cf_col_idx, cf_col in enumerate(a_cf.columns):
@@ -724,8 +724,17 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     
                     r_annual, e, ed, i, pt, pp = extract_from_col(a_fin, idx, a_cf, cf_idx)
                     
+                    # [v1.4.0] If yfinance couldn't find provision, try API annual data
+                    if is_financial and pp == 0 and api_data:
+                        for date_str, val in api_data.get('provision_annual', []):
+                            if str(target_year) in date_str:
+                                pp = abs(val)
+                                e = pt + pp  # Recalculate PPNR
+                                logger.info(f"[P1] Using API annual provision for {target_year}: ${pp:,.0f}")
+                                break
+                    
                     if pd.notna(r_annual) and r_annual > 1000:
-                        # Validation
+                        # Triple Lock Validation: annual rev ≈ sum of 4 quarters
                         is_valid = False
                         if not q_fin.empty:
                             cutoff_date = col_dt - timedelta(days=360)
@@ -743,16 +752,21 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         
                         if is_valid:
                             lbl = col.strftime('%Y-%m-%d')
+                            logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}")
                             return r_annual, e, ed, abs(i), lbl, lbl, pt, pp
         
-        # --- Priority 2: Yahoo Info TTM ---
+        # =================================================================
+        # --- Priority 2: Yahoo Info TTM (info_dict + Timeseries API) ---
+        # Revenue/EBITDA/InterestExpense from info_dict
+        # PretaxIncome/Provision from Timeseries API (not in info_dict)
+        # =================================================================
         rev_ttm = info_dict.get('totalRevenue', 0)
         
         if rev_ttm is not None and rev_ttm > 0:
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense Source
+            # Interest Expense: info_dict first, then calc from quarters
             int_exp = info_dict.get('interestExpense', 0)
             if int_exp is None or int_exp == 0:
                 int_exp = info_dict.get('totalInterestExpense', 0)
@@ -766,42 +780,58 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     for q_idx in range(4):
                         q_int += get_value_max_fuzzy(recent_4, q_idx, ['Interest Expense'])
                     int_exp = q_int
-                    label_int = "TTM (Yahoo Info + Calc Interest)"
+                    label_int = "TTM (Calc Interest)"
                 else:
                     int_exp = 0
                     label_int = "N/A"
 
-            # EBIT / PPNR Source
+            # EBIT / PPNR
             ebit = 0
             if is_financial:
-                # Financials: Always calc PPNR from quarters
-                if not q_fin.empty and q_fin.shape[1] >= 4:
-                    recent_4 = q_fin.iloc[:, :4]
-                    recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
-                    
-                    q_pretax = 0
-                    q_prov = 0
-                    for q_idx in range(4):
-                        cf_idx = q_idx if recent_4_cf is not None else None
-                        r_dummy, e_dummy, ed_dummy, i_dummy, pt, pp = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
-                        q_pretax += pt
-                        q_prov += pp
-                    
-                    if q_pretax != 0: 
-                        ebit = q_pretax + q_prov
-                    label_ebit = "TTM (Calculated)"
-                    raw_pretax = q_pretax
-                    raw_provision = q_prov
+                # Financial companies: PPNR = PretaxIncome + abs(Provision)
+                # Primary: Use Timeseries API TTM values
+                if api_data and api_data.get('pretax_ttm', 0) != 0:
+                    raw_pretax = api_data['pretax_ttm']
+                    raw_provision = abs(api_data.get('provision_ttm', 0))
+                    ebit = raw_pretax + raw_provision
+                    label_ebit = "TTM (Yahoo API)"
+                    logger.info(f"[P2] Financial PPNR from API: pretax=${raw_pretax:,.0f} + provision=${raw_provision:,.0f} = ${ebit:,.0f}")
                 else:
-                    label_ebit = "N/A"
+                    # Fallback: sum quarterly pretax/provision from yfinance
+                    if not q_fin.empty and q_fin.shape[1] >= 4:
+                        recent_4 = q_fin.iloc[:, :4]
+                        recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
+                        q_pretax = 0
+                        q_prov = 0
+                        for q_idx in range(4):
+                            cf_idx = q_idx if recent_4_cf is not None else None
+                            _, _, _, _, pt, pp = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
+                            q_pretax += pt
+                            q_prov += pp
+                        
+                        # If yfinance found no provision, try API TTM as last resort
+                        if q_prov == 0 and api_data:
+                            api_prov = abs(api_data.get('provision_ttm', 0))
+                            if api_prov > 0:
+                                q_prov = api_prov
+                        
+                        raw_pretax = q_pretax
+                        raw_provision = q_prov
+                        if q_pretax != 0:
+                            ebit = q_pretax + q_prov
+                        label_ebit = "TTM (Calc Quarters)"
+                        logger.info(f"[P2] Financial PPNR from quarters: pretax=${raw_pretax:,.0f} + provision=${raw_provision:,.0f}")
+                    else:
+                        label_ebit = "N/A"
             else:
+                # Non-financial: EBIT from operatingMargins or EBITDA proxy
                 op_margin = info_dict.get('operatingMargins', 0)
                 if op_margin: 
                     ebit = rev * op_margin
                     label_ebit = "TTM (Yahoo Info)"
                 elif ebitda: 
                     ebit = ebitda
-                    label_ebit = "TTM (Yahoo Info Proxy)"
+                    label_ebit = "TTM (EBITDA Proxy)"
                 else:
                     label_ebit = "N/A"
             
@@ -809,7 +839,10 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 int_exp = 0
             return rev, ebit, ebitda, abs(int_exp), label_ebit, label_int, raw_pretax, raw_provision
 
-        # --- Priority 3: Calc TTM (Manual Sum) ---
+        # =================================================================
+        # --- Priority 3: Calc TTM (sum of 4 most recent quarters) ---
+        # All values from yfinance quarterly statements
+        # =================================================================
         if not q_fin.empty and q_fin.shape[1] >= 4:
             recent_4 = q_fin.iloc[:, :4]
             recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
@@ -820,14 +853,14 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             ebitda = 0
             int_exp = 0
             ebit = 0
-            # [FIX v1.3.1] Reset accumulators before Priority 3 loop
             raw_pretax = 0
             raw_provision = 0
             
             for q_idx in range(4):
                 cf_idx = q_idx if recent_4_cf is not None else None
-                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
-                
+                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col(
+                    recent_4, q_idx, recent_4_cf, cf_idx
+                )
                 rev += r_q
                 ebitda += ed_q
                 int_exp += i_q
@@ -837,6 +870,20 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     raw_provision += pp_q
                 else:
                     ebit += e_q
+            
+            # [v1.4.0] If yfinance found no provision per-quarter, use API TTM
+            if is_financial and raw_provision == 0 and api_data:
+                api_prov = abs(api_data.get('provision_ttm', 0))
+                if api_prov > 0:
+                    raw_provision = api_prov
+                    logger.info(f"[P3] Using API TTM provision: ${raw_provision:,.0f}")
+            
+            # [v1.4.0] If yfinance found no pretax per-quarter, use API TTM
+            if is_financial and raw_pretax == 0 and api_data:
+                api_pt = api_data.get('pretax_ttm', 0)
+                if api_pt != 0:
+                    raw_pretax = api_pt
+                    logger.info(f"[P3] Using API TTM pretax: ${raw_pretax:,.0f}")
             
             if is_financial: 
                 ebit = raw_pretax + raw_provision
