@@ -1,9 +1,18 @@
 # ==============================================================================
 # Strategic WACC Simulator
-# Version: 1.3.1
+# Version: 1.4.0
 # Last Updated: 2025-02-09
 # 
 # Changelog:
+# v1.4.0 (2025-02-09)
+# - [NEW] Web scraping for Credit Losses Provision from Yahoo Finance HTML
+#   (https://finance.yahoo.com/quote/{TICKER}/financials/)
+#   yfinance library does not provide this field; now scraped directly from
+#   the Income Statement page with regex parsing
+# - Scraper fetches TTM value for target ticker, annual values for peers
+# - Cached per-ticker to avoid redundant HTTP requests
+# - Falls back to yfinance-based fuzzy search if scraping fails
+#
 # v1.3.1 (2025-02-09)
 # - [FIX] NameError: Initialize final_spread, icr, implied_rating, category,
 #   target_fred_key, int_exp, ebit outside of 'if not df_init.empty:' block
@@ -55,7 +64,7 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # Version display in sidebar
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 BUILD_DATE = "2025-02-09"
 
 # ==============================================================================
@@ -73,6 +82,131 @@ def safe_yf_info(ticker_obj, max_retries=3):
                 logger.warning(f"Failed to fetch info after {max_retries} attempts: {str(e)}")
         time.sleep(random.uniform(0.5, 1.5))
     return {}
+
+# ==============================================================================
+# [MODULE] Helper: Yahoo Finance Web Scraper for Credit Losses Provision
+# ==============================================================================
+# Cache to avoid re-fetching the same ticker's page multiple times
+_provision_cache = {}
+
+def scrape_yahoo_provision(ticker, mode="annual"):
+    """
+    Scrape 'Credit Losses Provision' from Yahoo Finance Income Statement page.
+    
+    Yahoo Finance HTML page contains the Income Statement as text with values
+    separated by '·'. The row 'Credit Losses Provision' contains TTM and annual values.
+    
+    Page layout (Annual mode - default):
+      Breakdown · TTM · 12/31/2024 · 12/31/2023 · 12/31/2022 · 12/31/2021
+      Total Revenue · 182,447,000 · -- 169,439,000 · 154,952,000 · 127,727,000
+      Credit Losses Provision · -14,212,000 · -- -10,654,000 · -9,282,000 · -6,335,000
+    
+    All numbers are in THOUSANDS on the page.
+    
+    Args:
+        ticker: Stock ticker symbol (e.g., 'JPM', 'GS')
+        mode: 'annual' (default page) or 'quarterly'
+    
+    Returns:
+        dict with keys:
+            'ttm': TTM provision value (in actual dollars, i.e., page_value * 1000)
+            'annual': list of (date_str, value) tuples for annual columns
+            'source': description string
+        Returns None if scraping fails.
+    """
+    cache_key = f"{ticker.upper()}_{mode}"
+    if cache_key in _provision_cache:
+        return _provision_cache[cache_key]
+    
+    try:
+        # Build URL
+        base_url = f"https://finance.yahoo.com/quote/{ticker.upper()}/financials/"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate",
+        }
+        
+        logger.info(f"[Provision Scraper] Fetching {base_url}")
+        response = requests.get(base_url, headers=headers, timeout=15, verify=False)
+        response.raise_for_status()
+        
+        html_text = response.text
+        
+        # Check if page contains the provision row
+        if 'Credit Losses Provision' not in html_text and 'Credit Loss' not in html_text:
+            logger.info(f"[Provision Scraper] '{ticker}' page does not contain Credit Losses Provision")
+            _provision_cache[cache_key] = None
+            return None
+        
+        # --- Parse: Extract TTM value ---
+        # Pattern: "Credit Losses Provision" followed by · separated values
+        # First value after the label is TTM
+        # Values can be: -14,212,000  or  1,113,000  or  --  or  -
+        
+        # Strategy: Find the provision row and extract all numeric values from it
+        # The row ends at the next known row label (Non Interest Expense, etc.)
+        
+        # Extract the provision line segment
+        provision_pattern = re.compile(
+            r'Credit\s+Loss(?:es)?\s+Provision(.*?)(?:Non\s+Interest|Special\s+Income|Income\s+from|Pretax\s+Income|Other\s+Income)',
+            re.DOTALL | re.IGNORECASE
+        )
+        
+        match = provision_pattern.search(html_text)
+        if not match:
+            logger.warning(f"[Provision Scraper] Could not isolate provision row for '{ticker}'")
+            _provision_cache[cache_key] = None
+            return None
+        
+        row_text = match.group(1)
+        logger.info(f"[Provision Scraper] Raw row text: {row_text[:200]}")
+        
+        # Extract all numeric values (including negative, with commas)
+        # Matches: -14,212,000 or 1,113,000 or 666 or -313
+        value_pattern = re.compile(r'(-?[\d,]+(?:\.\d+)?)')
+        raw_values = value_pattern.findall(row_text)
+        
+        if not raw_values:
+            logger.warning(f"[Provision Scraper] No numeric values found in provision row for '{ticker}'")
+            _provision_cache[cache_key] = None
+            return None
+        
+        # Parse values (page shows in thousands)
+        parsed_values = []
+        for rv in raw_values:
+            try:
+                val = float(rv.replace(',', ''))
+                # Determine if this is a "thousands" value or a small number
+                # Yahoo Finance shows "All numbers in thousands"
+                parsed_values.append(val * 1000)  # Convert from thousands to actual
+            except ValueError:
+                continue
+        
+        logger.info(f"[Provision Scraper] Parsed {len(parsed_values)} values for '{ticker}': {parsed_values[:5]}")
+        
+        # First value = TTM, subsequent = annual periods
+        result = {
+            'ttm': parsed_values[0] if len(parsed_values) > 0 else 0,
+            'annual': parsed_values[1:] if len(parsed_values) > 1 else [],
+            'source': f"Yahoo Finance Web ({ticker.upper()}/financials/)"
+        }
+        
+        logger.info(f"[Provision Scraper] {ticker} TTM Provision: ${result['ttm']:,.0f}")
+        
+        _provision_cache[cache_key] = result
+        return result
+        
+    except requests.RequestException as e:
+        logger.warning(f"[Provision Scraper] HTTP error for '{ticker}': {str(e)}")
+    except Exception as e:
+        logger.error(f"[Provision Scraper] Unexpected error for '{ticker}': {str(e)}")
+    
+    _provision_cache[cache_key] = None
+    return None
 
 # ==============================================================================
 # [MODULE] Helper: Deep Search with Normalization (v125 Logic)
@@ -424,7 +558,7 @@ def get_damodaran_spreads():
 # ==============================================================================
 # [MODULE] Helper: Common Financial Data Extraction Logic (Unified)
 # ==============================================================================
-def get_financial_data_with_priority(ticker_obj, info_dict):
+def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     """
     Priority Logic v125.1 (Restored Normalization Logic):
     Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
@@ -436,6 +570,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     * Ghost Column Eraser applied.
     * PPNR = Pretax + abs(Provision) 
     * **Search:** Uses 'get_value_max_fuzzy' with normalization (ignores case/spaces).
+    * **Provision:** Scraped from Yahoo Finance HTML (v1.4.0) with yfinance fallback.
     """
     rev = 0
     ebit = 0
@@ -450,7 +585,17 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
     is_financial = 'financial' in sector or 'bank' in sector
     
     current_year = datetime.now().year
-    target_year = current_year - 1 
+    target_year = current_year - 1
+    
+    # [v1.4.0] Pre-fetch Credit Losses Provision from Yahoo Finance HTML
+    # This is the primary source for provision data (yfinance doesn't provide it)
+    scraped_provision = None
+    if is_financial and ticker_symbol:
+        scraped_provision = scrape_yahoo_provision(ticker_symbol)
+        if scraped_provision:
+            logger.info(f"[v1.4.0] Scraped provision available for {ticker_symbol}: TTM=${scraped_provision['ttm']:,.0f}")
+        else:
+            logger.info(f"[v1.4.0] Scraping failed for {ticker_symbol}, will use yfinance fallback")
     
     try:
         # Load Statements
@@ -496,63 +641,64 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             if is_financial:
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
-                # [FIX v129] Comprehensive Provision Search
-                # Search in BOTH statements with fallback logic
-                
-                provision_keywords = [
-                    # High priority - exact matches
-                    ('provisionforcreditlosses', 10),           # JPM, GS, etc.
-                    ('creditlossesprovision', 10),              # Alternative order
-                    ('provisionforloanlosses', 9),              # Traditional banks
-                    ('provisionforloanandleaselosses', 9),      # Full wording
-                    
-                    # Medium priority - partial matches
-                    ('creditlossprovision', 7),                 # Shortened
-                    ('loanlossesprovision', 7),
-                    ('provisionforlossesonloans', 7),
-                    ('loanlossprovision', 6),
-                    
-                    # Lower priority - broad matches (may catch wrong items)
-                    ('creditloss', 5),
-                    ('loanloss', 5),
-                    ('baddebt', 4),
-                    ('impairment', 3),
-                ]
-                
-                # Enhanced exclusion list
-                exclusion_keywords = [
-                    'incometax',              # "Provision For Income Tax"
-                    'taxespayable',           # Tax-related
-                    'deferredtax',            # Deferred items
-                    'taxbenefit',             # Tax benefit
-                    'changein',               # "Change In Provision" (balance sheet item)
-                    'beginningbalance',       # Balance sheet
-                    'endingbalance',          # Balance sheet
-                ]
-                
-                # Strategy: Try multiple sources in order
-                # 1. Cash Flow Statement (most common for banks)
-                # 2. Income Statement (some banks report here)
+                # [v1.4.0] Credit Losses Provision: Web Scraping (Primary) + yfinance (Fallback)
+                # Yahoo Finance's yfinance library does NOT provide this field.
+                # Primary source: scrape from https://finance.yahoo.com/quote/{TICKER}/financials/
                 p_prov = 0
                 
-                if df_cf is not None and not df_cf.empty and col_idx_cf is not None:
-                    logger.info("Searching for Provision in Cash Flow Statement...")
-                    p_prov = get_value_max_fuzzy_with_priority(
-                        df_cf, col_idx_cf, provision_keywords, exclusion_keywords
-                    )
-                    if p_prov > 0:
-                        logger.info(f"Found provision in Cash Flow: ${p_prov:,.0f}")
+                # --- PRIMARY: Use scraped provision data ---
+                if scraped_provision is not None:
+                    # scraped_provision contains TTM and annual values
+                    # TTM is used for TTM-based calculations, annual[0] for latest annual
+                    scraped_ttm = abs(scraped_provision.get('ttm', 0))
+                    scraped_annuals = scraped_provision.get('annual', [])
+                    
+                    # Use TTM value as default (most common use case)
+                    if scraped_ttm > 0:
+                        p_prov = scraped_ttm
+                        logger.info(f"[v1.4.0] Using scraped TTM provision: ${p_prov:,.0f}")
                 
-                # 2. If not found in CF, try Income Statement
+                # --- FALLBACK: yfinance fuzzy search (Cash Flow + Income Statement) ---
                 if p_prov == 0:
-                    logger.info("Provision not found in Cash Flow, searching Income Statement...")
-                    p_prov = get_value_max_fuzzy_with_priority(
-                        df, col_idx, provision_keywords, exclusion_keywords
-                    )
-                    if p_prov > 0:
-                        logger.info(f"Found provision in Income Statement: ${p_prov:,.0f}")
-                    else:
-                        logger.warning("Provision not found in either statement")
+                    logger.info("[v1.4.0] Scraped provision unavailable, trying yfinance fallback...")
+                    
+                    provision_keywords = [
+                        ('provisionforcreditlosses', 10),
+                        ('creditlossesprovision', 10),
+                        ('provisionforloanlosses', 9),
+                        ('provisionforloanandleaselosses', 9),
+                        ('creditlossprovision', 7),
+                        ('loanlossesprovision', 7),
+                        ('provisionforlossesonloans', 7),
+                        ('loanlossprovision', 6),
+                        ('creditloss', 5),
+                        ('loanloss', 5),
+                        ('baddebt', 4),
+                        ('impairment', 3),
+                    ]
+                    
+                    exclusion_keywords = [
+                        'incometax', 'taxespayable', 'deferredtax',
+                        'taxbenefit', 'changein', 'beginningbalance', 'endingbalance',
+                    ]
+                    
+                    # Try Cash Flow Statement first
+                    if df_cf is not None and not df_cf.empty and col_idx_cf is not None:
+                        p_prov = get_value_max_fuzzy_with_priority(
+                            df_cf, col_idx_cf, provision_keywords, exclusion_keywords
+                        )
+                        if p_prov > 0:
+                            logger.info(f"[Fallback] Found provision in Cash Flow: ${p_prov:,.0f}")
+                    
+                    # Try Income Statement
+                    if p_prov == 0:
+                        p_prov = get_value_max_fuzzy_with_priority(
+                            df, col_idx, provision_keywords, exclusion_keywords
+                        )
+                        if p_prov > 0:
+                            logger.info(f"[Fallback] Found provision in Income Statement: ${p_prov:,.0f}")
+                        else:
+                            logger.warning("Provision not found in any source")
                 
                 if p_tax != 0: 
                     val_e = p_tax + abs(p_prov)
@@ -781,7 +927,7 @@ def get_target_financials(ticker):
                 target_tax = 25.0
         
         rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision = \
-            get_financial_data_with_priority(t, info)
+            get_financial_data_with_priority(t, info, ticker_symbol=ticker)
         
         mkt_cap = info.get('marketCap', 0)
         sector = str(info.get('sector', '')).lower()
@@ -857,7 +1003,7 @@ class DetailWACCModel:
                     return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)"
 
             rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int, pt, pp = \
-                get_financial_data_with_priority(t, info)
+                get_financial_data_with_priority(t, info, ticker_symbol=ticker)
             
             if rev == 0: 
                 return None, f"⚠️ {ticker}: Excluded (Missing Revenue)"
@@ -1075,7 +1221,7 @@ with st.sidebar:
     
     # Version and Contact Information
     st.divider()
-    st.caption("**Version:** v1.3.1 (Feb 2026)")
+    st.caption("**Version:** v1.4.0 (Feb 2026)")
     st.caption("**Point of Contact:** jonghyun.yang.5105@gmail.com")
     
     # Version info at bottom
