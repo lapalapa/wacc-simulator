@@ -1052,8 +1052,9 @@ class DetailWACCModel:
             t = yf.Ticker(ticker)
             info = safe_yf_info(t)
             
-            if not info or len(info) < 5: 
-                return None, f"⚠️ {ticker}: No data available"
+            if not info or len(info) < 5:
+                logger.warning(f"No info for {ticker} - trying alternative sources")
+                info = {}
             
             curr = info.get('currency', 'USD')
             country = info.get('country', 'Unknown')
@@ -1062,12 +1063,36 @@ class DetailWACCModel:
             mkt_cap = info.get('marketCap', 0)
             debt = info.get('totalDebt', 0)
             
+            # Fallback: try fast_info for market cap
             if mkt_cap == 0: 
                 try: 
-                    mkt_cap = t.fast_info.get('market_cap', 0)
+                    fi = t.fast_info
+                    mkt_cap = getattr(fi, 'market_cap', 0) or 0
+                    if curr == 'USD' and mkt_cap == 0:
+                        # Try shares * price
+                        shares = getattr(fi, 'shares', 0) or 0
+                        price = getattr(fi, 'last_price', 0) or 0
+                        if shares > 0 and price > 0:
+                            mkt_cap = shares * price
+                    if mkt_cap > 0:
+                        logger.info(f"[Peer] {ticker}: Got mkt_cap from fast_info: ${mkt_cap:,.0f}")
                 except Exception as e:
                     logger.debug(f"Fast info failed for {ticker}: {str(e)}")
-                    return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)"
+            
+            if mkt_cap == 0:
+                return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)"
+            
+            # Fallback: try balance_sheet for total debt
+            if debt == 0:
+                try:
+                    bs = t.balance_sheet
+                    if not bs.empty:
+                        debt_val = get_value_max_fuzzy(bs, 0, ['Total Debt', 'Long Term Debt', 'Total Non Current Liabilities Net Minority Interest'])
+                        if debt_val > 0:
+                            debt = debt_val
+                            logger.info(f"[Peer] {ticker}: Got debt from balance_sheet: ${debt:,.0f}")
+                except Exception as e:
+                    logger.debug(f"Balance sheet failed for {ticker}: {str(e)}")
 
             rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int, pt, pp = \
                 get_financial_data_with_priority(t, info, ticker_symbol=ticker)
