@@ -136,6 +136,7 @@ def safe_yf_info(ticker_obj, max_retries=3):
 #   3. Profile page text/regex parsing (fallback)
 # ==============================================================================
 _profile_cache = {}
+_financial_ttm_cache = {}
 
 # Known countries for validation (used by all profile parsers)
 VALID_COUNTRIES = {
@@ -1534,7 +1535,8 @@ def get_target_financials(ticker):
             "currency": local_currency, "fx_rate": fx_rate, "fx_basis": fx_basis,
         }
     except Exception as e:
-        logger.error(f"Target financials fetch failed for {ticker}: {str(e)}")
+        import traceback
+        logger.error(f"Target financials fetch failed for {ticker}: {str(e)}\n{traceback.format_exc()}")
         return {
             "int_exp": 0.0, "ebit": 0.0,
             "int_exp_local": 0.0, "ebit_local": 0.0,
@@ -1911,6 +1913,40 @@ with st.sidebar:
             
             _api = fetch_company_profile_from_api(target_ticker)
             st.caption(f"API: country={_api.get('country','?')} | sector={_api.get('sector','?')}")
+            
+            # Financial data priority path diagnostic
+            st.divider()
+            st.caption("**Data Priority Path:**")
+            try:
+                _dbg_t = yf.Ticker(target_ticker)
+                _dbg_info = _dbg_t.info or {}
+                _dbg_sector = str(_dbg_info.get('sector','')).lower()
+                _dbg_is_fin = 'financial' in _dbg_sector or 'bank' in _dbg_sector
+                st.caption(f"is_financial: **{_dbg_is_fin}** (sector='{_dbg_sector}')")
+                
+                _dbg_inc = _dbg_t.income_stmt
+                if not _dbg_inc.empty:
+                    _c0 = _dbg_inc.columns[0]
+                    st.caption(f"Annual cols: {[c.strftime('%Y-%m-%d') for c in _dbg_inc.columns[:3]]}")
+                    # Show key rows for col 0
+                    _key_rows = ['EBIT', 'Pretax Income', 'Operating Income', 'Total Revenue',
+                                 'Interest Expense', 'Interest Income', 'Net Interest Income']
+                    for _kr in _key_rows:
+                        if _kr in _dbg_inc.index:
+                            _v = _dbg_inc.loc[_kr].iloc[0]
+                            st.caption(f"  {_kr}: {'${:,.0f}'.format(_v) if pd.notna(_v) else 'NaN'}")
+                        else:
+                            st.caption(f"  {_kr}: ❌ NOT IN INDEX")
+                else:
+                    st.caption("income_stmt: **EMPTY**")
+                
+                # Test get_financial_data_with_priority directly
+                _dbg_rev, _dbg_ebit, _dbg_ebitda, _dbg_ie, _dbg_le, _dbg_li, _dbg_pt, _dbg_pp = \
+                    get_financial_data_with_priority(_dbg_t, _dbg_info, ticker_symbol=target_ticker)
+                st.caption(f"Priority result: rev=${_dbg_rev:,.0f} ebit=${_dbg_ebit:,.0f} ie=${_dbg_ie:,.0f}")
+                st.caption(f"  pretax=${_dbg_pt:,.0f} provision=${_dbg_pp:,.0f} label={_dbg_le}")
+            except Exception as _pe:
+                st.caption(f"Priority path error: {_pe}")
             
             # ICR → Rating → Spread pipeline debug
             if 'inputs' in st.session_state:
