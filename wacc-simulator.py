@@ -287,12 +287,14 @@ def get_value_max_fuzzy_with_priority(df, col_idx, keyword_priority_list, exclus
     
     return 0
 
-def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, debug_provision=False):
+def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, debug_provision=False, keep_sign=False):
     """
     Scans ALL rows. Normalizes strings (remove spaces, lower case) for matching.
-    Returns the absolute largest value found.
+    Returns the value with the largest absolute magnitude found.
     
     Args:
+        keep_sign: If True, return the original signed value (for EBIT, PretaxIncome etc.)
+                   If False (default), return abs(value) (for Revenue, Interest Expense etc.)
         debug_provision: If True, prints all provision-related rows found (for debugging)
     """
     candidates = []
@@ -326,9 +328,9 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, d
                     try:
                         val = df.loc[idx].iloc[col_idx]
                         if pd.notna(val) and val != 0:
-                            candidates.append(abs(val))
+                            candidates.append(val)  # Keep original signed value
                             if debug_provision:
-                                debug_matches.append(f"    MATCHED '{norm_kw}' -> Value: {abs(val):,.0f}")
+                                debug_matches.append(f"    MATCHED '{norm_kw}' -> Value: {val:,.0f}")
                         elif debug_provision:
                             debug_matches.append(f"    MATCHED '{norm_kw}' but value is 0 or NaN")
                     except Exception as e:
@@ -343,7 +345,9 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, d
             logger.info(f"Final candidates: {candidates}")
         
         if candidates:
-            return max(candidates)
+            # Pick the candidate with the largest absolute magnitude
+            best = max(candidates, key=abs)
+            return best if keep_sign else abs(best)
     except Exception as e:
         logger.warning(f"Fuzzy search failed: {str(e)}")
     return 0
@@ -658,14 +662,14 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             API TTM is applied at the priority level, not per-column."""
             r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
             i = get_value_max_fuzzy(df, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
-            ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'])
+            ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'], keep_sign=True)
             
             p_tax = 0
             p_prov = 0
             val_e = 0
             
             if is_financial:
-                p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
+                p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'], keep_sign=True)
                 
                 # Provision: yfinance fuzzy search only (per-column)
                 provision_keywords = [
@@ -703,7 +707,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     val_e = p_tax + abs(p_prov)
             
             if val_e == 0:
-                val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
+                val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'], keep_sign=True)
             
             return r, val_e, ed, i, p_tax, abs(p_prov)
 
