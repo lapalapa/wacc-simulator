@@ -977,13 +977,8 @@ def get_target_financials(ticker):
         info = safe_yf_info(t, max_retries=5)
         
         if not info:
-            logger.warning(f"No info available for {ticker}")
-            return {
-                "int_exp": 0.0, "ebit": 0.0,
-                "label_int": "N/A", "label_ebit": "N/A", 
-                "raw_pretax": 0, "raw_provision": 0, "category": "Small/Risky Firms", 
-                "tax_rate": 25.0, "country_name": "Unknown"
-            }
+            logger.warning(f"No info available for {ticker} - will try financial statements directly")
+            info = {}  # Use empty dict instead of early return
         
         country = info.get('country', 'Unknown')
         country_norm = str(country).upper().strip()
