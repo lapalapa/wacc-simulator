@@ -5,13 +5,12 @@
 # 
 # Changelog:
 # v1.4.0 (2025-02-09)
-# - [NEW] Web scraping for Credit Losses Provision from Yahoo Finance HTML
-#   (https://finance.yahoo.com/quote/{TICKER}/financials/)
-#   yfinance library does not provide this field; now scraped directly from
-#   the Income Statement page with regex parsing
-# - Scraper fetches TTM value for target ticker, annual values for peers
+# - [NEW] Fetch Credit Losses Provision via Yahoo Finance Timeseries JSON API
+#   (same endpoint as yfinance: query2.finance.yahoo.com/ws/fundamentals-timeseries)
+#   yfinance omits CreditLossesProvision from its key list, so we call
+#   the API directly with this key. No JS rendering or HTML scraping needed.
 # - Cached per-ticker to avoid redundant HTTP requests
-# - Falls back to yfinance-based fuzzy search if scraping fails
+# - Falls back to yfinance-based fuzzy search if API call fails
 #
 # v1.3.1 (2025-02-09)
 # - [FIX] NameError: Initialize final_spread, icr, implied_rating, category,
@@ -84,126 +83,127 @@ def safe_yf_info(ticker_obj, max_retries=3):
     return {}
 
 # ==============================================================================
-# [MODULE] Helper: Yahoo Finance Web Scraper for Credit Losses Provision
+# [MODULE] Helper: Yahoo Finance Timeseries API for Credit Losses Provision
 # ==============================================================================
-# Cache to avoid re-fetching the same ticker's page multiple times
+# yfinance does not include CreditLossesProvision in its key list.
+# We call the same Yahoo Finance timeseries API endpoint that yfinance uses,
+# but with the CreditLossesProvision key added.
+#
+# API Endpoint (same as yfinance internal):
+#   https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{SYMBOL}
+#   ?symbol={SYMBOL}&type=annualCreditLossesProvision,trailingCreditLossesProvision&period1=...&period2=...
+#
+# The field "CreditLossesProvision" is the exact internal key Yahoo uses for the
+# "Credit Losses Provision" row shown on the Income Statement page.
+# ==============================================================================
 _provision_cache = {}
 
-def scrape_yahoo_provision(ticker, mode="annual"):
+def fetch_credit_losses_provision(ticker):
     """
-    Scrape 'Credit Losses Provision' from Yahoo Finance Income Statement page.
+    Fetch Credit Losses Provision directly from Yahoo Finance's
+    fundamentals-timeseries API endpoint.
     
-    Yahoo Finance HTML page contains the Income Statement as text with values
-    separated by '·'. The row 'Credit Losses Provision' contains TTM and annual values.
-    
-    Page layout (Annual mode - default):
-      Breakdown · TTM · 12/31/2024 · 12/31/2023 · 12/31/2022 · 12/31/2021
-      Total Revenue · 182,447,000 · -- 169,439,000 · 154,952,000 · 127,727,000
-      Credit Losses Provision · -14,212,000 · -- -10,654,000 · -9,282,000 · -6,335,000
-    
-    All numbers are in THOUSANDS on the page.
+    This is the SAME endpoint that yfinance uses internally for all
+    financial statements. The only difference is we request the
+    'CreditLossesProvision' key, which yfinance omits from its key list.
     
     Args:
-        ticker: Stock ticker symbol (e.g., 'JPM', 'GS')
-        mode: 'annual' (default page) or 'quarterly'
+        ticker: Stock ticker symbol (e.g., 'JPM', 'GS', 'BAC')
     
     Returns:
-        dict with keys:
-            'ttm': TTM provision value (in actual dollars, i.e., page_value * 1000)
-            'annual': list of (date_str, value) tuples for annual columns
+        dict with:
+            'ttm': Trailing 12-month provision value (actual dollars)
+            'annual': list of (date_str, value) for annual periods
             'source': description string
-        Returns None if scraping fails.
+        Returns None if fetch fails or field not available for this ticker.
     """
-    cache_key = f"{ticker.upper()}_{mode}"
+    cache_key = ticker.upper()
     if cache_key in _provision_cache:
         return _provision_cache[cache_key]
     
     try:
-        # Build URL
-        base_url = f"https://finance.yahoo.com/quote/{ticker.upper()}/financials/"
-        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
         }
         
-        logger.info(f"[Provision Scraper] Fetching {base_url}")
-        response = requests.get(base_url, headers=headers, timeout=15, verify=False)
-        response.raise_for_status()
+        # Try multiple possible field names (Yahoo may use either)
+        keys = [
+            "annualCreditLossesProvision",
+            "trailingCreditLossesProvision",
+        ]
         
-        html_text = response.text
+        end_ts = int(time.time())
+        start_ts = int((datetime.now() - timedelta(days=365*6)).timestamp())
         
-        # Check if page contains the provision row
-        if 'Credit Losses Provision' not in html_text and 'Credit Loss' not in html_text:
-            logger.info(f"[Provision Scraper] '{ticker}' page does not contain Credit Losses Provision")
-            _provision_cache[cache_key] = None
-            return None
-        
-        # --- Parse: Extract TTM value ---
-        # Pattern: "Credit Losses Provision" followed by · separated values
-        # First value after the label is TTM
-        # Values can be: -14,212,000  or  1,113,000  or  --  or  -
-        
-        # Strategy: Find the provision row and extract all numeric values from it
-        # The row ends at the next known row label (Non Interest Expense, etc.)
-        
-        # Extract the provision line segment
-        provision_pattern = re.compile(
-            r'Credit\s+Loss(?:es)?\s+Provision(.*?)(?:Non\s+Interest|Special\s+Income|Income\s+from|Pretax\s+Income|Other\s+Income)',
-            re.DOTALL | re.IGNORECASE
+        url = (
+            f"https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{cache_key}"
+            f"?symbol={cache_key}"
+            f"&type={','.join(keys)}"
+            f"&period1={start_ts}&period2={end_ts}"
         )
         
-        match = provision_pattern.search(html_text)
-        if not match:
-            logger.warning(f"[Provision Scraper] Could not isolate provision row for '{ticker}'")
+        logger.info(f"[Provision API] Fetching {cache_key} from timeseries API...")
+        
+        r = requests.get(url, headers=headers, timeout=15, verify=False)
+        r.raise_for_status()
+        data = r.json()
+        
+        results = data.get("timeseries", {}).get("result", [])
+        
+        if not results:
+            logger.info(f"[Provision API] No timeseries results for {cache_key}")
             _provision_cache[cache_key] = None
             return None
         
-        row_text = match.group(1)
-        logger.info(f"[Provision Scraper] Raw row text: {row_text[:200]}")
+        provision_data = {"ttm": 0, "annual": [], "source": f"Yahoo Timeseries API ({cache_key})"}
         
-        # Extract all numeric values (including negative, with commas)
-        # Matches: -14,212,000 or 1,113,000 or 666 or -313
-        value_pattern = re.compile(r'(-?[\d,]+(?:\.\d+)?)')
-        raw_values = value_pattern.findall(row_text)
-        
-        if not raw_values:
-            logger.warning(f"[Provision Scraper] No numeric values found in provision row for '{ticker}'")
-            _provision_cache[cache_key] = None
-            return None
-        
-        # Parse values (page shows in thousands)
-        parsed_values = []
-        for rv in raw_values:
-            try:
-                val = float(rv.replace(',', ''))
-                # Determine if this is a "thousands" value or a small number
-                # Yahoo Finance shows "All numbers in thousands"
-                parsed_values.append(val * 1000)  # Convert from thousands to actual
-            except ValueError:
+        for item in results:
+            meta = item.get("meta", {})
+            # meta.type can be a list like ["annualCreditLossesProvision"]
+            type_list = meta.get("type", [])
+            type_name = type_list[0] if isinstance(type_list, list) and type_list else str(type_list)
+            
+            # Extract values from the item (key matches type_name)
+            values = item.get(type_name, [])
+            if not values:
                 continue
+            
+            if "trailing" in type_name.lower():
+                # TTM value: take the last (most recent) entry
+                for v in reversed(values):
+                    if isinstance(v, dict) and "reportedValue" in v:
+                        raw_val = v["reportedValue"].get("raw", 0)
+                        if raw_val != 0:
+                            provision_data["ttm"] = raw_val
+                            logger.info(f"[Provision API] {cache_key} TTM: ${raw_val:,.0f}")
+                            break
+            
+            elif "annual" in type_name.lower():
+                for v in values:
+                    if isinstance(v, dict) and "reportedValue" in v:
+                        date_str = v.get("asOfDate", "Unknown")
+                        raw_val = v["reportedValue"].get("raw", 0)
+                        provision_data["annual"].append((date_str, raw_val))
+                        
+                if provision_data["annual"]:
+                    logger.info(f"[Provision API] {cache_key} Annual: {len(provision_data['annual'])} periods found")
         
-        logger.info(f"[Provision Scraper] Parsed {len(parsed_values)} values for '{ticker}': {parsed_values[:5]}")
+        # If we got any data, cache and return
+        if provision_data["ttm"] != 0 or provision_data["annual"]:
+            _provision_cache[cache_key] = provision_data
+            return provision_data
         
-        # First value = TTM, subsequent = annual periods
-        result = {
-            'ttm': parsed_values[0] if len(parsed_values) > 0 else 0,
-            'annual': parsed_values[1:] if len(parsed_values) > 1 else [],
-            'source': f"Yahoo Finance Web ({ticker.upper()}/financials/)"
-        }
-        
-        logger.info(f"[Provision Scraper] {ticker} TTM Provision: ${result['ttm']:,.0f}")
-        
-        _provision_cache[cache_key] = result
-        return result
+        logger.info(f"[Provision API] {cache_key}: Field exists but no values returned (non-financial company?)")
+        _provision_cache[cache_key] = None
+        return None
         
     except requests.RequestException as e:
-        logger.warning(f"[Provision Scraper] HTTP error for '{ticker}': {str(e)}")
+        logger.warning(f"[Provision API] HTTP error for {cache_key}: {str(e)}")
+    except (KeyError, ValueError, TypeError) as e:
+        logger.warning(f"[Provision API] Parse error for {cache_key}: {str(e)}")
     except Exception as e:
-        logger.error(f"[Provision Scraper] Unexpected error for '{ticker}': {str(e)}")
+        logger.error(f"[Provision API] Unexpected error for {cache_key}: {str(e)}")
     
     _provision_cache[cache_key] = None
     return None
@@ -570,7 +570,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     * Ghost Column Eraser applied.
     * PPNR = Pretax + abs(Provision) 
     * **Search:** Uses 'get_value_max_fuzzy' with normalization (ignores case/spaces).
-    * **Provision:** Scraped from Yahoo Finance HTML (v1.4.0) with yfinance fallback.
+    * **Provision:** Fetched via Yahoo Timeseries API (v1.4.0) with yfinance fallback.
     """
     rev = 0
     ebit = 0
@@ -587,15 +587,16 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     current_year = datetime.now().year
     target_year = current_year - 1
     
-    # [v1.4.0] Pre-fetch Credit Losses Provision from Yahoo Finance HTML
-    # This is the primary source for provision data (yfinance doesn't provide it)
+    # [v1.4.0] Pre-fetch Credit Losses Provision from Yahoo Finance Timeseries API
+    # yfinance does NOT include this field in its key list.
+    # We call the same API endpoint with the CreditLossesProvision key.
     scraped_provision = None
     if is_financial and ticker_symbol:
-        scraped_provision = scrape_yahoo_provision(ticker_symbol)
+        scraped_provision = fetch_credit_losses_provision(ticker_symbol)
         if scraped_provision:
-            logger.info(f"[v1.4.0] Scraped provision available for {ticker_symbol}: TTM=${scraped_provision['ttm']:,.0f}")
+            logger.info(f"[v1.4.0] Provision data available for {ticker_symbol}: TTM=${scraped_provision['ttm']:,.0f}")
         else:
-            logger.info(f"[v1.4.0] Scraping failed for {ticker_symbol}, will use yfinance fallback")
+            logger.info(f"[v1.4.0] Provision API returned no data for {ticker_symbol}, will use yfinance fallback")
     
     try:
         # Load Statements
