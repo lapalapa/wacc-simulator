@@ -1460,8 +1460,29 @@ def get_target_financials(ticker):
         rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision = \
             get_financial_data_with_priority(t, info, ticker_symbol=ticker)
         
+        # Fetch Interest Income for Financial Firms (to calc Net Interest Expense)
+        int_income = 0
+        sector_str = str(info.get('sector', '')).lower()
+        is_fin_check = 'financial' in sector_str or 'bank' in sector_str
+        if is_fin_check:
+            # Try info_dict first
+            int_income = info.get('interestIncome', 0) or 0
+            if int_income == 0:
+                # Try quarterly sum
+                try:
+                    q_inc = t.quarterly_income_stmt
+                    if not q_inc.empty and q_inc.shape[1] >= 4:
+                        for qi in range(min(4, q_inc.shape[1])):
+                            ii_val = get_value_max_fuzzy(q_inc, qi, 
+                                ['Interest Income', 'Interest Income Non Operating'])
+                            int_income += ii_val
+                        if int_income > 0:
+                            logger.info(f"[Target] Interest Income from 4Q sum: ${int_income:,.0f}")
+                except Exception as e:
+                    logger.debug(f"Interest Income quarterly fetch failed: {e}")
+        
         mkt_cap = info.get('marketCap', 0)
-        sector = str(info.get('sector', '')).lower()
+        sector = sector_str
         local_currency = info.get('currency', 'USD')
         
         # Get FX rate to USD (fiscal year average based on financial statement date)
@@ -1517,6 +1538,9 @@ def get_target_financials(ticker):
         ebit_usd = ebit * fx_rate
         raw_pretax_usd = raw_pretax * fx_rate
         raw_provision_usd = raw_provision * fx_rate
+        int_income_usd = int_income * fx_rate
+        net_int_exp = max(int_exp - int_income, 0)
+        net_int_exp_usd = net_int_exp * fx_rate
         
         if 'financial' in sector or 'bank' in sector: 
             category = "Financial Firms"
@@ -1528,6 +1552,8 @@ def get_target_financials(ticker):
         return {
             "int_exp": int_exp_usd, "ebit": ebit_usd, 
             "int_exp_local": int_exp, "ebit_local": ebit,
+            "int_income": int_income_usd, "int_income_local": int_income,
+            "net_int_exp": net_int_exp_usd, "net_int_exp_local": net_int_exp,
             "label_int": label_int, "label_ebit": label_ebit,
             "raw_pretax": raw_pretax_usd, "raw_provision": raw_provision_usd,
             "raw_pretax_local": raw_pretax, "raw_provision_local": raw_provision,
@@ -1540,6 +1566,8 @@ def get_target_financials(ticker):
         return {
             "int_exp": 0.0, "ebit": 0.0,
             "int_exp_local": 0.0, "ebit_local": 0.0,
+            "int_income": 0.0, "int_income_local": 0.0,
+            "net_int_exp": 0.0, "net_int_exp_local": 0.0,
             "label_int": "N/A", "label_ebit": "N/A", 
             "raw_pretax": 0, "raw_provision": 0, 
             "raw_pretax_local": 0, "raw_provision_local": 0,
@@ -1806,31 +1834,52 @@ with st.sidebar:
                 return f"-${abs(v_k):,.0f}k"
             return f"${v_k:,.0f}k"
         
-        # Interest Expense
-        _ie_default = _fmt_dollar(tf['int_exp'])
-        _ie_text = st.text_input(
-            "Interest Expense (USD)",
-            value=_ie_default,
-            help="Enter with $ and commas (e.g. $315,200,000)" + (f" | Local: {local_curr} {_fmt_dollar(tf.get('int_exp_local',0))}" if is_foreign else "")
-        )
-        int_exp_in = _parse_dollar(_ie_text, tf['int_exp'])
-        if is_foreign:
-            _ie_local = tf.get('int_exp_local', 0)
-            st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')} · Local: {local_curr} {_fmt_k(_ie_local)}")
-        else:
-            st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')}")
-        
-        # EBIT / PPNR
-        _ebit_default = _fmt_dollar(tf['ebit'])
-        _ebit_text = st.text_input(
-            f"{ebit_label} (USD)",
-            value=_ebit_default,
-            help="Enter with $ and commas" + (f" | Local: {local_curr} {_fmt_dollar(tf.get('ebit_local',0))}" if is_foreign else "")
-        )
-        ebit_in = _parse_dollar(_ebit_text, tf['ebit'])
-        
-        # [NEW] VISIBLE BREAKDOWN
+        # Interest Expense section (different for Financial vs Non-Financial)
         if is_fin_target:
+            # === FINANCIAL FIRMS: Show IE, II, Net IE, and PPNR ===
+            st.caption("🏦 *Financial Firm: ICR uses Net Interest Expense (IE - II)*")
+            
+            # Interest Expense (Gross)
+            _ie_default = _fmt_dollar(tf['int_exp'])
+            _ie_text = st.text_input(
+                "Interest Expense (USD)",
+                value=_ie_default,
+                help="Total interest expense (includes deposit interest)"
+            )
+            int_exp_in = _parse_dollar(_ie_text, tf['int_exp'])
+            st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')}")
+            
+            # Interest Income
+            _ii_default = _fmt_dollar(tf.get('int_income', 0))
+            _ii_text = st.text_input(
+                "Interest Income (USD)",
+                value=_ii_default,
+                help="Total interest income (loan interest, securities income)"
+            )
+            int_income_in = _parse_dollar(_ii_text, tf.get('int_income', 0))
+            st.caption(f"{_fmt_k(int_income_in)}")
+            
+            # Net Interest Expense (auto-calculated, editable)
+            _net_ie_calc = max(int_exp_in - int_income_in, 0)
+            _net_ie_default = _fmt_dollar(_net_ie_calc)
+            _net_ie_text = st.text_input(
+                "Net Interest Expense (USD) — *used for ICR*",
+                value=_net_ie_default,
+                help="IE - II (editable). This is used for ICR calculation."
+            )
+            net_int_exp_in = _parse_dollar(_net_ie_text, _net_ie_calc)
+            st.caption(f"{_fmt_k(net_int_exp_in)} = IE {_fmt_k(int_exp_in)} − II {_fmt_k(int_income_in)}")
+            
+            # PPNR
+            _ebit_default = _fmt_dollar(tf['ebit'])
+            _ebit_text = st.text_input(
+                f"{ebit_label} (USD)",
+                value=_ebit_default,
+                help="Pre-Provision Net Revenue = Pretax Income + Provision"
+            )
+            ebit_in = _parse_dollar(_ebit_text, tf['ebit'])
+            
+            # PPNR breakdown
             st.markdown("""
             <style>
             .small-font { font-size: 12px; color: #666; margin-bottom: 0px; }
@@ -1853,12 +1902,42 @@ with st.sidebar:
                 st.success(f"Credit Losses Provision detected: {_fmt_k(tf.get('raw_provision', 0))}")
             else:
                 st.warning("Credit Losses Provision = $0 (Check if company reports this metric)")
+            
+            # For ICR calc later: use net_int_exp instead of gross int_exp
+            int_exp_for_icr = net_int_exp_in
+            
         else:
+            # === NON-FINANCIAL FIRMS: Standard IE and EBIT ===
+            _ie_default = _fmt_dollar(tf['int_exp'])
+            _ie_text = st.text_input(
+                "Interest Expense (USD)",
+                value=_ie_default,
+                help="Enter with $ and commas (e.g. $315,200,000)" + (f" | Local: {local_curr} {_fmt_dollar(tf.get('int_exp_local',0))}" if is_foreign else "")
+            )
+            int_exp_in = _parse_dollar(_ie_text, tf['int_exp'])
+            if is_foreign:
+                _ie_local = tf.get('int_exp_local', 0)
+                st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')} · Local: {local_curr} {_fmt_k(_ie_local)}")
+            else:
+                st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')}")
+            
+            # EBIT
+            _ebit_default = _fmt_dollar(tf['ebit'])
+            _ebit_text = st.text_input(
+                f"{ebit_label} (USD)",
+                value=_ebit_default,
+                help="Enter with $ and commas" + (f" | Local: {local_curr} {_fmt_dollar(tf.get('ebit_local',0))}" if is_foreign else "")
+            )
+            ebit_in = _parse_dollar(_ebit_text, tf['ebit'])
+            
             if is_foreign:
                 _ebit_local = tf.get('ebit_local', 0)
                 st.caption(f"{_fmt_k(ebit_in)} · Source: {tf.get('label_ebit', 'N/A')} · Local: {local_curr} {_fmt_k(_ebit_local)}")
             else:
                 st.caption(f"{_fmt_k(ebit_in)} · Source: {tf.get('label_ebit', 'N/A')}")
+            
+            # For ICR calc: use gross int_exp as-is
+            int_exp_for_icr = int_exp_in
         
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
@@ -1888,7 +1967,7 @@ with st.sidebar:
             st.session_state['inputs'] = {
                 'rf': rf_in, 'crp': crp_in, 'sp': size_in, 'tax': tax_in,
                 'bb': bb_in, 'div': div_in, 'g': g_in,
-                'int_exp': int_exp_in, 'ebit': ebit_in, 'category': category_in
+                'int_exp': int_exp_for_icr, 'ebit': ebit_in, 'category': category_in
             }
         st.success("Calculation completed!")
     
@@ -2240,10 +2319,16 @@ if 'result' in st.session_state:
         sc2.metric("Firm Category", category)
         sc3.metric("Implied Rating", implied_rating)
         sc4.metric("Implied OAS Spread", f"{final_spread:.2f}%", help=f"Mapped to FRED: {target_fred_key}")
-        st.caption(
-            f"Based on {category} Table from Damodaran. "
-            f"ICR = EBIT / Interest Exp = {ebit:,.0f} / {int_exp:,.0f}"
-        )
+        if category == "Financial Firms":
+            st.caption(
+                f"Based on {category} Table from Damodaran. "
+                f"ICR = PPNR / **Net** Interest Exp = {ebit:,.0f} / {int_exp:,.0f}"
+            )
+        else:
+            st.caption(
+                f"Based on {category} Table from Damodaran. "
+                f"ICR = EBIT / Interest Exp = {ebit:,.0f} / {int_exp:,.0f}"
+            )
 
     st.latex(r"K_d = (R_f + \text{Credit Spread}) \times (1 - \text{Tax Rate})")
     st.info(
