@@ -75,7 +75,14 @@ BUILD_DATE = "2025-02-09"
 # [MODULE] Helper: Safe Fetcher with Retry
 # ==============================================================================
 def safe_yf_info(ticker_obj, max_retries=3):
-    """안전한 Yahoo Finance 정보 조회 (재시도 로직 포함)"""
+    """안전한 Yahoo Finance 정보 조회 (재시도 + API fallback 포함)
+    
+    Strategy:
+      1. Try yfinance .info (standard path) up to max_retries
+      2. If that fails, call Yahoo quoteSummary API directly (bypasses yfinance)
+      3. Return whatever we get (may be partial)
+    """
+    # Phase 1: Try yfinance .info
     for i in range(max_retries):
         try:
             info = ticker_obj.info
@@ -83,21 +90,130 @@ def safe_yf_info(ticker_obj, max_retries=3):
                 return info
         except Exception as e:
             if i == max_retries - 1:
-                logger.warning(f"Failed to fetch info after {max_retries} attempts: {str(e)}")
+                logger.warning(f"Failed to fetch .info after {max_retries} attempts: {str(e)}")
         time.sleep(random.uniform(0.5, 1.5))
+    
+    # Phase 2: Direct API fallback
+    ticker_str = getattr(ticker_obj, 'ticker', '')
+    if ticker_str:
+        logger.info(f"[safe_yf_info] .info failed for {ticker_str}, trying direct API fallback...")
+        api_info = fetch_company_profile_from_api(ticker_str)
+        if api_info and len(api_info) > 3:
+            logger.info(f"[safe_yf_info] API fallback successful for {ticker_str} ({len(api_info)} fields)")
+            return api_info
+    
     return {}
 
 # ==============================================================================
-# [MODULE] Helper: Yahoo Finance Timeseries API for Financial TTM Data
+# [MODULE] Helper: Yahoo Finance quoteSummary API for Company Profile
 # ==============================================================================
-# yfinance does not include CreditLossesProvision in its key list, and
-# info_dict does not have PretaxIncome TTM. We call Yahoo's timeseries
-# API directly to get both fields in a single request.
-#
-# API Endpoint (same as yfinance internal):
-#   https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{SYMBOL}
+# When yfinance .info fails (403, timeout, empty), we call Yahoo's quoteSummary
+# API directly to get country, sector, marketCap, totalDebt, currency, etc.
+# This is the same endpoint yfinance uses internally but we bypass its error handling.
 # ==============================================================================
-_financial_ttm_cache = {}
+_profile_cache = {}
+
+def fetch_company_profile_from_api(ticker):
+    """
+    Direct Yahoo Finance quoteSummary API call for company metadata.
+    
+    Fetches: country, sector, industry, marketCap, totalDebt, currency,
+             totalRevenue, ebitda, operatingMargins, interestExpense, longName
+    
+    Uses multiple quoteSummary modules in a single request:
+      - assetProfile (country, sector, industry)
+      - defaultKeyStatistics (marketCap)
+      - financialData (totalRevenue, ebitda, totalDebt, operatingMargins)
+      - price (currency, longName, marketCap)
+    
+    Returns: dict matching yfinance .info format, or {} if fails.
+    """
+    cache_key = ticker.upper()
+    if cache_key in _profile_cache:
+        return _profile_cache[cache_key]
+    
+    modules = "assetProfile,defaultKeyStatistics,financialData,price"
+    url = (
+        f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{cache_key}"
+        f"?modules={modules}"
+    )
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    
+    result = {}
+    
+    try:
+        logger.info(f"[Profile API] Fetching company profile for {cache_key}...")
+        r = requests.get(url, headers=headers, timeout=15, verify=False)
+        r.raise_for_status()
+        data = r.json()
+        
+        summary = data.get("quoteSummary", {}).get("result", [])
+        if not summary:
+            logger.warning(f"[Profile API] No quoteSummary results for {cache_key}")
+            _profile_cache[cache_key] = {}
+            return {}
+        
+        item = summary[0]
+        
+        # assetProfile: country, sector, industry
+        profile = item.get("assetProfile", {})
+        if profile:
+            result["country"] = profile.get("country", "")
+            result["sector"] = profile.get("sector", "")
+            result["industry"] = profile.get("industry", "")
+            result["industryKey"] = profile.get("industryKey", "")
+            result["longBusinessSummary"] = profile.get("longBusinessSummary", "")
+        
+        # price: currency, longName, marketCap (most reliable source)
+        price_data = item.get("price", {})
+        if price_data:
+            result["currency"] = price_data.get("currency", "USD")
+            result["longName"] = price_data.get("longName", cache_key)
+            mc = price_data.get("marketCap", {})
+            if isinstance(mc, dict):
+                result["marketCap"] = mc.get("raw", 0)
+            elif isinstance(mc, (int, float)):
+                result["marketCap"] = mc
+        
+        # financialData: revenue, ebitda, totalDebt, margins, interest expense
+        fin_data = item.get("financialData", {})
+        if fin_data:
+            for key in ["totalRevenue", "ebitda", "totalDebt", "operatingMargins", 
+                        "interestExpense", "totalCash", "currentRatio"]:
+                val = fin_data.get(key, {})
+                if isinstance(val, dict):
+                    result[key] = val.get("raw", 0)
+                elif isinstance(val, (int, float)):
+                    result[key] = val
+        
+        # defaultKeyStatistics: fallback marketCap, shares
+        key_stats = item.get("defaultKeyStatistics", {})
+        if key_stats:
+            if not result.get("marketCap"):
+                mc2 = key_stats.get("enterpriseValue", {})
+                if isinstance(mc2, dict):
+                    result["marketCap"] = mc2.get("raw", 0)
+            shares = key_stats.get("sharesOutstanding", {})
+            if isinstance(shares, dict):
+                result["sharesOutstanding"] = shares.get("raw", 0)
+        
+        n_keys = len([v for v in result.values() if v])
+        logger.info(f"[Profile API] {cache_key}: Got {n_keys} fields "
+                    f"(country={result.get('country', 'N/A')}, "
+                    f"sector={result.get('sector', 'N/A')}, "
+                    f"mktCap=${result.get('marketCap', 0):,.0f})")
+        
+        _profile_cache[cache_key] = result
+        return result
+        
+    except Exception as e:
+        logger.warning(f"[Profile API] Failed for {cache_key}: {str(e)}")
+        _profile_cache[cache_key] = {}
+        return {}
 
 def fetch_financial_ttm_from_api(ticker):
     """
