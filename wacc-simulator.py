@@ -599,12 +599,16 @@ def fetch_financial_ttm_from_api(ticker):
                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
         
-        # Request both provision and pretax income in a single API call
+        # Request provision, pretax income, and interest fields in a single API call
         keys = [
             "trailingCreditLossesProvision",
             "annualCreditLossesProvision",
             "trailingPretaxIncome",
             "annualPretaxIncome",
+            "trailingInterestExpenseOnDeposits",
+            "annualInterestExpenseOnDeposits",
+            "trailingInterestExpense",
+            "trailingInterestIncome",
         ]
         
         end_ts = int(time.time())
@@ -635,6 +639,9 @@ def fetch_financial_ttm_from_api(ticker):
             "provision_annual": [],
             "pretax_ttm": 0,
             "pretax_annual": [],
+            "int_exp_on_deposits_ttm": 0,
+            "int_exp_ttm": 0,
+            "int_income_ttm": 0,
             "source": f"Yahoo Timeseries API ({cache_key})"
         }
         
@@ -658,6 +665,15 @@ def fetch_financial_ttm_from_api(ticker):
                             if "creditloss" in type_lower or "provision" in type_lower:
                                 api_data["provision_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM Provision: ${raw_val:,.0f}")
+                            elif "interestexpenseondeposits" in type_lower:
+                                api_data["int_exp_on_deposits_ttm"] = raw_val
+                                logger.info(f"[Financial API] {cache_key} TTM IntExpOnDeposits: ${raw_val:,.0f}")
+                            elif "interestexpense" in type_lower and "deposit" not in type_lower:
+                                api_data["int_exp_ttm"] = raw_val
+                                logger.info(f"[Financial API] {cache_key} TTM IntExp: ${raw_val:,.0f}")
+                            elif "interestincome" in type_lower:
+                                api_data["int_income_ttm"] = raw_val
+                                logger.info(f"[Financial API] {cache_key} TTM IntIncome: ${raw_val:,.0f}")
                             elif "pretax" in type_lower:
                                 api_data["pretax_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM PretaxIncome: ${raw_val:,.0f}")
@@ -680,6 +696,7 @@ def fetch_financial_ttm_from_api(ticker):
         
         # Cache and return if we got any data
         has_data = (api_data["provision_ttm"] != 0 or api_data["pretax_ttm"] != 0 
+                    or api_data["int_exp_on_deposits_ttm"] != 0
                     or api_data["provision_annual"] or api_data["pretax_annual"])
         if has_data:
             logger.info(f"[Financial API] {cache_key}: provision_ttm=${api_data['provision_ttm']:,.0f}, "
@@ -1466,22 +1483,32 @@ def get_target_financials(ticker):
         sector_str = str(info.get('sector', '')).lower()
         is_fin_check = 'financial' in sector_str or 'bank' in sector_str
         if is_fin_check:
+            # Primary: Yahoo Timeseries API (fetched during get_financial_data_with_priority)
             try:
-                q_inc = t.quarterly_income_stmt
-                if not q_inc.empty and q_inc.shape[1] >= 4:
-                    # Search for Interest on Deposits row in quarterly data
-                    for qi in range(min(4, q_inc.shape[1])):
-                        iod_val = get_value_max_fuzzy(q_inc, qi, 
-                            ['Interest Expense On Deposits', 'Interest Paid On Deposits',
-                             'Interest On Deposits', 'Deposit Interest Expense'])
-                        int_on_deposits += iod_val
+                api_cache = _financial_ttm_cache.get(ticker.upper())
+                if api_cache:
+                    int_on_deposits = abs(api_cache.get('int_exp_on_deposits_ttm', 0))
                     if int_on_deposits > 0:
-                        logger.info(f"[Target] Interest on Deposits from 4Q sum: ${int_on_deposits:,.0f}")
-                    else:
-                        # Fallback: try annual statement
+                        logger.info(f"[Target] Interest on Deposits from API TTM: ${int_on_deposits:,.0f}")
+            except Exception as e:
+                logger.debug(f"Interest on Deposits API fetch failed: {e}")
+            
+            # Fallback: try yfinance quarterly/annual income stmt
+            if int_on_deposits == 0:
+                try:
+                    q_inc = t.quarterly_income_stmt
+                    if not q_inc.empty and q_inc.shape[1] >= 4:
+                        for qi in range(min(4, q_inc.shape[1])):
+                            iod_val = get_value_max_fuzzy(q_inc, qi, 
+                                ['Interest Expense On Deposits', 'Interest Paid On Deposits',
+                                 'Interest On Deposits', 'Deposit Interest Expense'])
+                            int_on_deposits += iod_val
+                        if int_on_deposits > 0:
+                            logger.info(f"[Target] Interest on Deposits from 4Q sum: ${int_on_deposits:,.0f}")
+                    
+                    if int_on_deposits == 0:
                         a_inc = t.income_stmt
                         if not a_inc.empty:
-                            # Try most recent non-NaN column
                             for ci in range(min(3, a_inc.shape[1])):
                                 iod_val = get_value_max_fuzzy(a_inc, ci,
                                     ['Interest Expense On Deposits', 'Interest Paid On Deposits',
@@ -1490,8 +1517,8 @@ def get_target_financials(ticker):
                                     int_on_deposits = iod_val
                                     logger.info(f"[Target] Interest on Deposits from annual col {ci}: ${int_on_deposits:,.0f}")
                                     break
-            except Exception as e:
-                logger.debug(f"Interest on Deposits fetch failed: {e}")
+                except Exception as e:
+                    logger.debug(f"Interest on Deposits yfinance fetch failed: {e}")
         
         mkt_cap = info.get('marketCap', 0)
         sector = sector_str
@@ -2040,6 +2067,14 @@ with st.sidebar:
                     get_financial_data_with_priority(_dbg_t, _dbg_info, ticker_symbol=target_ticker)
                 st.caption(f"Priority result: rev=${_dbg_rev:,.0f} ebit=${_dbg_ebit:,.0f} ie=${_dbg_ie:,.0f}")
                 st.caption(f"  pretax=${_dbg_pt:,.0f} provision=${_dbg_pp:,.0f} label={_dbg_le}")
+                
+                # Show API interest data for financial firms
+                _api_cache = _financial_ttm_cache.get(target_ticker.upper())
+                if _api_cache:
+                    _iod = _api_cache.get('int_exp_on_deposits_ttm', 0)
+                    _ie_api = _api_cache.get('int_exp_ttm', 0)
+                    _ii_api = _api_cache.get('int_income_ttm', 0)
+                    st.caption(f"  API: IntExp=${_ie_api:,.0f} DepositInt=${_iod:,.0f} IntIncome=${_ii_api:,.0f}")
             except Exception as _pe:
                 st.caption(f"Priority path error: {_pe}")
             
