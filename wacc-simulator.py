@@ -223,72 +223,133 @@ def _scrape_profile_from_text(text, ticker):
     """
     Yahoo Finance profile 페이지의 text 내용에서 HQ 정보를 텍스트 파싱으로 추출.
     
-    Profile 페이지에는 항상 "headquartered in [City], [State/Country]" 패턴이 있음.
-    예: "is headquartered in Durham, North Carolina"
-    예: "is based in Kranichfeld, Germany"
+    Yahoo Finance profile 페이지에는 2가지 위치에 country 정보가 있음:
+    
+    1. 사이드바 주소 블록 (우측):
+       Wolfspeed, Inc.
+       4600 Silicon Drive
+       Durham, NC 27703
+       United States
+       
+       Sector: Technology
+       Industry: Semiconductors
+    
+    2. 회사 설명 텍스트:
+       "...is headquartered in Durham, North Carolina."
+       "...is based in Kranichfeld, Germany."
     """
     result = {}
     
-    # HQ pattern: "headquartered in City, State/Country" or "is based in City, Country"
-    hq_patterns = [
-        re.compile(r'(?:headquartered|based)\s+in\s+([^.]+?)\.', re.IGNORECASE),
-    ]
+    # =====================================================================
+    # Strategy 1: Direct "Sector: X" / "Industry: X" pattern (sidebar)
+    # This is the most reliable when present in the HTML text
+    # =====================================================================
+    sector_match = re.search(r'Sector\s*:\s*([A-Za-z\s&]+?)(?:\n|$|<|Industry)', text)
+    if sector_match:
+        result["sector"] = sector_match.group(1).strip()
+        logger.info(f"[Text Parse] {ticker}: Sector='{result['sector']}' (direct match)")
     
-    for pat in hq_patterns:
-        match = pat.search(text)
-        if match:
-            hq_str = match.group(1).strip()
-            # Parse "Durham, North Carolina" -> country = "United States"
-            # Parse "Kranichfeld, Germany" -> country = "Germany"
-            parts = [p.strip() for p in hq_str.split(",")]
-            
-            if len(parts) >= 2:
-                last_part = parts[-1].strip()
-                # US state detection
-                us_states = {
-                    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
-                    "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
-                    "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
-                    "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
-                    "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
-                    "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
-                    "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
-                    "Wisconsin","Wyoming","District of Columbia"
-                }
-                if last_part in us_states:
-                    result["country"] = "United States"
-                else:
-                    result["country"] = last_part
-                
-                logger.info(f"[Text Parse] {ticker}: HQ='{hq_str}' -> country='{result['country']}'")
-            break
+    industry_match = re.search(r'Industry\s*:\s*([A-Za-z\s&\-]+?)(?:\n|$|<|Full)', text)
+    if industry_match:
+        result["industry"] = industry_match.group(1).strip()
+        logger.info(f"[Text Parse] {ticker}: Industry='{result['industry']}'")
     
-    # Sector detection from description keywords
-    text_lower = text.lower()
-    sector_keywords = {
-        "semiconductor": "Technology",
-        "software": "Technology",
-        "financial services": "Financial Services",
-        "banking": "Financial Services",
-        "insurance": "Financial Services",
-        "pharmaceutical": "Healthcare",
-        "biotechnology": "Healthcare",
-        "energy": "Energy",
-        "oil and gas": "Energy",
-        "real estate": "Real Estate",
-        "consumer": "Consumer Cyclical",
-        "automotive": "Consumer Cyclical",
-        "industrial": "Industrials",
-        "telecommunications": "Communication Services",
-        "utility": "Utilities",
-        "mining": "Basic Materials",
-        "chemical": "Basic Materials",
+    # =====================================================================
+    # Strategy 2: Country name appearing as standalone line in address block
+    # The sidebar shows country on its own line after zip code
+    # =====================================================================
+    known_countries = {
+        "United States", "United Kingdom", "Canada", "Germany", "France", "Japan",
+        "China", "South Korea", "Taiwan", "Netherlands", "Switzerland", "Sweden",
+        "Ireland", "Israel", "India", "Australia", "Brazil", "Mexico", "Singapore",
+        "Hong Kong", "Italy", "Spain", "Belgium", "Denmark", "Norway", "Finland",
+        "Austria", "Luxembourg", "Portugal", "South Africa", "New Zealand",
+        "Thailand", "Indonesia", "Malaysia", "Philippines", "Vietnam",
+        "Saudi Arabia", "United Arab Emirates", "Turkey", "Russia", "Poland",
+        "Czech Republic", "Hungary", "Greece", "Argentina", "Chile", "Colombia",
+        "Peru", "Egypt", "Nigeria", "Kenya", "Pakistan", "Bangladesh",
+        "Bermuda", "Cayman Islands", "British Virgin Islands", "Jersey", "Guernsey",
+        "Isle of Man", "Puerto Rico", "Curacao",
     }
     
-    for kw, sector in sector_keywords.items():
-        if kw in text_lower:
-            result["sector"] = sector
+    for country in known_countries:
+        # Look for country name as standalone text (not inside a longer word)
+        # Patterns: "United States\n", "United States<", ">United States<", "\nUnited States\n"
+        patterns = [
+            re.compile(r'(?:^|\n|>)\s*' + re.escape(country) + r'\s*(?:\n|$|<)', re.MULTILINE),
+            re.compile(r'[\s>]' + re.escape(country) + r'[\s<\n]'),
+        ]
+        for pat in patterns:
+            if pat.search(text):
+                result["country"] = country
+                logger.info(f"[Text Parse] {ticker}: Country='{country}' (address block match)")
+                break
+        if result.get("country"):
             break
+    
+    # =====================================================================
+    # Strategy 3: "headquartered in" / "is based in" pattern (description)
+    # =====================================================================
+    if not result.get("country"):
+        hq_patterns = [
+            re.compile(r'(?:headquartered|based)\s+in\s+([^.]+?)\.', re.IGNORECASE),
+        ]
+        
+        for pat in hq_patterns:
+            match = pat.search(text)
+            if match:
+                hq_str = match.group(1).strip()
+                parts = [p.strip() for p in hq_str.split(",")]
+                
+                if len(parts) >= 2:
+                    last_part = parts[-1].strip()
+                    us_states = {
+                        "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
+                        "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+                        "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
+                        "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
+                        "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
+                        "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
+                        "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
+                        "Wisconsin","Wyoming","District of Columbia"
+                    }
+                    if last_part in us_states:
+                        result["country"] = "United States"
+                    else:
+                        result["country"] = last_part
+                    
+                    logger.info(f"[Text Parse] {ticker}: HQ='{hq_str}' -> country='{result['country']}'")
+                break
+    
+    # =====================================================================
+    # Strategy 4: Sector from description keywords (fallback if no direct match)
+    # =====================================================================
+    if not result.get("sector"):
+        text_lower = text.lower()
+        sector_keywords = {
+            "semiconductor": "Technology",
+            "software": "Technology",
+            "financial services": "Financial Services",
+            "banking": "Financial Services",
+            "insurance": "Financial Services",
+            "pharmaceutical": "Healthcare",
+            "biotechnology": "Healthcare",
+            "energy": "Energy",
+            "oil and gas": "Energy",
+            "real estate": "Real Estate",
+            "consumer": "Consumer Cyclical",
+            "automotive": "Consumer Cyclical",
+            "industrial": "Industrials",
+            "telecommunications": "Communication Services",
+            "utility": "Utilities",
+            "mining": "Basic Materials",
+            "chemical": "Basic Materials",
+        }
+        
+        for kw, sector in sector_keywords.items():
+            if kw in text_lower:
+                result["sector"] = sector
+                break
     
     return result
 
