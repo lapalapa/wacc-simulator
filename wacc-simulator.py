@@ -110,6 +110,11 @@ def safe_yf_info(ticker_obj, max_retries=3):
         api_info = fetch_company_profile_from_api(ticker_str)
         
         if api_info:
+            # Filter out invalid country from API (e.g., "Q1FY26")
+            if api_info.get("country") and not _is_valid_country(api_info["country"]):
+                logger.warning(f"[safe_yf_info] {ticker_str}: Rejected invalid API country: '{api_info['country']}'")
+                api_info["country"] = ""
+            
             if info:
                 # Merge: API fills gaps, existing .info values take priority
                 merged = {**api_info, **{k: v for k, v in info.items() if v is not None and v != '' and v != 0}}
@@ -131,6 +136,43 @@ def safe_yf_info(ticker_obj, max_retries=3):
 #   3. Profile page text/regex parsing (fallback)
 # ==============================================================================
 _profile_cache = {}
+
+# Known countries for validation (used by all profile parsers)
+VALID_COUNTRIES = {
+    "United States", "United Kingdom", "Canada", "Germany", "France", "Japan",
+    "China", "South Korea", "Taiwan", "Netherlands", "Switzerland", "Sweden",
+    "Ireland", "Israel", "India", "Australia", "Brazil", "Mexico", "Singapore",
+    "Hong Kong", "Italy", "Spain", "Belgium", "Denmark", "Norway", "Finland",
+    "Austria", "Luxembourg", "Portugal", "South Africa", "New Zealand",
+    "Thailand", "Indonesia", "Malaysia", "Philippines", "Vietnam",
+    "Saudi Arabia", "United Arab Emirates", "Turkey", "Russia", "Poland",
+    "Czech Republic", "Hungary", "Greece", "Argentina", "Chile", "Colombia",
+    "Peru", "Egypt", "Nigeria", "Kenya", "Pakistan", "Bangladesh",
+    "Bermuda", "Cayman Islands", "British Virgin Islands", "Jersey", "Guernsey",
+    "Isle of Man", "Puerto Rico", "Curacao", "Monaco", "Liechtenstein",
+}
+
+def _is_valid_country(text):
+    """Validate that text looks like a country name, not garbage like 'Q1FY26'."""
+    if not text or len(text) > 50 or len(text) < 3:
+        return False
+    if text.isdigit():
+        return False
+    # Reject fiscal period patterns (Q1FY26, FY2025, H1, CY2025)
+    if re.match(r'^(Q\d|FY|H\d|CY)', text, re.IGNORECASE):
+        return False
+    # Reject if contains digits mixed with short text (like "Q1FY26", "2025-06-30")
+    if any(c.isdigit() for c in text):
+        return False
+    # Check against known countries (case-insensitive)
+    text_lower = text.lower().strip()
+    for c in VALID_COUNTRIES:
+        if c.lower() == text_lower:
+            return True
+    # Allow if all alpha/spaces and title-like (potential unknown country)
+    if all(c.isalpha() or c.isspace() for c in text) and text[0].isupper() and len(text) > 3:
+        return True
+    return False
 
 def _parse_profile_with_xpath(html_text, ticker):
     """
@@ -178,8 +220,8 @@ def _parse_profile_with_xpath(html_text, ticker):
                 elements = tree.xpath(xpath)
                 if elements:
                     country_text = elements[0].text_content().strip()
-                    # Validate it looks like a country name (not random content)
-                    if country_text and len(country_text) < 50 and not country_text.isdigit():
+                    # Validate it looks like a country name (not "Q1FY26" etc.)
+                    if _is_valid_country(country_text):
                         result["country"] = country_text
                         logger.info(f"[XPath] {ticker}: Country='{country_text}' via XPath: {xpath}")
                         break
@@ -358,7 +400,12 @@ def _parse_profile_with_regex(html_text, ticker):
         if not result.get(field):
             m = pat.search(html_text)
             if m:
-                result[field] = m.group(1)
+                val = m.group(1)
+                # Validate country values
+                if field == "country" and not _is_valid_country(val):
+                    logger.debug(f"[Regex] Rejected invalid country: '{val}'")
+                    continue
+                result[field] = val
     
     # Pattern 3: "headquartered in" text
     if not result.get("country"):
@@ -432,7 +479,8 @@ def fetch_company_profile_from_api(ticker):
             
             profile = item.get("assetProfile", {})
             if profile:
-                result["country"] = profile.get("country", "")
+                _c = profile.get("country", "")
+                result["country"] = _c if _is_valid_country(_c) else ""
                 result["sector"] = profile.get("sector", "")
                 result["industry"] = profile.get("industry", "")
                 result["industryKey"] = profile.get("industryKey", "")
@@ -1084,7 +1132,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             """Extract rev, ebit, ebitda, int_exp, pretax, provision from one column.
             
             - For non-financial: EBIT from Yahoo's EBIT row (includes unusual items).
-              Falls back to Operating Income if EBIT row not found.
+              No Operating Income fallback (v1.4.1+).
             - For financial: PPNR = Pretax + abs(Provision)
             
             Provision uses yfinance fuzzy search only (NOT API TTM).
@@ -1136,17 +1184,11 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     val_e = p_tax + abs(p_prov)
             
             if val_e == 0:
-                # Use Yahoo-style EBIT (includes unusual items) as standard
+                # Use Yahoo-style EBIT only (includes unusual items) - no Operating Income fallback
                 val_e = get_value_max_fuzzy(df, col_idx, 
                     ['EBIT'], 
                     exclusion_keywords=['EBITDA', 'Normalized EBITDA'],
                     keep_sign=True)
-                # Fallback to Operating Income if no EBIT row
-                if val_e == 0:
-                    val_e = get_value_max_fuzzy(df, col_idx, 
-                        ['Operating Income', 'Operating Profit'], 
-                        exclusion_keywords=['EBITDA', 'Normalized EBITDA', 'Non Operating'],
-                        keep_sign=True)
                 
                 logger.info(f"[extract_from_col] col={col_idx}: EBIT={val_e:,.0f}, EBITDA={ed:,.0f}, Rev={r:,.0f}, IntExp={i:,.0f}")
             
@@ -1743,6 +1785,31 @@ with st.sidebar:
                                 _v = _diag_inc.loc[_idx].iloc[0]
                                 _v_str = f"${_v:,.0f}" if pd.notna(_v) else "NaN"
                                 st.text(f"  {str(_idx):35s} = {_v_str}")
+                    
+                    # Show ALL rows containing 'ebit' (substring) to find the bug
+                    st.markdown("**Fuzzy 'ebit' match simulation:**")
+                    _ebit_candidates = []
+                    for _idx in _diag_inc.index:
+                        _norm = str(_idx).lower().replace(" ", "").replace("-", "").replace("_", "")
+                        # Check exclusions first
+                        _excluded = any(ex in _norm for ex in ["ebitda", "normalizedebitda"])
+                        if "ebit" in _norm:
+                            _v = _diag_inc.loc[_idx].iloc[0]
+                            _v_str = f"${_v:,.0f}" if pd.notna(_v) else "NaN"
+                            _status = "EXCLUDED" if _excluded else "CANDIDATE"
+                            st.text(f"  [{_status}] {str(_idx):40s} norm='{_norm}' val={_v_str}")
+                            if not _excluded and pd.notna(_v) and _v != 0:
+                                _ebit_candidates.append(_v)
+                    if _ebit_candidates:
+                        _best = max(_ebit_candidates, key=abs)
+                        st.text(f"  => max(abs): ${_best:,.0f} (keep_sign: {_best:,.0f})")
+                    
+                    # Also show ALL rows for full inspection
+                    st.markdown("**ALL Income Stmt Rows:**")
+                    for _idx in _diag_inc.index:
+                        _v = _diag_inc.loc[_idx].iloc[0]
+                        _v_str = f"${_v:,.0f}" if pd.notna(_v) else "NaN"
+                        st.text(f"  {str(_idx):45s} = {_v_str}")
                 else:
                     st.text("  EMPTY!")
                 
