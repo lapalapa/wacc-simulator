@@ -1460,26 +1460,38 @@ def get_target_financials(ticker):
         rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision = \
             get_financial_data_with_priority(t, info, ticker_symbol=ticker)
         
-        # Fetch Interest Income for Financial Firms (to calc Net Interest Expense)
-        int_income = 0
+        # Fetch Interest on Deposits for Financial Firms
+        # ICR = PPNR / (Total Interest Expense - Interest on Deposits)
+        int_on_deposits = 0
         sector_str = str(info.get('sector', '')).lower()
         is_fin_check = 'financial' in sector_str or 'bank' in sector_str
         if is_fin_check:
-            # Try info_dict first
-            int_income = info.get('interestIncome', 0) or 0
-            if int_income == 0:
-                # Try quarterly sum
-                try:
-                    q_inc = t.quarterly_income_stmt
-                    if not q_inc.empty and q_inc.shape[1] >= 4:
-                        for qi in range(min(4, q_inc.shape[1])):
-                            ii_val = get_value_max_fuzzy(q_inc, qi, 
-                                ['Interest Income', 'Interest Income Non Operating'])
-                            int_income += ii_val
-                        if int_income > 0:
-                            logger.info(f"[Target] Interest Income from 4Q sum: ${int_income:,.0f}")
-                except Exception as e:
-                    logger.debug(f"Interest Income quarterly fetch failed: {e}")
+            try:
+                q_inc = t.quarterly_income_stmt
+                if not q_inc.empty and q_inc.shape[1] >= 4:
+                    # Search for Interest on Deposits row in quarterly data
+                    for qi in range(min(4, q_inc.shape[1])):
+                        iod_val = get_value_max_fuzzy(q_inc, qi, 
+                            ['Interest Expense On Deposits', 'Interest Paid On Deposits',
+                             'Interest On Deposits', 'Deposit Interest Expense'])
+                        int_on_deposits += iod_val
+                    if int_on_deposits > 0:
+                        logger.info(f"[Target] Interest on Deposits from 4Q sum: ${int_on_deposits:,.0f}")
+                    else:
+                        # Fallback: try annual statement
+                        a_inc = t.income_stmt
+                        if not a_inc.empty:
+                            # Try most recent non-NaN column
+                            for ci in range(min(3, a_inc.shape[1])):
+                                iod_val = get_value_max_fuzzy(a_inc, ci,
+                                    ['Interest Expense On Deposits', 'Interest Paid On Deposits',
+                                     'Interest On Deposits', 'Deposit Interest Expense'])
+                                if iod_val > 0:
+                                    int_on_deposits = iod_val
+                                    logger.info(f"[Target] Interest on Deposits from annual col {ci}: ${int_on_deposits:,.0f}")
+                                    break
+            except Exception as e:
+                logger.debug(f"Interest on Deposits fetch failed: {e}")
         
         mkt_cap = info.get('marketCap', 0)
         sector = sector_str
@@ -1538,9 +1550,10 @@ def get_target_financials(ticker):
         ebit_usd = ebit * fx_rate
         raw_pretax_usd = raw_pretax * fx_rate
         raw_provision_usd = raw_provision * fx_rate
-        int_income_usd = int_income * fx_rate
-        net_int_exp = max(int_exp - int_income, 0)
-        net_int_exp_usd = net_int_exp * fx_rate
+        int_on_deposits_usd = int_on_deposits * fx_rate
+        # Non-deposit interest = Total IE - Deposit Interest
+        non_deposit_int_exp = max(int_exp - int_on_deposits, 0)
+        non_deposit_int_exp_usd = non_deposit_int_exp * fx_rate
         
         if 'financial' in sector or 'bank' in sector: 
             category = "Financial Firms"
@@ -1552,8 +1565,8 @@ def get_target_financials(ticker):
         return {
             "int_exp": int_exp_usd, "ebit": ebit_usd, 
             "int_exp_local": int_exp, "ebit_local": ebit,
-            "int_income": int_income_usd, "int_income_local": int_income,
-            "net_int_exp": net_int_exp_usd, "net_int_exp_local": net_int_exp,
+            "int_on_deposits": int_on_deposits_usd, "int_on_deposits_local": int_on_deposits,
+            "non_deposit_int_exp": non_deposit_int_exp_usd, "non_deposit_int_exp_local": non_deposit_int_exp,
             "label_int": label_int, "label_ebit": label_ebit,
             "raw_pretax": raw_pretax_usd, "raw_provision": raw_provision_usd,
             "raw_pretax_local": raw_pretax, "raw_provision_local": raw_provision,
@@ -1566,8 +1579,8 @@ def get_target_financials(ticker):
         return {
             "int_exp": 0.0, "ebit": 0.0,
             "int_exp_local": 0.0, "ebit_local": 0.0,
-            "int_income": 0.0, "int_income_local": 0.0,
-            "net_int_exp": 0.0, "net_int_exp_local": 0.0,
+            "int_on_deposits": 0.0, "int_on_deposits_local": 0.0,
+            "non_deposit_int_exp": 0.0, "non_deposit_int_exp_local": 0.0,
             "label_int": "N/A", "label_ebit": "N/A", 
             "raw_pretax": 0, "raw_provision": 0, 
             "raw_pretax_local": 0, "raw_provision_local": 0,
@@ -1836,39 +1849,40 @@ with st.sidebar:
         
         # Interest Expense section (different for Financial vs Non-Financial)
         if is_fin_target:
-            # === FINANCIAL FIRMS: Show IE, II, Net IE, and PPNR ===
-            st.caption("🏦 *Financial Firm: ICR uses Net Interest Expense (IE - II)*")
+            # === FINANCIAL FIRMS ===
+            # ICR = PPNR / (Total IE - Interest on Deposits)
+            st.caption("🏦 *Financial Firm: ICR = PPNR / (Total IE − Interest on Deposits)*")
             
-            # Interest Expense (Gross)
+            # Total Interest Expense
             _ie_default = _fmt_dollar(tf['int_exp'])
             _ie_text = st.text_input(
-                "Interest Expense (USD)",
+                "Total Interest Expense (USD)",
                 value=_ie_default,
-                help="Total interest expense (includes deposit interest)"
+                help="Total interest expense (includes deposit interest + debt interest)"
             )
             int_exp_in = _parse_dollar(_ie_text, tf['int_exp'])
             st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')}")
             
-            # Interest Income
-            _ii_default = _fmt_dollar(tf.get('int_income', 0))
-            _ii_text = st.text_input(
-                "Interest Income (USD)",
-                value=_ii_default,
-                help="Total interest income (loan interest, securities income)"
+            # Interest on Deposits
+            _iod_default = _fmt_dollar(tf.get('int_on_deposits', 0))
+            _iod_text = st.text_input(
+                "(−) Interest on Deposits (USD)",
+                value=_iod_default,
+                help="Interest paid to depositors (operating cost for banks)"
             )
-            int_income_in = _parse_dollar(_ii_text, tf.get('int_income', 0))
-            st.caption(f"{_fmt_k(int_income_in)}")
+            int_on_deposits_in = _parse_dollar(_iod_text, tf.get('int_on_deposits', 0))
+            st.caption(f"{_fmt_k(int_on_deposits_in)}")
             
-            # Net Interest Expense (auto-calculated, editable)
-            _net_ie_calc = max(int_exp_in - int_income_in, 0)
-            _net_ie_default = _fmt_dollar(_net_ie_calc)
-            _net_ie_text = st.text_input(
-                "Net Interest Expense (USD) — *used for ICR*",
-                value=_net_ie_default,
-                help="IE - II (editable). This is used for ICR calculation."
+            # Non-Deposit Interest Expense (auto-calculated, editable) — used for ICR
+            _ndie_calc = max(int_exp_in - int_on_deposits_in, 0)
+            _ndie_default = _fmt_dollar(_ndie_calc)
+            _ndie_text = st.text_input(
+                "Non-Deposit Interest Exp (USD) — *used for ICR*",
+                value=_ndie_default,
+                help="Total IE − Interest on Deposits (editable)"
             )
-            net_int_exp_in = _parse_dollar(_net_ie_text, _net_ie_calc)
-            st.caption(f"{_fmt_k(net_int_exp_in)} = IE {_fmt_k(int_exp_in)} − II {_fmt_k(int_income_in)}")
+            non_deposit_ie_in = _parse_dollar(_ndie_text, _ndie_calc)
+            st.caption(f"{_fmt_k(non_deposit_ie_in)} = Total IE {_fmt_k(int_exp_in)} − Deposits {_fmt_k(int_on_deposits_in)}")
             
             # PPNR
             _ebit_default = _fmt_dollar(tf['ebit'])
@@ -1904,7 +1918,7 @@ with st.sidebar:
                 st.warning("Credit Losses Provision = $0 (Check if company reports this metric)")
             
             # For ICR calc later: use net_int_exp instead of gross int_exp
-            int_exp_for_icr = net_int_exp_in
+            int_exp_for_icr = non_deposit_ie_in
             
         else:
             # === NON-FINANCIAL FIRMS: Standard IE and EBIT ===
@@ -1982,6 +1996,8 @@ with st.sidebar:
             _d = st.session_state.get('target_fin', {})
             st.caption(f"**{target_ticker}** | {_d.get('country_name','?')} | Tax {_d.get('tax_rate',0):.1f}%")
             st.caption(f"EBIT ${_d.get('ebit',0):,.0f} | IntExp ${_d.get('int_exp',0):,.0f}")
+            if _d.get('int_on_deposits', 0) > 0:
+                st.caption(f"DepositInt ${_d.get('int_on_deposits',0):,.0f} | NonDepIE ${_d.get('non_deposit_int_exp',0):,.0f}")
             st.caption(f"Src: {_d.get('label_ebit','?')} | Cat: {_d.get('category','?')}")
             
             _di = {}
@@ -2322,7 +2338,7 @@ if 'result' in st.session_state:
         if category == "Financial Firms":
             st.caption(
                 f"Based on {category} Table from Damodaran. "
-                f"ICR = PPNR / **Net** Interest Exp = {ebit:,.0f} / {int_exp:,.0f}"
+                f"ICR = PPNR / (Total IE − Deposit Int) = {ebit:,.0f} / {int_exp:,.0f}"
             )
         else:
             st.caption(
