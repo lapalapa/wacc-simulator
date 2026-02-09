@@ -1461,6 +1461,61 @@ def get_target_financials(ticker):
         
         mkt_cap = info.get('marketCap', 0)
         sector = str(info.get('sector', '')).lower()
+        local_currency = info.get('currency', 'USD')
+        
+        # Get FX rate to USD (fiscal year average based on financial statement date)
+        fx_rate = 1.0
+        fx_basis = ""
+        if local_currency and local_currency != 'USD':
+            try:
+                fx_ticker = f"{local_currency}USD=X"
+                fx_data = yf.Ticker(fx_ticker)
+                
+                # Determine fiscal year period from label_ebit (e.g., "2025-06-30")
+                fy_end = None
+                try:
+                    fy_end = pd.to_datetime(label_ebit)
+                except:
+                    pass
+                
+                if fy_end:
+                    # Fiscal year: 12 months ending at label_ebit date
+                    fy_start = fy_end - pd.DateOffset(years=1) + pd.DateOffset(days=1)
+                    fx_hist = fx_data.history(start=fy_start.strftime('%Y-%m-%d'), 
+                                              end=(fy_end + pd.DateOffset(days=1)).strftime('%Y-%m-%d'))
+                    if not fx_hist.empty and len(fx_hist) > 20:
+                        fx_rate = float(fx_hist['Close'].mean())
+                        fx_basis = f"FY avg ({fy_start.strftime('%Y.%m')}–{fy_end.strftime('%Y.%m')}, {len(fx_hist)} days)"
+                        logger.info(f"[FX] {local_currency}->USD: {fx_rate:.4f} ({fx_basis})")
+                    else:
+                        # Fallback to 1Y average
+                        fx_hist = fx_data.history(period="1y")
+                        if not fx_hist.empty:
+                            fx_rate = float(fx_hist['Close'].mean())
+                            fx_basis = f"1Y avg ({len(fx_hist)} days)"
+                            logger.info(f"[FX] {local_currency}->USD: {fx_rate:.4f} (1Y fallback)")
+                else:
+                    # No date info — use 1Y average
+                    fx_hist = fx_data.history(period="1y")
+                    if not fx_hist.empty:
+                        fx_rate = float(fx_hist['Close'].mean())
+                        fx_basis = f"1Y avg ({len(fx_hist)} days)"
+                
+                if fx_rate == 1.0:
+                    # Last resort: spot rate
+                    fx_hist = fx_data.history(period="5d")
+                    if not fx_hist.empty:
+                        fx_rate = float(fx_hist['Close'].iloc[-1])
+                        fx_basis = "Spot (latest)"
+                        
+            except Exception as e:
+                logger.warning(f"[FX] Failed to get rate for {local_currency}: {e}")
+        
+        # Convert to USD
+        int_exp_usd = int_exp * fx_rate
+        ebit_usd = ebit * fx_rate
+        raw_pretax_usd = raw_pretax * fx_rate
+        raw_provision_usd = raw_provision * fx_rate
         
         if 'financial' in sector or 'bank' in sector: 
             category = "Financial Firms"
@@ -1470,18 +1525,25 @@ def get_target_financials(ticker):
             category = "Small/Risky Firms"
         
         return {
-            "int_exp": int_exp, "ebit": ebit, 
+            "int_exp": int_exp_usd, "ebit": ebit_usd, 
+            "int_exp_local": int_exp, "ebit_local": ebit,
             "label_int": label_int, "label_ebit": label_ebit,
-            "raw_pretax": raw_pretax, "raw_provision": raw_provision,
-            "category": category, "tax_rate": target_tax, "country_name": country
+            "raw_pretax": raw_pretax_usd, "raw_provision": raw_provision_usd,
+            "raw_pretax_local": raw_pretax, "raw_provision_local": raw_provision,
+            "category": category, "tax_rate": target_tax, "country_name": country,
+            "currency": local_currency, "fx_rate": fx_rate, "fx_basis": fx_basis,
         }
     except Exception as e:
         logger.error(f"Target financials fetch failed for {ticker}: {str(e)}")
         return {
             "int_exp": 0.0, "ebit": 0.0,
+            "int_exp_local": 0.0, "ebit_local": 0.0,
             "label_int": "N/A", "label_ebit": "N/A", 
-            "raw_pretax": 0, "raw_provision": 0, "category": "Small/Risky Firms", 
-            "tax_rate": 25.0, "country_name": "Unknown"
+            "raw_pretax": 0, "raw_provision": 0, 
+            "raw_pretax_local": 0, "raw_provision_local": 0,
+            "category": "Small/Risky Firms", 
+            "tax_rate": 25.0, "country_name": "Unknown",
+            "currency": "USD", "fx_rate": 1.0, "fx_basis": "",
         }
 
 # ==============================================================================
@@ -1706,14 +1768,46 @@ with st.sidebar:
         
         st.divider()
         is_fin_target = 'Financial' in tf['category'] or 'Bank' in tf['category']
-        ebit_label = "PPNR ($)" if is_fin_target else "EBIT ($)"
+        ebit_label = "PPNR" if is_fin_target else "EBIT"
         
         st.markdown("**Target Financials** (for Credit Spread)")
         
-        int_exp_in = st.number_input("Interest Expense ($)", value=float(tf['int_exp']), format="%.0f")
-        st.caption(f"Source: **{tf.get('label_int', 'N/A')}**")
+        # Currency & FX info
+        local_curr = tf.get('currency', 'USD')
+        fx = tf.get('fx_rate', 1.0)
+        is_foreign = local_curr != 'USD' and fx != 1.0
         
-        ebit_in = st.number_input(ebit_label, value=float(tf['ebit']), format="%.0f")
+        if is_foreign:
+            _fx_basis = tf.get('fx_basis', '')
+            st.caption(f"💱 {local_curr} → USD | Rate: **{fx:.4f}** | {_fx_basis}")
+        
+        # Helper: format in thousands with $ sign
+        def _fmt_k(val):
+            """Format value in $thousands with commas, preserving sign."""
+            v_k = val / 1000
+            if v_k < 0:
+                return f"-${abs(v_k):,.0f}k"
+            return f"${v_k:,.0f}k"
+        
+        # Interest Expense
+        int_exp_in = st.number_input(
+            f"Interest Expense (USD)", 
+            value=float(tf['int_exp']), format="%.0f",
+            help=f"{_fmt_k(tf['int_exp'])}" + (f" | Local: {local_curr} {tf.get('int_exp_local',0)/1000:,.0f}k" if is_foreign else "")
+        )
+        _ie_display = _fmt_k(tf['int_exp'])
+        if is_foreign:
+            _ie_local = tf.get('int_exp_local', 0)
+            st.caption(f"**{_ie_display}** · Source: {tf.get('label_int', 'N/A')} · Local: {local_curr} {_ie_local/1000:,.0f}k")
+        else:
+            st.caption(f"**{_ie_display}** · Source: {tf.get('label_int', 'N/A')}")
+        
+        # EBIT / PPNR
+        ebit_in = st.number_input(
+            f"{ebit_label} (USD)", 
+            value=float(tf['ebit']), format="%.0f",
+            help=f"{_fmt_k(tf['ebit'])}" + (f" | Local: {local_curr} {tf.get('ebit_local',0)/1000:,.0f}k" if is_foreign else "")
+        )
         
         # [NEW] VISIBLE BREAKDOWN
         if is_fin_target:
@@ -1723,11 +1817,11 @@ with st.sidebar:
             </style>
             """, unsafe_allow_html=True)
             st.markdown(
-                f"<div class='small-font'>• Pre-tax Income: <b>${tf.get('raw_pretax', 0):,.0f}</b></div>", 
+                f"<div class='small-font'>• Pre-tax Income: <b>{_fmt_k(tf.get('raw_pretax', 0))}</b></div>", 
                 unsafe_allow_html=True
             )
             st.markdown(
-                f"<div class='small-font'>• (+) Provision: <b>${tf.get('raw_provision', 0):,.0f}</b></div>", 
+                f"<div class='small-font'>• (+) Provision: <b>{_fmt_k(tf.get('raw_provision', 0))}</b></div>", 
                 unsafe_allow_html=True
             )
             st.markdown(
@@ -1735,13 +1829,17 @@ with st.sidebar:
                 unsafe_allow_html=True
             )
             
-            # Show TTM calculation details
             if tf.get('raw_provision', 0) > 0:
-                st.success(f"Credit Losses Provision detected: ${tf.get('raw_provision', 0):,.0f}")
+                st.success(f"Credit Losses Provision detected: {_fmt_k(tf.get('raw_provision', 0))}")
             else:
                 st.warning("Credit Losses Provision = $0 (Check if company reports this metric)")
         else:
-            st.caption(f"Source: **{tf.get('label_ebit', 'N/A')}**")
+            _ebit_display = _fmt_k(tf['ebit'])
+            if is_foreign:
+                _ebit_local = tf.get('ebit_local', 0)
+                st.caption(f"**{_ebit_display}** · Source: {tf.get('label_ebit', 'N/A')} · Local: {local_curr} {_ebit_local/1000:,.0f}k")
+            else:
+                st.caption(f"**{_ebit_display}** · Source: {tf.get('label_ebit', 'N/A')}")
         
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
