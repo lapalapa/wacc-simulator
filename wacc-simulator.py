@@ -1,42 +1,38 @@
 # ==============================================================================
 # Strategic WACC Simulator
-# Version: 1.4.0
+# Version: 1.5.0
 # Last Updated: 2025-02-09
 # 
 # Changelog:
+# v1.5.0 (2025-02-09)
+# - [NEW] 3-tier company profile fallback (fetch_company_profile_from_api):
+#   Phase 1: quoteSummary API (v10 JSON)
+#   Phase 2: Profile page HTML scraping (embedded JSON + text parsing)
+#   Phase 3: Quote page HTML scraping (last resort)
+# - [NEW] _extract_json_from_html(): root.App.main JSON + regex fragment extraction
+# - [NEW] _scrape_profile_from_text(): "headquartered in..." pattern with US state detection
+# - [FIX] safe_yf_info() now calls fetch_company_profile_from_api() when .info fails
+# - [FIX] Peer get_financials_latest(): no longer early-returns on empty info;
+#   tries fast_info + balance_sheet fallback for mkt_cap and debt
+# - [FIX] Target get_target_financials(): info={} fallback instead of early return
+#
 # v1.4.0 (2025-02-09)
 # - [NEW] fetch_financial_ttm_from_api(): single API call fetches both
 #   CreditLossesProvision AND PretaxIncome TTM from Yahoo Timeseries API
-#   (same endpoint as yfinance: query2.finance.yahoo.com/ws/fundamentals-timeseries)
-# - [REFACTOR] Priority logic now strictly follows:
-#   P1: Annual (Year-1) from yfinance income_stmt + API annual provision fallback
-#   P2: TTM from info_dict (rev/ebitda/int_exp) + API TTM (pretax/provision)
-#       No more quarterly loop in P2; API provides TTM directly
-#   P3: Sum of 4 most recent quarters from yfinance + API TTM fallback
-# - [FIX] 4x multiplication bug: TTM provision was returned per-quarter in loop
-#   extract_from_col() now uses yfinance-only provision (no API TTM)
-#   API TTM applied once at the priority level, outside loops
+# - [REFACTOR] Priority logic: P1 Annual -> P2 TTM (API) -> P3 Quarterly Sum
+# - [FIX] 4x multiplication bug in TTM provision
 #
 # v1.3.1 (2025-02-09)
-# - [FIX] NameError: Initialize final_spread, icr, implied_rating, category,
-#   target_fred_key, int_exp, ebit outside of 'if not df_init.empty:' block
-#   so Cost of Debt display section works even when peer data is empty
+# - [FIX] NameError: Initialize variables outside 'if not df_init.empty:' block
 #
 # v1.3.0 (2025-02-06)
 # - Added web scraping for Credit Losses Provision from Yahoo Finance HTML
-# - Fixed regex pattern for comma-separated numbers (3,091,000)
-# - Improved HTML parsing logic with cell-by-cell extraction
-# - Enhanced logging for debugging provision search
 #
 # v1.2.0 (2025-02-06)
 # - Added priority-based fuzzy search for provision keywords
-# - Implemented Cash Flow Statement fallback search
-# - Added comprehensive exclusion keywords (tax, changein, etc.)
 #
 # v1.1.0 (2025-02-06)
-# - Removed all UI emojis
-# - Fixed IndentationError and duplicate code blocks
-# - Enhanced error handling with logging
+# - Removed all UI emojis, Fixed IndentationError
 #
 # v1.0.0 (Initial)
 # - Core WACC calculation functionality
@@ -68,7 +64,7 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # Version display in sidebar
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 BUILD_DATE = "2025-02-09"
 
 # ==============================================================================
