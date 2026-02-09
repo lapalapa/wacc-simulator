@@ -2059,6 +2059,15 @@ with st.sidebar:
                             st.caption(f"  {_kr}: {'${:,.0f}'.format(_v) if pd.notna(_v) else 'NaN'}")
                         else:
                             st.caption(f"  {_kr}: ❌ NOT IN INDEX")
+                    
+                    # Dump ALL interest/deposit related rows
+                    _int_rows = [r for r in _dbg_inc.index 
+                                 if any(kw in str(r).lower() for kw in ['interest', 'deposit', 'net income'])]
+                    if _int_rows:
+                        st.caption("**All interest/deposit rows:**")
+                        for _ir in _int_rows:
+                            _v = _dbg_inc.loc[_ir].iloc[0]
+                            st.caption(f"  → {_ir}: {'${:,.0f}'.format(_v) if pd.notna(_v) else 'NaN'}")
                 else:
                     st.caption("income_stmt: **EMPTY**")
                 
