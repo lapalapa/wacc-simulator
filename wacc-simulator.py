@@ -71,281 +71,318 @@ BUILD_DATE = "2025-02-09"
 # [MODULE] Helper: Safe Fetcher with Retry
 # ==============================================================================
 def safe_yf_info(ticker_obj, max_retries=3):
-    """안전한 Yahoo Finance 정보 조회 (재시도 + API fallback 포함)
+    """안전한 Yahoo Finance 정보 조회 (재시도 + API fallback + 필드 보강)
     
     Strategy:
       1. Try yfinance .info (standard path) up to max_retries
-      2. If that fails, call Yahoo quoteSummary API directly (bypasses yfinance)
-      3. Return whatever we get (may be partial)
+      2. If .info fails entirely, call Yahoo API fallback
+      3. If .info succeeds but CRITICAL fields (country, sector) are missing,
+         call API fallback and MERGE results (API fills gaps, .info takes priority)
     """
+    CRITICAL_FIELDS = ['country', 'sector']
+    
+    info = {}
+    
     # Phase 1: Try yfinance .info
     for i in range(max_retries):
         try:
-            info = ticker_obj.info
-            if info and len(info) > 5:
-                return info
+            raw_info = ticker_obj.info
+            if raw_info and len(raw_info) > 5:
+                info = raw_info
+                break
         except Exception as e:
             if i == max_retries - 1:
                 logger.warning(f"Failed to fetch .info after {max_retries} attempts: {str(e)}")
         time.sleep(random.uniform(0.5, 1.5))
     
-    # Phase 2: Direct API fallback
+    # Check if critical fields are present
+    has_critical = all(info.get(f) for f in CRITICAL_FIELDS)
+    
+    if has_critical:
+        return info
+    
+    # Phase 2: API fallback (either .info failed entirely OR critical fields missing)
     ticker_str = getattr(ticker_obj, 'ticker', '')
     if ticker_str:
-        logger.info(f"[safe_yf_info] .info failed for {ticker_str}, trying direct API fallback...")
+        reason = "no .info data" if not info else f"missing {[f for f in CRITICAL_FIELDS if not info.get(f)]}"
+        logger.info(f"[safe_yf_info] {ticker_str}: {reason} -> trying API fallback...")
+        
         api_info = fetch_company_profile_from_api(ticker_str)
-        if api_info and len(api_info) > 3:
-            logger.info(f"[safe_yf_info] API fallback successful for {ticker_str} ({len(api_info)} fields)")
-            return api_info
+        
+        if api_info:
+            if info:
+                # Merge: API fills gaps, existing .info values take priority
+                merged = {**api_info, **{k: v for k, v in info.items() if v is not None and v != '' and v != 0}}
+                logger.info(f"[safe_yf_info] {ticker_str}: Merged .info ({len(info)} keys) + API ({len(api_info)} keys) -> {len(merged)} keys")
+                logger.info(f"[safe_yf_info] {ticker_str}: country={merged.get('country','N/A')}, sector={merged.get('sector','N/A')}")
+                return merged
+            elif len(api_info) > 3:
+                logger.info(f"[safe_yf_info] {ticker_str}: API fallback only ({len(api_info)} keys)")
+                return api_info
     
-    return {}
+    return info if info else {}
 
 # ==============================================================================
 # [MODULE] Helper: Yahoo Finance Company Profile Fetcher (3-tier fallback)
 # ==============================================================================
 # When yfinance .info fails (403, timeout, empty), we try multiple methods:
 #   1. quoteSummary API (v10) - direct JSON API
-#   2. Profile page HTML scraping - embedded JSON in <script> tags  
-#   3. Quote page HTML scraping - fallback embedded JSON
+#   2. Profile page HTML scraping with lxml XPath (user-provided XPath)  
+#   3. Profile page text/regex parsing (fallback)
 # ==============================================================================
 _profile_cache = {}
 
-def _extract_json_from_html(html_text):
+def _parse_profile_with_xpath(html_text, ticker):
     """
-    Yahoo Finance 페이지의 HTML에서 embedded JSON 데이터를 추출.
+    Yahoo Finance profile 페이지 HTML을 lxml XPath로 파싱하여 company 정보 추출.
     
-    Yahoo Finance는 서버사이드 렌더링 시 페이지 데이터를 <script> 태그 안에
-    JSON으로 포함합니다. 여러 패턴을 시도:
-      1. root.App.main = {...}  (legacy)
-      2. window.__PRELOADED_STATE__ (newer SPA)
-      3. "context":{"dispatcher":{"stores": {...}}} 패턴
+    Yahoo Finance profile page 구조 (2025-2026):
+      /html/body/div[1]/div[4]/main/section/section/section/section/section[2]/section[2]/div/div/div/
+        div[1] = 주소 1줄 (e.g., "4600 Silicon Drive")
+        div[2] = 시/주/ZIP (e.g., "Durham, NC 27703")  
+        div[3] = 국가 (e.g., "United States")  <-- user-provided XPath
+        
+      Sector/Industry는 같은 section 내 또는 nearby elements에 텍스트로 존재.
+    
+    Returns: dict with country, sector, industry, etc. or {} if parsing fails.
     """
-    import json as _json
+    try:
+        from lxml import etree
+    except ImportError:
+        logger.warning("[XPath] lxml not installed - skipping XPath parsing")
+        return {}
     
     result = {}
     
-    # Pattern 1: root.App.main (legacy Yahoo Finance)
-    pattern1 = re.compile(r'root\.App\.main\s*=\s*(\{.*?\})\s*;\s*\n', re.DOTALL)
-    match = pattern1.search(html_text)
-    if match:
-        try:
-            data = _json.loads(match.group(1))
-            stores = data.get("context", {}).get("dispatcher", {}).get("stores", {})
-            
-            # QuoteSummaryStore has everything
-            qss = stores.get("QuoteSummaryStore", {})
-            if qss:
-                profile = qss.get("assetProfile", {})
-                price = qss.get("price", {})
-                fin = qss.get("financialData", {})
-                stats = qss.get("defaultKeyStatistics", {})
-                
-                if profile:
-                    result["country"] = profile.get("country", "")
-                    result["sector"] = profile.get("sector", "")
-                    result["industry"] = profile.get("industry", "")
-                    result["industryKey"] = profile.get("industryKey", "")
-                if price:
-                    result["currency"] = price.get("currency", "USD")
-                    result["longName"] = price.get("longName", "")
-                    mc = price.get("marketCap", {})
-                    result["marketCap"] = mc.get("raw", 0) if isinstance(mc, dict) else mc
-                if fin:
-                    for k in ["totalRevenue","ebitda","totalDebt","operatingMargins","interestExpense"]:
-                        v = fin.get(k, {})
-                        result[k] = v.get("raw", 0) if isinstance(v, dict) else (v or 0)
-                if stats:
-                    shares = stats.get("sharesOutstanding", {})
-                    result["sharesOutstanding"] = shares.get("raw", 0) if isinstance(shares, dict) else (shares or 0)
-                
-                logger.info(f"[HTML Parse] Extracted {len([v for v in result.values() if v])} fields via root.App.main")
-                return result
-        except Exception as e:
-            logger.debug(f"[HTML Parse] root.App.main parse failed: {e}")
-    
-    # Pattern 2: Inline JSON blocks containing "assetProfile" or "country"
-    # Yahoo embeds data like: {"assetProfile":{"country":"United States",...}}
-    profile_patterns = [
-        re.compile(r'"assetProfile"\s*:\s*\{[^{}]*"country"\s*:\s*"([^"]+)"[^{}]*"sector"\s*:\s*"([^"]+)"'),
-        re.compile(r'"country"\s*:\s*"([^"]+)".*?"sector"\s*:\s*"([^"]+)"'),
-    ]
-    
-    for pat in profile_patterns:
-        match = pat.search(html_text)
-        if match:
-            result["country"] = match.group(1)
-            if match.lastindex >= 2:
-                result["sector"] = match.group(2)
-            logger.info(f"[HTML Parse] Regex extracted country={result.get('country')}")
-            break
-    
-    # Extract industry 
-    ind_match = re.search(r'"industry"\s*:\s*"([^"]+)"', html_text)
-    if ind_match:
-        result["industry"] = ind_match.group(1)
-    
-    ind_key_match = re.search(r'"industryKey"\s*:\s*"([^"]+)"', html_text)
-    if ind_key_match:
-        result["industryKey"] = ind_key_match.group(1)
-    
-    # Extract currency
-    curr_match = re.search(r'"currency"\s*:\s*"([A-Z]{3})"', html_text)
-    if curr_match:
-        result["currency"] = curr_match.group(1)
-    
-    # Extract longName
-    name_match = re.search(r'"longName"\s*:\s*"([^"]+)"', html_text)
-    if name_match:
-        result["longName"] = name_match.group(1)
-    
-    # Extract marketCap (look for raw value)
-    mc_match = re.search(r'"marketCap"\s*:\s*\{\s*"raw"\s*:\s*(\d+)', html_text)
-    if mc_match:
-        result["marketCap"] = int(mc_match.group(1))
-    
-    # Extract totalDebt
-    debt_match = re.search(r'"totalDebt"\s*:\s*\{\s*"raw"\s*:\s*(\d+)', html_text)
-    if debt_match:
-        result["totalDebt"] = int(debt_match.group(1))
-    
-    # Extract totalRevenue
-    rev_match = re.search(r'"totalRevenue"\s*:\s*\{\s*"raw"\s*:\s*(\d+)', html_text)
-    if rev_match:
-        result["totalRevenue"] = int(rev_match.group(1))
+    try:
+        # Parse HTML (lxml.html supports text_content())
+        from lxml.html import fromstring as html_fromstring
+        tree = html_fromstring(html_text)
+        
+        # ==================================================================
+        # XPath Strategy 1: Exact user-provided path for Country
+        # /html/body/div[1]/div[4]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[3]
+        # ==================================================================
+        country_xpaths = [
+            # User-provided exact XPath
+            '/html/body/div[1]/div[4]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[3]',
+            # Variations (Yahoo may adjust nesting)
+            '/html/body/div[1]/div[3]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[3]',
+            '/html/body/div[1]/div[5]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[3]',
+            # More flexible: find div[3] inside address-like block under main
+            '//main//section//section[2]//div/div/div/div[3]',
+        ]
+        
+        for xpath in country_xpaths:
+            try:
+                elements = tree.xpath(xpath)
+                if elements:
+                    country_text = elements[0].text_content().strip()
+                    # Validate it looks like a country name (not random content)
+                    if country_text and len(country_text) < 50 and not country_text.isdigit():
+                        result["country"] = country_text
+                        logger.info(f"[XPath] {ticker}: Country='{country_text}' via XPath: {xpath}")
+                        break
+            except Exception:
+                continue
+        
+        # ==================================================================
+        # XPath Strategy 2: Address block - also get city/state from div[2]
+        # ==================================================================
+        addr_xpaths = [
+            '/html/body/div[1]/div[4]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[2]',
+            '//main//section//section[2]//div/div/div/div[2]',
+        ]
+        for xpath in addr_xpaths:
+            try:
+                elements = tree.xpath(xpath)
+                if elements:
+                    addr_text = elements[0].text_content().strip()
+                    if addr_text:
+                        logger.info(f"[XPath] {ticker}: Address line='{addr_text}'")
+                    break
+            except Exception:
+                continue
+        
+        # ==================================================================
+        # XPath Strategy 3: Sector & Industry
+        # Usually in nearby elements: look for text containing "Sector" and "Industry"
+        # These appear as labels in the profile sidebar
+        # ==================================================================
+        
+        # Method A: Search all text nodes for "Sector :" / "Industry :" patterns
+        all_text = tree.xpath('//text()')
+        for i, t in enumerate(all_text):
+            t_stripped = t.strip()
+            if t_stripped == 'Sector':
+                # Next non-empty text should be the sector value
+                for j in range(i+1, min(i+5, len(all_text))):
+                    val = all_text[j].strip()
+                    if val and val != ':' and val != 'Sector':
+                        result["sector"] = val
+                        logger.info(f"[XPath] {ticker}: Sector='{val}'")
+                        break
+            elif t_stripped == 'Industry':
+                for j in range(i+1, min(i+5, len(all_text))):
+                    val = all_text[j].strip()
+                    if val and val != ':' and val != 'Industry':
+                        result["industry"] = val
+                        logger.info(f"[XPath] {ticker}: Industry='{val}'")
+                        break
+        
+        # Method B: XPath for common sector/industry containers
+        if not result.get("sector"):
+            sector_xpaths = [
+                '//a[contains(@href, "/sectors/")]//text()',
+                '//span[contains(text(),"Sector")]/following-sibling::*//text()',
+                '//dt[contains(text(),"Sector")]/following-sibling::dd//text()',
+            ]
+            for xpath in sector_xpaths:
+                try:
+                    vals = tree.xpath(xpath)
+                    for v in vals:
+                        v_s = v.strip()
+                        if v_s and v_s != 'Sector' and len(v_s) < 40:
+                            result["sector"] = v_s
+                            logger.info(f"[XPath] {ticker}: Sector='{v_s}' (href/sibling)")
+                            break
+                except Exception:
+                    continue
+                if result.get("sector"):
+                    break
+        
+        if not result.get("industry"):
+            industry_xpaths = [
+                '//a[contains(@href, "/industries/")]//text()',
+                '//span[contains(text(),"Industry")]/following-sibling::*//text()',
+                '//dt[contains(text(),"Industry")]/following-sibling::dd//text()',
+            ]
+            for xpath in industry_xpaths:
+                try:
+                    vals = tree.xpath(xpath)
+                    for v in vals:
+                        v_s = v.strip()
+                        if v_s and v_s != 'Industry' and len(v_s) < 60:
+                            result["industry"] = v_s
+                            logger.info(f"[XPath] {ticker}: Industry='{v_s}' (href/sibling)")
+                            break
+                except Exception:
+                    continue
+                if result.get("industry"):
+                    break
+        
+        # ==================================================================
+        # XPath Strategy 4: Company name from <h1> or title
+        # ==================================================================
+        if not result.get("longName"):
+            name_xpaths = [
+                '//h1//text()',
+                '//title//text()',
+            ]
+            for xpath in name_xpaths:
+                try:
+                    vals = tree.xpath(xpath)
+                    for v in vals:
+                        v_s = v.strip()
+                        if v_s and len(v_s) > 3 and ticker.upper() in v_s.upper():
+                            # Clean up: "Wolfspeed, Inc. (WOLF) Company Profile" -> "Wolfspeed, Inc."
+                            name = re.sub(r'\s*\(' + re.escape(ticker.upper()) + r'\).*', '', v_s).strip()
+                            if name:
+                                result["longName"] = name
+                                break
+                except Exception:
+                    continue
+                if result.get("longName"):
+                    break
+        
+        n_found = len([v for v in result.values() if v])
+        if n_found > 0:
+            logger.info(f"[XPath] {ticker}: Total {n_found} fields extracted")
+        
+    except Exception as e:
+        logger.warning(f"[XPath] {ticker}: Parse failed - {str(e)}")
     
     return result
 
-def _scrape_profile_from_text(text, ticker):
+
+def _parse_profile_with_regex(html_text, ticker):
     """
-    Yahoo Finance profile 페이지의 text 내용에서 HQ 정보를 텍스트 파싱으로 추출.
-    
-    Yahoo Finance profile 페이지에는 2가지 위치에 country 정보가 있음:
-    
-    1. 사이드바 주소 블록 (우측):
-       Wolfspeed, Inc.
-       4600 Silicon Drive
-       Durham, NC 27703
-       United States
-       
-       Sector: Technology
-       Industry: Semiconductors
-    
-    2. 회사 설명 텍스트:
-       "...is headquartered in Durham, North Carolina."
-       "...is based in Kranichfeld, Germany."
+    Regex/text-based fallback for extracting profile info from Yahoo Finance HTML.
+    Used when lxml XPath fails or returns incomplete data.
     """
     result = {}
     
-    # =====================================================================
-    # Strategy 1: Direct "Sector: X" / "Industry: X" pattern (sidebar)
-    # This is the most reliable when present in the HTML text
-    # =====================================================================
-    sector_match = re.search(r'Sector\s*:\s*([A-Za-z\s&]+?)(?:\n|$|<|Industry)', text)
-    if sector_match:
-        result["sector"] = sector_match.group(1).strip()
-        logger.info(f"[Text Parse] {ticker}: Sector='{result['sector']}' (direct match)")
+    # --- Embedded JSON extraction ---
+    import json as _json
     
-    industry_match = re.search(r'Industry\s*:\s*([A-Za-z\s&\-]+?)(?:\n|$|<|Full)', text)
-    if industry_match:
-        result["industry"] = industry_match.group(1).strip()
-        logger.info(f"[Text Parse] {ticker}: Industry='{result['industry']}'")
+    # Pattern 1: root.App.main (legacy)
+    pat1 = re.compile(r'root\.App\.main\s*=\s*(\{.*?\})\s*;\s*\n', re.DOTALL)
+    m = pat1.search(html_text)
+    if m:
+        try:
+            data = _json.loads(m.group(1))
+            qss = data.get("context", {}).get("dispatcher", {}).get("stores", {}).get("QuoteSummaryStore", {})
+            if qss:
+                profile = qss.get("assetProfile", {})
+                price = qss.get("price", {})
+                if profile.get("country"):
+                    result["country"] = profile["country"]
+                if profile.get("sector"):
+                    result["sector"] = profile["sector"]
+                if profile.get("industry"):
+                    result["industry"] = profile["industry"]
+                if price.get("currency"):
+                    result["currency"] = price["currency"]
+                if price.get("longName"):
+                    result["longName"] = price["longName"]
+                mc = price.get("marketCap", {})
+                if isinstance(mc, dict) and mc.get("raw"):
+                    result["marketCap"] = mc["raw"]
+                
+                if result.get("country"):
+                    logger.info(f"[Regex] {ticker}: Got {len(result)} fields via root.App.main JSON")
+                    return result
+        except Exception:
+            pass
     
-    # =====================================================================
-    # Strategy 2: Country name appearing as standalone line in address block
-    # The sidebar shows country on its own line after zip code
-    # =====================================================================
-    known_countries = {
-        "United States", "United Kingdom", "Canada", "Germany", "France", "Japan",
-        "China", "South Korea", "Taiwan", "Netherlands", "Switzerland", "Sweden",
-        "Ireland", "Israel", "India", "Australia", "Brazil", "Mexico", "Singapore",
-        "Hong Kong", "Italy", "Spain", "Belgium", "Denmark", "Norway", "Finland",
-        "Austria", "Luxembourg", "Portugal", "South Africa", "New Zealand",
-        "Thailand", "Indonesia", "Malaysia", "Philippines", "Vietnam",
-        "Saudi Arabia", "United Arab Emirates", "Turkey", "Russia", "Poland",
-        "Czech Republic", "Hungary", "Greece", "Argentina", "Chile", "Colombia",
-        "Peru", "Egypt", "Nigeria", "Kenya", "Pakistan", "Bangladesh",
-        "Bermuda", "Cayman Islands", "British Virgin Islands", "Jersey", "Guernsey",
-        "Isle of Man", "Puerto Rico", "Curacao",
+    # Pattern 2: Direct JSON fragments
+    json_patterns = {
+        "country": re.compile(r'"country"\s*:\s*"([^"]+)"'),
+        "sector": re.compile(r'"sector"\s*:\s*"([^"]+)"'),
+        "industry": re.compile(r'"industry"\s*:\s*"([^"]+)"'),
+        "currency": re.compile(r'"currency"\s*:\s*"([A-Z]{3})"'),
+        "longName": re.compile(r'"longName"\s*:\s*"([^"]+)"'),
     }
     
-    for country in known_countries:
-        # Look for country name as standalone text (not inside a longer word)
-        # Patterns: "United States\n", "United States<", ">United States<", "\nUnited States\n"
-        patterns = [
-            re.compile(r'(?:^|\n|>)\s*' + re.escape(country) + r'\s*(?:\n|$|<)', re.MULTILINE),
-            re.compile(r'[\s>]' + re.escape(country) + r'[\s<\n]'),
-        ]
-        for pat in patterns:
-            if pat.search(text):
-                result["country"] = country
-                logger.info(f"[Text Parse] {ticker}: Country='{country}' (address block match)")
-                break
-        if result.get("country"):
-            break
+    for field, pat in json_patterns.items():
+        if not result.get(field):
+            m = pat.search(html_text)
+            if m:
+                result[field] = m.group(1)
     
-    # =====================================================================
-    # Strategy 3: "headquartered in" / "is based in" pattern (description)
-    # =====================================================================
+    # Pattern 3: "headquartered in" text
     if not result.get("country"):
-        hq_patterns = [
-            re.compile(r'(?:headquartered|based)\s+in\s+([^.]+?)\.', re.IGNORECASE),
-        ]
-        
-        for pat in hq_patterns:
-            match = pat.search(text)
-            if match:
-                hq_str = match.group(1).strip()
-                parts = [p.strip() for p in hq_str.split(",")]
-                
-                if len(parts) >= 2:
-                    last_part = parts[-1].strip()
-                    us_states = {
-                        "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
-                        "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
-                        "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
-                        "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
-                        "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
-                        "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
-                        "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
-                        "Wisconsin","Wyoming","District of Columbia"
-                    }
-                    if last_part in us_states:
-                        result["country"] = "United States"
-                    else:
-                        result["country"] = last_part
-                    
-                    logger.info(f"[Text Parse] {ticker}: HQ='{hq_str}' -> country='{result['country']}'")
-                break
+        hq_match = re.search(r'(?:headquartered|based)\s+in\s+([^.]+?)\.', html_text, re.IGNORECASE)
+        if hq_match:
+            hq_str = hq_match.group(1).strip()
+            parts = [p.strip() for p in hq_str.split(",")]
+            if len(parts) >= 2:
+                last = parts[-1].strip()
+                us_states = {
+                    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
+                    "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+                    "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
+                    "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
+                    "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
+                    "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
+                    "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
+                    "Wisconsin","Wyoming","District of Columbia"
+                }
+                result["country"] = "United States" if last in us_states else last
+                logger.info(f"[Regex] {ticker}: HQ='{hq_str}' -> country='{result['country']}'")
     
-    # =====================================================================
-    # Strategy 4: Sector from description keywords (fallback if no direct match)
-    # =====================================================================
-    if not result.get("sector"):
-        text_lower = text.lower()
-        sector_keywords = {
-            "semiconductor": "Technology",
-            "software": "Technology",
-            "financial services": "Financial Services",
-            "banking": "Financial Services",
-            "insurance": "Financial Services",
-            "pharmaceutical": "Healthcare",
-            "biotechnology": "Healthcare",
-            "energy": "Energy",
-            "oil and gas": "Energy",
-            "real estate": "Real Estate",
-            "consumer": "Consumer Cyclical",
-            "automotive": "Consumer Cyclical",
-            "industrial": "Industrials",
-            "telecommunications": "Communication Services",
-            "utility": "Utilities",
-            "mining": "Basic Materials",
-            "chemical": "Basic Materials",
-        }
-        
-        for kw, sector in sector_keywords.items():
-            if kw in text_lower:
-                result["sector"] = sector
-                break
+    if result:
+        logger.info(f"[Regex] {ticker}: Got {len([v for v in result.values() if v])} fields via regex")
     
     return result
 
@@ -355,9 +392,9 @@ def fetch_company_profile_from_api(ticker):
     Yahoo Finance에서 회사 프로필 (country, sector, marketCap 등) 조회.
     
     3단계 fallback:
-      1. quoteSummary API (v10) - 가장 빠르고 정확
-      2. Profile 페이지 HTML 스크래핑 - embedded JSON 추출  
-      3. Profile 페이지 텍스트 파싱 - "headquartered in..." 패턴
+      1. quoteSummary API (v10) - 가장 빠르고 정확한 JSON API
+      2. Profile page XPath parsing (lxml) - user-provided XPath로 DOM 파싱
+      3. Profile page regex/text parsing - embedded JSON + "headquartered in" 패턴
     
     Returns: dict matching yfinance .info format, or {} if all fail.
     """
@@ -432,66 +469,53 @@ def fetch_company_profile_from_api(ticker):
     time.sleep(random.uniform(0.5, 1.0))
     
     # =========================================================================
-    # Phase 2: Profile page HTML scraping (embedded JSON extraction)
+    # Phase 2 & 3: Profile page HTML scraping (XPath + Regex fallback)
     # =========================================================================
-    try:
-        profile_url = f"https://finance.yahoo.com/quote/{cache_key}/profile/"
-        logger.info(f"[Profile] Phase 2: HTML scraping {profile_url}...")
-        
-        r = requests.get(profile_url, headers=headers, timeout=15, verify=False)
-        if r.status_code == 200 and len(r.text) > 1000:
-            # Try JSON extraction from HTML
-            html_result = _extract_json_from_html(r.text)
-            if html_result:
-                result.update({k: v for k, v in html_result.items() if v})
+    profile_urls = [
+        f"https://finance.yahoo.com/quote/{cache_key}/profile/",
+        f"https://finance.yahoo.com/quote/{cache_key}/",
+    ]
+    
+    for url_idx, profile_url in enumerate(profile_urls):
+        phase = url_idx + 2
+        try:
+            logger.info(f"[Profile] Phase {phase}: Scraping {profile_url}...")
+            r = requests.get(profile_url, headers=headers, timeout=15, verify=False)
             
-            # Try text-based parsing as supplement
-            text_result = _scrape_profile_from_text(r.text, cache_key)
-            if text_result:
-                # Only fill in missing fields
-                for k, v in text_result.items():
+            if r.status_code != 200 or len(r.text) < 1000:
+                logger.warning(f"[Profile] Phase {phase}: HTTP {r.status_code}, len={len(r.text)}")
+                continue
+            
+            html_text = r.text
+            
+            # Try XPath parsing first (most precise with user-provided path)
+            xpath_result = _parse_profile_with_xpath(html_text, cache_key)
+            if xpath_result:
+                result.update({k: v for k, v in xpath_result.items() if v})
+            
+            # Supplement with regex parsing (fills gaps)
+            regex_result = _parse_profile_with_regex(html_text, cache_key)
+            if regex_result:
+                for k, v in regex_result.items():
                     if v and not result.get(k):
                         result[k] = v
             
             if result.get("country"):
-                logger.info(f"[Profile] Phase 2 SUCCESS: {cache_key} country={result['country']}")
+                logger.info(f"[Profile] Phase {phase} SUCCESS: {cache_key} country={result['country']}, sector={result.get('sector','N/A')}")
                 _profile_cache[cache_key] = result
                 return result
-    except Exception as e:
-        logger.warning(f"[Profile] Phase 2 failed for {cache_key}: {str(e)}")
-    
-    time.sleep(random.uniform(0.5, 1.0))
-    
-    # =========================================================================
-    # Phase 3: Main quote page HTML scraping (last resort)
-    # =========================================================================
-    try:
-        quote_url = f"https://finance.yahoo.com/quote/{cache_key}/"
-        logger.info(f"[Profile] Phase 3: Quote page scraping {quote_url}...")
+                
+        except Exception as e:
+            logger.warning(f"[Profile] Phase {phase} failed for {cache_key}: {str(e)}")
         
-        r = requests.get(quote_url, headers=headers, timeout=15, verify=False)
-        if r.status_code == 200 and len(r.text) > 1000:
-            html_result = _extract_json_from_html(r.text)
-            if html_result:
-                result.update({k: v for k, v in html_result.items() if v})
-            
-            text_result = _scrape_profile_from_text(r.text, cache_key)
-            if text_result:
-                for k, v in text_result.items():
-                    if v and not result.get(k):
-                        result[k] = v
-            
-            if result.get("country"):
-                logger.info(f"[Profile] Phase 3 SUCCESS: {cache_key} country={result['country']}")
-    except Exception as e:
-        logger.warning(f"[Profile] Phase 3 failed for {cache_key}: {str(e)}")
+        time.sleep(random.uniform(0.5, 1.0))
     
+    # Final: cache whatever we got
     n_keys = len([v for v in result.values() if v])
     if n_keys > 0:
-        logger.info(f"[Profile] {cache_key}: Got {n_keys} fields total "
-                    f"(country={result.get('country', 'N/A')}, sector={result.get('sector', 'N/A')})")
+        logger.info(f"[Profile] {cache_key}: Partial result ({n_keys} fields)")
     else:
-        logger.warning(f"[Profile] {cache_key}: All 3 phases failed - no profile data")
+        logger.warning(f"[Profile] {cache_key}: All phases failed - no profile data")
     
     _profile_cache[cache_key] = result
     return result
