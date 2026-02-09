@@ -1,9 +1,14 @@
 # ==============================================================================
 # Strategic WACC Simulator
-# Version: 1.3.0
-# Last Updated: 2025-02-06
+# Version: 1.3.1
+# Last Updated: 2025-02-09
 # 
 # Changelog:
+# v1.3.1 (2025-02-09)
+# - [FIX] NameError: Initialize final_spread, icr, implied_rating, category,
+#   target_fred_key, int_exp, ebit outside of 'if not df_init.empty:' block
+#   so Cost of Debt display section works even when peer data is empty
+#
 # v1.3.0 (2025-02-06)
 # - Added web scraping for Credit Losses Provision from Yahoo Finance HTML
 # - Fixed regex pattern for comma-separated numbers (3,091,000)
@@ -50,8 +55,8 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # Version display in sidebar
-VERSION = "1.3.0"
-BUILD_DATE = "2025-02-06"
+VERSION = "1.3.1"
+BUILD_DATE = "2025-02-09"
 
 # ==============================================================================
 # [MODULE] Helper: Safe Fetcher with Retry
@@ -152,7 +157,7 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, d
             # Exclusion Check
             if any(ex in norm_idx_str for ex in exclusions):
                 if debug_provision and 'provision' in norm_idx_str:
-                    debug_matches.append(f"    ❌ EXCLUDED by keyword: {[ex for ex in exclusions if ex in norm_idx_str]}")
+                    debug_matches.append(f"    EXCLUDED by keyword: {[ex for ex in exclusions if ex in norm_idx_str]}")
                 continue
 
             # 2. Check Keywords
@@ -166,9 +171,9 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, d
                         if pd.notna(val) and val != 0:
                             candidates.append(abs(val))
                             if debug_provision:
-                                debug_matches.append(f"    ✓ MATCHED '{norm_kw}' -> Value: {abs(val):,.0f}")
+                                debug_matches.append(f"    MATCHED '{norm_kw}' -> Value: {abs(val):,.0f}")
                         elif debug_provision:
-                            debug_matches.append(f"    ⚠ MATCHED '{norm_kw}' but value is 0 or NaN")
+                            debug_matches.append(f"    MATCHED '{norm_kw}' but value is 0 or NaN")
                     except Exception as e:
                         logger.debug(f"Value extraction failed: {str(e)}")
                     break 
@@ -466,7 +471,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
         logger.info(f"Quarterly Cash Flow: {'Loaded' if not q_cf.empty else 'Empty'} (shape: {q_cf.shape if not q_cf.empty else 'N/A'})")
         
         if is_financial and q_cf.empty:
-            logger.warning("⚠ Financial company but Quarterly Cash Flow is EMPTY - Provision search may fail!")
+            logger.warning("Financial company but Quarterly Cash Flow is EMPTY - Provision search may fail!")
 
         # [STEP 0] GHOST COLUMN ERASER
         if not q_fin.empty:
@@ -536,7 +541,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                         df_cf, col_idx_cf, provision_keywords, exclusion_keywords
                     )
                     if p_prov > 0:
-                        logger.info(f"✓ Found provision in Cash Flow: ${p_prov:,.0f}")
+                        logger.info(f"Found provision in Cash Flow: ${p_prov:,.0f}")
                 
                 # 2. If not found in CF, try Income Statement
                 if p_prov == 0:
@@ -545,9 +550,9 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
                         df, col_idx, provision_keywords, exclusion_keywords
                     )
                     if p_prov > 0:
-                        logger.info(f"✓ Found provision in Income Statement: ${p_prov:,.0f}")
+                        logger.info(f"Found provision in Income Statement: ${p_prov:,.0f}")
                     else:
-                        logger.warning("⚠ Provision not found in either statement")
+                        logger.warning("Provision not found in either statement")
                 
                 if p_tax != 0: 
                     val_e = p_tax + abs(p_prov)
@@ -668,6 +673,9 @@ def get_financial_data_with_priority(ticker_obj, info_dict):
             ebitda = 0
             int_exp = 0
             ebit = 0
+            # [FIX v1.3.1] Reset accumulators before Priority 3 loop
+            raw_pretax = 0
+            raw_provision = 0
             
             for q_idx in range(4):
                 cf_idx = q_idx if recent_4_cf is not None else None
@@ -1027,9 +1035,9 @@ with st.sidebar:
             
             # Show TTM calculation details
             if tf.get('raw_provision', 0) > 0:
-                st.success(f"✓ Credit Losses Provision detected: ${tf.get('raw_provision', 0):,.0f}")
+                st.success(f"Credit Losses Provision detected: ${tf.get('raw_provision', 0):,.0f}")
             else:
-                st.warning("⚠ Credit Losses Provision = $0 (Check if company reports this metric)")
+                st.warning("Credit Losses Provision = $0 (Check if company reports this metric)")
         else:
             st.caption(f"Source: **{tf.get('label_ebit', 'N/A')}**")
         
@@ -1067,7 +1075,7 @@ with st.sidebar:
     
     # Version and Contact Information
     st.divider()
-    st.caption("**Version:** v1.3.0 (Feb 2026)")
+    st.caption("**Version:** v1.3.1 (Feb 2026)")
     st.caption("**Point of Contact:** jonghyun.yang.5105@gmail.com")
     
     # Version info at bottom
@@ -1102,8 +1110,20 @@ if 'result' in st.session_state:
     target_de = 0
     sel_dtic = 0
 
+    # [FIX v1.3.1] Initialize variables that are used in Cost of Debt display section
+    # These are computed inside 'if not df_init.empty:' but referenced outside it.
+    # Without this, NameError occurs when df_init is empty (no valid peer data).
+    final_spread = 0.0
+    icr = 0.0
+    implied_rating = "N/A"
+    implied_spread_val = 0.0
+    category = inp.get('category', "Small/Risky Firms")
+    target_fred_key = "N/A"
+    int_exp = inp.get('int_exp', 0.0)
+    ebit = inp.get('ebit', 0.0)
+
     if res.get('errors'):
-        st.error("⚠️ The following peers were excluded due to missing critical data (Strict Validation):")
+        st.error("The following peers were excluded due to missing critical data (Strict Validation):")
         for e in res['errors']: 
             st.write(f"- {e}")
 
