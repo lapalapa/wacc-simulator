@@ -1891,14 +1891,18 @@ with st.sidebar:
             st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')}")
             
             # Interest on Deposits
-            _iod_default = _fmt_dollar(tf.get('int_on_deposits', 0))
+            _iod_val = tf.get('int_on_deposits', 0)
+            _iod_default = _fmt_dollar(_iod_val)
             _iod_text = st.text_input(
                 "(−) Interest on Deposits (USD)",
                 value=_iod_default,
-                help="Interest paid to depositors (operating cost for banks)"
+                help="Interest paid to depositors (operating cost for banks). Often not available via API — enter manually from 10-K/Annual Report."
             )
-            int_on_deposits_in = _parse_dollar(_iod_text, tf.get('int_on_deposits', 0))
-            st.caption(f"{_fmt_k(int_on_deposits_in)}")
+            int_on_deposits_in = _parse_dollar(_iod_text, _iod_val)
+            if int_on_deposits_in == 0 and int_exp_in > 0:
+                st.warning("⚠️ Interest on Deposits = $0. This line item is often unavailable via Yahoo Finance API. Please enter manually from the company's 10-K or Annual Report.")
+            else:
+                st.caption(f"{_fmt_k(int_on_deposits_in)}")
             
             # Non-Deposit Interest Expense (auto-calculated, editable) — used for ICR
             _ndie_calc = max(int_exp_in - int_on_deposits_in, 0)
@@ -2064,10 +2068,21 @@ with st.sidebar:
                     _int_rows = [r for r in _dbg_inc.index 
                                  if any(kw in str(r).lower() for kw in ['interest', 'deposit', 'net income'])]
                     if _int_rows:
-                        st.caption("**All interest/deposit rows:**")
+                        st.caption("**All interest/deposit rows (Annual):**")
                         for _ir in _int_rows:
                             _v = _dbg_inc.loc[_ir].iloc[0]
                             st.caption(f"  → {_ir}: {'${:,.0f}'.format(_v) if pd.notna(_v) else 'NaN'}")
+                    
+                    # Also check quarterly for deposit-specific rows
+                    _dbg_q = _dbg_t.quarterly_income_stmt
+                    if not _dbg_q.empty:
+                        _q_dep_rows = [r for r in _dbg_q.index 
+                                       if 'deposit' in str(r).lower()]
+                        if _q_dep_rows:
+                            st.caption("**Quarterly deposit rows found:**")
+                            for _qr in _q_dep_rows:
+                                _v = _dbg_q.loc[_qr].iloc[0]
+                                st.caption(f"  → {_qr}: {'${:,.0f}'.format(_v) if pd.notna(_v) else 'NaN'}")
                 else:
                     st.caption("income_stmt: **EMPTY**")
                 
