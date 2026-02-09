@@ -1147,6 +1147,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         ['Operating Income', 'Operating Profit'], 
                         exclusion_keywords=['EBITDA', 'Normalized EBITDA', 'Non Operating'],
                         keep_sign=True)
+                
+                logger.info(f"[extract_from_col] col={col_idx}: EBIT={val_e:,.0f}, EBITDA={ed:,.0f}, Rev={r:,.0f}, IntExp={i:,.0f}")
             
             return r, val_e, ed, i, p_tax, abs(p_prov)
 
@@ -1699,6 +1701,89 @@ with st.sidebar:
                 st.warning("Credit Losses Provision = $0 (Check if company reports this metric)")
         else:
             st.caption(f"Source: **{tf.get('label_ebit', 'N/A')}**")
+        
+        # === DIAGNOSTIC EXPANDER ===
+        with st.expander("🔍 Debug: Raw Financial Data", expanded=False):
+            st.caption(f"Ticker: {target_ticker}")
+            try:
+                _diag_t = yf.Ticker(target_ticker)
+                
+                # 1. info dict diagnosis
+                _diag_info = {}
+                try:
+                    _diag_info = _diag_t.info or {}
+                except:
+                    pass
+                st.markdown("**info dict:**")
+                st.text(f"  country: {_diag_info.get('country', 'MISSING')}")
+                st.text(f"  sector: {_diag_info.get('sector', 'MISSING')}")
+                st.text(f"  operatingMargins: {_diag_info.get('operatingMargins', 'MISSING')}")
+                st.text(f"  totalRevenue: {_diag_info.get('totalRevenue', 'MISSING')}")
+                st.text(f"  ebitda: {_diag_info.get('ebitda', 'MISSING')}")
+                st.text(f"  marketCap: {_diag_info.get('marketCap', 'MISSING')}")
+                st.text(f"  # keys: {len(_diag_info)}")
+                
+                # 2. Profile API fallback diagnosis
+                st.markdown("**Profile API fallback:**")
+                _api_result = fetch_company_profile_from_api(target_ticker)
+                st.text(f"  country: {_api_result.get('country', 'MISSING')}")
+                st.text(f"  sector: {_api_result.get('sector', 'MISSING')}")
+                st.text(f"  # keys: {len(_api_result)}")
+                
+                # 3. Income Statement EBIT diagnosis
+                st.markdown("**Annual Income Stmt (Year-1):**")
+                _diag_inc = _diag_t.income_stmt
+                if not _diag_inc.empty:
+                    _col0_date = _diag_inc.columns[0].strftime('%Y-%m-%d')
+                    st.text(f"  Latest: {_col0_date}")
+                    for _idx in _diag_inc.index:
+                        _norm = str(_idx).lower().replace(" ", "")
+                        if any(kw in _norm for kw in ['ebit', 'operatingincome', 'interestexpense', 'totalrevenue', 'pretaxincome']):
+                            if 'ebitda' not in _norm and 'normalizedebitda' not in _norm:
+                                _v = _diag_inc.loc[_idx].iloc[0]
+                                _v_str = f"${_v:,.0f}" if pd.notna(_v) else "NaN"
+                                st.text(f"  {str(_idx):35s} = {_v_str}")
+                else:
+                    st.text("  EMPTY!")
+                
+                # 4. Quarterly EBIT sum
+                st.markdown("**Quarterly (TTM = sum of 4Q):**")
+                _diag_q = _diag_t.quarterly_income_stmt
+                if not _diag_q.empty and _diag_q.shape[1] >= 4:
+                    _q_dates = [c.strftime('%Y-%m-%d') for c in _diag_q.columns[:4]]
+                    st.text(f"  Quarters: {_q_dates}")
+                    _ebit_sum = 0
+                    _oi_sum = 0
+                    _int_sum = 0
+                    for _qi in range(4):
+                        for _idx in _diag_q.index:
+                            _v = _diag_q.loc[_idx].iloc[_qi]
+                            if pd.notna(_v):
+                                if str(_idx).strip() == 'EBIT':
+                                    _ebit_sum += _v
+                                if 'Operating Income' in str(_idx) and 'Non' not in str(_idx):
+                                    _oi_sum += _v
+                                if 'Interest Expense' in str(_idx):
+                                    _int_sum += _v
+                    st.text(f"  EBIT (TTM):             ${_ebit_sum:,.0f}")
+                    st.text(f"  Operating Income (TTM): ${_oi_sum:,.0f}")
+                    st.text(f"  Interest Expense (TTM): ${_int_sum:,.0f}")
+                    if _ebit_sum != _oi_sum:
+                        st.warning(f"⚠️ EBIT ≠ Operating Income! Diff: ${_ebit_sum - _oi_sum:,.0f}")
+                else:
+                    st.text("  Not enough quarters!")
+                
+                # 5. What the code actually returned
+                st.markdown("**Code output (tf dict):**")
+                st.text(f"  ebit:        ${tf.get('ebit', 0):,.0f}")
+                st.text(f"  int_exp:     ${tf.get('int_exp', 0):,.0f}")
+                st.text(f"  label_ebit:  {tf.get('label_ebit', 'N/A')}")
+                st.text(f"  label_int:   {tf.get('label_int', 'N/A')}")
+                st.text(f"  country:     {tf.get('country_name', 'Unknown')}")
+                st.text(f"  category:    {tf.get('category', 'N/A')}")
+                st.text(f"  tax_rate:    {tf.get('tax_rate', 0)}")
+            except Exception as _diag_e:
+                st.error(f"Diagnostic error: {_diag_e}")
         
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
