@@ -590,6 +590,9 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     Priority Logic v125.1 (Restored Normalization Logic):
     Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
     
+    - ebit: Yahoo-style EBIT (includes unusual items) - used for both sidebar and ICR
+    - For financial companies: PPNR = Pretax + abs(Provision)
+    
     1. Annual (Year-1)
     2. Yahoo Info TTM
     3. Calc TTM (Manual Sum)
@@ -658,6 +661,11 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
         # Helper: extract values from a single column of a statement
         def extract_from_col(df, col_idx, df_cf=None, col_idx_cf=None):
             """Extract rev, ebit, ebitda, int_exp, pretax, provision from one column.
+            
+            - For non-financial: EBIT from Yahoo's EBIT row (includes unusual items).
+              Falls back to Operating Income if EBIT row not found.
+            - For financial: PPNR = Pretax + abs(Provision)
+            
             Provision uses yfinance fuzzy search only (NOT API TTM).
             API TTM is applied at the priority level, not per-column."""
             r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
@@ -707,7 +715,17 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     val_e = p_tax + abs(p_prov)
             
             if val_e == 0:
-                val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'], keep_sign=True)
+                # Use Yahoo-style EBIT (includes unusual items) as standard
+                val_e = get_value_max_fuzzy(df, col_idx, 
+                    ['EBIT'], 
+                    exclusion_keywords=['EBITDA', 'Normalized EBITDA'],
+                    keep_sign=True)
+                # Fallback to Operating Income if no EBIT row
+                if val_e == 0:
+                    val_e = get_value_max_fuzzy(df, col_idx, 
+                        ['Operating Income', 'Operating Profit'], 
+                        exclusion_keywords=['EBITDA', 'Normalized EBITDA', 'Non Operating'],
+                        keep_sign=True)
             
             return r, val_e, ed, i, p_tax, abs(p_prov)
 
@@ -961,7 +979,8 @@ def get_target_financials(ticker):
         if not info:
             logger.warning(f"No info available for {ticker}")
             return {
-                "int_exp": 0.0, "ebit": 0.0, "label_int": "N/A", "label_ebit": "N/A", 
+                "int_exp": 0.0, "ebit": 0.0,
+                "label_int": "N/A", "label_ebit": "N/A", 
                 "raw_pretax": 0, "raw_provision": 0, "category": "Small/Risky Firms", 
                 "tax_rate": 25.0, "country_name": "Unknown"
             }
@@ -1000,7 +1019,8 @@ def get_target_financials(ticker):
     except Exception as e:
         logger.error(f"Target financials fetch failed for {ticker}: {str(e)}")
         return {
-            "int_exp": 0.0, "ebit": 0.0, "label_int": "N/A", "label_ebit": "N/A", 
+            "int_exp": 0.0, "ebit": 0.0,
+            "label_int": "N/A", "label_ebit": "N/A", 
             "raw_pretax": 0, "raw_provision": 0, "category": "Small/Risky Firms", 
             "tax_rate": 25.0, "country_name": "Unknown"
         }
