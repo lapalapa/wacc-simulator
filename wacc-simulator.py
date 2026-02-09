@@ -1781,7 +1781,22 @@ with st.sidebar:
             _fx_basis = tf.get('fx_basis', '')
             st.caption(f"💱 {local_curr} → USD | Rate: **{fx:.4f}** | {_fx_basis}")
         
-        # Helper: format in thousands with $ sign
+        # Helper: format dollar value with commas (full dollars, not thousands)
+        def _fmt_dollar(val):
+            """Format value as $-1,303,700,000 style."""
+            if val < 0:
+                return f"-${abs(val):,.0f}"
+            return f"${val:,.0f}"
+        
+        def _parse_dollar(text, fallback=0.0):
+            """Parse formatted dollar string back to float."""
+            try:
+                cleaned = text.replace('$', '').replace(',', '').replace(' ', '')
+                return float(cleaned)
+            except:
+                return fallback
+        
+        # Helper: format in thousands with $ sign (for captions)
         def _fmt_k(val):
             """Format value in $thousands with commas, preserving sign."""
             v_k = val / 1000
@@ -1790,24 +1805,27 @@ with st.sidebar:
             return f"${v_k:,.0f}k"
         
         # Interest Expense
-        int_exp_in = st.number_input(
-            f"Interest Expense (USD)", 
-            value=float(tf['int_exp']), format="%.0f",
-            help=f"{_fmt_k(tf['int_exp'])}" + (f" | Local: {local_curr} {tf.get('int_exp_local',0)/1000:,.0f}k" if is_foreign else "")
+        _ie_default = _fmt_dollar(tf['int_exp'])
+        _ie_text = st.text_input(
+            "Interest Expense (USD)",
+            value=_ie_default,
+            help="Enter with $ and commas (e.g. $315,200,000)" + (f" | Local: {local_curr} {_fmt_dollar(tf.get('int_exp_local',0))}" if is_foreign else "")
         )
-        _ie_display = _fmt_k(tf['int_exp'])
+        int_exp_in = _parse_dollar(_ie_text, tf['int_exp'])
         if is_foreign:
             _ie_local = tf.get('int_exp_local', 0)
-            st.caption(f"**{_ie_display}** · Source: {tf.get('label_int', 'N/A')} · Local: {local_curr} {_ie_local/1000:,.0f}k")
+            st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')} · Local: {local_curr} {_fmt_k(_ie_local)}")
         else:
-            st.caption(f"**{_ie_display}** · Source: {tf.get('label_int', 'N/A')}")
+            st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')}")
         
         # EBIT / PPNR
-        ebit_in = st.number_input(
-            f"{ebit_label} (USD)", 
-            value=float(tf['ebit']), format="%.0f",
-            help=f"{_fmt_k(tf['ebit'])}" + (f" | Local: {local_curr} {tf.get('ebit_local',0)/1000:,.0f}k" if is_foreign else "")
+        _ebit_default = _fmt_dollar(tf['ebit'])
+        _ebit_text = st.text_input(
+            f"{ebit_label} (USD)",
+            value=_ebit_default,
+            help="Enter with $ and commas" + (f" | Local: {local_curr} {_fmt_dollar(tf.get('ebit_local',0))}" if is_foreign else "")
         )
+        ebit_in = _parse_dollar(_ebit_text, tf['ebit'])
         
         # [NEW] VISIBLE BREAKDOWN
         if is_fin_target:
@@ -1834,12 +1852,11 @@ with st.sidebar:
             else:
                 st.warning("Credit Losses Provision = $0 (Check if company reports this metric)")
         else:
-            _ebit_display = _fmt_k(tf['ebit'])
             if is_foreign:
                 _ebit_local = tf.get('ebit_local', 0)
-                st.caption(f"**{_ebit_display}** · Source: {tf.get('label_ebit', 'N/A')} · Local: {local_curr} {_ebit_local/1000:,.0f}k")
+                st.caption(f"{_fmt_k(ebit_in)} · Source: {tf.get('label_ebit', 'N/A')} · Local: {local_curr} {_fmt_k(_ebit_local)}")
             else:
-                st.caption(f"**{_ebit_display}** · Source: {tf.get('label_ebit', 'N/A')}")
+                st.caption(f"{_fmt_k(ebit_in)} · Source: {tf.get('label_ebit', 'N/A')}")
         
         cat_options = ["Large Firms", "Small/Risky Firms", "Financial Firms"]
         cat_default_idx = cat_options.index(tf['category']) if tf['category'] in cat_options else 1
