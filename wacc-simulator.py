@@ -974,60 +974,60 @@ def get_kpmg_tax_rates():
 
 @st.cache_data(ttl=3600*24)
 def get_damodaran_spreads():
-    """Damodaran 신용등급별 스프레드 테이블 조회"""
-    # 2026 Updated Fallback Data
+    """Damodaran 신용등급별 스프레드 테이블 조회 (FRED OAS 매핑 포함)"""
+    # 2026 Updated Fallback Data - FRED column maps rating to FRED OAS category
     fallback_large = pd.DataFrame([
-        {"greater than": "8.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
-        {"greater than": "6.5", "≤ to": "8.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {"greater than": "5.5", "≤ to": "6.49", "Rating": "A1/A+", "Spread": "0.70%"},
-        {"greater than": "4.25", "≤ to": "5.49", "Rating": "A2/A", "Spread": "0.78%"},
-        {"greater than": "3.0", "≤ to": "4.24", "Rating": "A3/A-", "Spread": "0.89%"},
-        {"greater than": "2.5", "≤ to": "2.99", "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {"greater than": "2.25", "≤ to": "2.49", "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {"greater than": "2.0", "≤ to": "2.24", "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {"greater than": "1.75", "≤ to": "1.99", "Rating": "B1/B+", "Spread": "2.75%"},
-        {"greater than": "1.5", "≤ to": "1.74", "Rating": "B2/B", "Spread": "3.21%"},
-        {"greater than": "1.25", "≤ to": "1.49", "Rating": "B3/B-", "Spread": "5.09%"},
-        {"greater than": "0.8", "≤ to": "1.24", "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {"greater than": "0.65", "≤ to": "0.79", "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {"greater than": "0.2", "≤ to": "0.64", "Rating": "C2/C", "Spread": "16.00%"},
-        {"greater than": "-100000", "≤ to": "0.19", "Rating": "D2/D", "Spread": "19.00%"}
+        {"greater than": "8.5",      "≤ to": "100000", "Rating": "Aaa/AAA",  "FRED": "AAA US Corporate",           "Spread": "0.40%"},
+        {"greater than": "6.5",      "≤ to": "8.5",    "Rating": "Aa2/AA",   "FRED": "AA US Corporate",            "Spread": "0.55%"},
+        {"greater than": "5.5",      "≤ to": "6.5",    "Rating": "A1/A+",    "FRED": "Single-A US Corporate",      "Spread": "0.70%"},
+        {"greater than": "4.25",     "≤ to": "5.5",    "Rating": "A2/A",     "FRED": "Single-A US Corporate",      "Spread": "0.78%"},
+        {"greater than": "3.0",      "≤ to": "4.25",   "Rating": "A3/A-",    "FRED": "Single-A US Corporate",      "Spread": "0.89%"},
+        {"greater than": "2.5",      "≤ to": "3.0",    "Rating": "Baa2/BBB", "FRED": "BBB US Corporate",           "Spread": "1.11%"},
+        {"greater than": "2.25",     "≤ to": "2.5",    "Rating": "Ba1/BB+",  "FRED": "BB US High Yield",           "Spread": "1.38%"},
+        {"greater than": "2.0",      "≤ to": "2.25",   "Rating": "Ba2/BB",   "FRED": "BB US High Yield",           "Spread": "1.84%"},
+        {"greater than": "1.75",     "≤ to": "2.0",    "Rating": "B1/B+",    "FRED": "Single-B US High Yield",     "Spread": "2.75%"},
+        {"greater than": "1.5",      "≤ to": "1.75",   "Rating": "B2/B",     "FRED": "Single-B US High Yield",     "Spread": "3.21%"},
+        {"greater than": "1.25",     "≤ to": "1.5",    "Rating": "B3/B-",    "FRED": "Single-B US High Yield",     "Spread": "5.09%"},
+        {"greater than": "0.8",      "≤ to": "1.25",   "Rating": "Caa/CCC",  "FRED": "CCC & Lower US High Yield",  "Spread": "8.85%"},
+        {"greater than": "0.65",     "≤ to": "0.8",    "Rating": "Ca2/CC",   "FRED": "CCC & Lower US High Yield",  "Spread": "12.61%"},
+        {"greater than": "0.2",      "≤ to": "0.65",   "Rating": "C2/C",     "FRED": "CCC & Lower US High Yield",  "Spread": "16.00%"},
+        {"greater than": "-100000",  "≤ to": "0.2",    "Rating": "D2/D",     "FRED": "CCC & Lower US High Yield",  "Spread": "19.00%"},
     ])
     
     fallback_small = pd.DataFrame([
-        {"greater than": "12.5", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
-        {"greater than": "9.5", "≤ to": "12.49", "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {"greater than": "7.5", "≤ to": "9.49", "Rating": "A1/A+", "Spread": "0.70%"},
-        {"greater than": "6.0", "≤ to": "7.49", "Rating": "A2/A", "Spread": "0.78%"},
-        {"greater than": "4.5", "≤ to": "5.99", "Rating": "A3/A-", "Spread": "0.89%"},
-        {"greater than": "4.0", "≤ to": "4.49", "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {"greater than": "3.5", "≤ to": "3.99", "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {"greater than": "3.0", "≤ to": "3.49", "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {"greater than": "2.5", "≤ to": "2.99", "Rating": "B1/B+", "Spread": "2.75%"},
-        {"greater than": "2.0", "≤ to": "2.49", "Rating": "B2/B", "Spread": "3.21%"},
-        {"greater than": "1.5", "≤ to": "1.99", "Rating": "B3/B-", "Spread": "5.09%"},
-        {"greater than": "1.25", "≤ to": "1.49", "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {"greater than": "0.8", "≤ to": "1.24", "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {"greater than": "0.5", "≤ to": "0.79", "Rating": "C2/C", "Spread": "16.00%"},
-        {"greater than": "-100000", "≤ to": "0.49", "Rating": "D2/D", "Spread": "19.00%"}
+        {"greater than": "12.5",     "≤ to": "100000", "Rating": "Aaa/AAA",  "FRED": "AAA US Corporate",           "Spread": "0.40%"},
+        {"greater than": "9.5",      "≤ to": "12.5",   "Rating": "Aa2/AA",   "FRED": "AA US Corporate",            "Spread": "0.55%"},
+        {"greater than": "7.5",      "≤ to": "9.5",    "Rating": "A1/A+",    "FRED": "Single-A US Corporate",      "Spread": "0.70%"},
+        {"greater than": "6.0",      "≤ to": "7.5",    "Rating": "A2/A",     "FRED": "Single-A US Corporate",      "Spread": "0.78%"},
+        {"greater than": "4.5",      "≤ to": "6.0",    "Rating": "A3/A-",    "FRED": "Single-A US Corporate",      "Spread": "0.89%"},
+        {"greater than": "4.0",      "≤ to": "4.5",    "Rating": "Baa2/BBB", "FRED": "BBB US Corporate",           "Spread": "1.11%"},
+        {"greater than": "3.5",      "≤ to": "4.0",    "Rating": "Ba1/BB+",  "FRED": "BB US High Yield",           "Spread": "1.38%"},
+        {"greater than": "3.0",      "≤ to": "3.5",    "Rating": "Ba2/BB",   "FRED": "BB US High Yield",           "Spread": "1.84%"},
+        {"greater than": "2.5",      "≤ to": "3.0",    "Rating": "B1/B+",    "FRED": "Single-B US High Yield",     "Spread": "2.75%"},
+        {"greater than": "2.0",      "≤ to": "2.5",    "Rating": "B2/B",     "FRED": "Single-B US High Yield",     "Spread": "3.21%"},
+        {"greater than": "1.5",      "≤ to": "2.0",    "Rating": "B3/B-",    "FRED": "Single-B US High Yield",     "Spread": "5.09%"},
+        {"greater than": "1.25",     "≤ to": "1.5",    "Rating": "Caa/CCC",  "FRED": "CCC & Lower US High Yield",  "Spread": "8.85%"},
+        {"greater than": "0.8",      "≤ to": "1.25",   "Rating": "Ca2/CC",   "FRED": "CCC & Lower US High Yield",  "Spread": "12.61%"},
+        {"greater than": "0.5",      "≤ to": "0.8",    "Rating": "C2/C",     "FRED": "CCC & Lower US High Yield",  "Spread": "16.00%"},
+        {"greater than": "-100000",  "≤ to": "0.5",    "Rating": "D2/D",     "FRED": "CCC & Lower US High Yield",  "Spread": "19.00%"},
     ])
     
     fallback_fin = pd.DataFrame([
-        {"greater than": "3.0", "≤ to": "100000", "Rating": "Aaa/AAA", "Spread": "0.40%"},
-        {"greater than": "2.5", "≤ to": "2.99", "Rating": "Aa2/AA", "Spread": "0.55%"},
-        {"greater than": "2.0", "≤ to": "2.49", "Rating": "A1/A+", "Spread": "0.70%"},
-        {"greater than": "1.5", "≤ to": "1.99", "Rating": "A2/A", "Spread": "0.78%"},
-        {"greater than": "1.2", "≤ to": "1.49", "Rating": "A3/A-", "Spread": "0.89%"},
-        {"greater than": "0.9", "≤ to": "1.19", "Rating": "Baa2/BBB", "Spread": "1.11%"},
-        {"greater than": "0.75", "≤ to": "0.89", "Rating": "Ba1/BB+", "Spread": "1.38%"},
-        {"greater than": "0.6", "≤ to": "0.74", "Rating": "Ba2/BB", "Spread": "1.84%"},
-        {"greater than": "0.5", "≤ to": "0.59", "Rating": "B1/B+", "Spread": "2.75%"},
-        {"greater than": "0.4", "≤ to": "0.49", "Rating": "B2/B", "Spread": "3.21%"},
-        {"greater than": "0.3", "≤ to": "0.39", "Rating": "B3/B-", "Spread": "5.09%"},
-        {"greater than": "0.2", "≤ to": "0.29", "Rating": "Caa/CCC", "Spread": "8.85%"},
-        {"greater than": "0.1", "≤ to": "0.19", "Rating": "Ca2/CC", "Spread": "12.61%"},
-        {"greater than": "0.05", "≤ to": "0.09", "Rating": "C2/C", "Spread": "16.00%"},
-        {"greater than": "-100000", "≤ to": "0.04", "Rating": "D2/D", "Spread": "19.00%"}
+        {"greater than": "3.0",      "≤ to": "100000", "Rating": "Aaa/AAA",  "FRED": "AAA US Corporate",           "Spread": "0.40%"},
+        {"greater than": "2.5",      "≤ to": "3.0",    "Rating": "Aa2/AA",   "FRED": "AA US Corporate",            "Spread": "0.55%"},
+        {"greater than": "2.0",      "≤ to": "2.5",    "Rating": "A1/A+",    "FRED": "Single-A US Corporate",      "Spread": "0.70%"},
+        {"greater than": "1.5",      "≤ to": "2.0",    "Rating": "A2/A",     "FRED": "Single-A US Corporate",      "Spread": "0.78%"},
+        {"greater than": "1.2",      "≤ to": "1.5",    "Rating": "A3/A-",    "FRED": "Single-A US Corporate",      "Spread": "0.89%"},
+        {"greater than": "0.9",      "≤ to": "1.2",    "Rating": "Baa2/BBB", "FRED": "BBB US Corporate",           "Spread": "1.11%"},
+        {"greater than": "0.75",     "≤ to": "0.9",    "Rating": "Ba1/BB+",  "FRED": "BB US High Yield",           "Spread": "1.38%"},
+        {"greater than": "0.6",      "≤ to": "0.75",   "Rating": "Ba2/BB",   "FRED": "BB US High Yield",           "Spread": "1.84%"},
+        {"greater than": "0.5",      "≤ to": "0.6",    "Rating": "B1/B+",    "FRED": "Single-B US High Yield",     "Spread": "2.75%"},
+        {"greater than": "0.4",      "≤ to": "0.5",    "Rating": "B2/B",     "FRED": "Single-B US High Yield",     "Spread": "3.21%"},
+        {"greater than": "0.3",      "≤ to": "0.4",    "Rating": "B3/B-",    "FRED": "Single-B US High Yield",     "Spread": "5.09%"},
+        {"greater than": "0.2",      "≤ to": "0.3",    "Rating": "Caa/CCC",  "FRED": "CCC & Lower US High Yield",  "Spread": "8.85%"},
+        {"greater than": "0.1",      "≤ to": "0.2",    "Rating": "Ca2/CC",   "FRED": "CCC & Lower US High Yield",  "Spread": "12.61%"},
+        {"greater than": "0.05",     "≤ to": "0.1",    "Rating": "C2/C",     "FRED": "CCC & Lower US High Yield",  "Spread": "16.00%"},
+        {"greater than": "-100000",  "≤ to": "0.05",   "Rating": "D2/D",     "FRED": "CCC & Lower US High Yield",  "Spread": "19.00%"},
     ])
 
     result_dict = {
@@ -1044,7 +1044,6 @@ def get_damodaran_spreads():
             verify=False
         )
         response.raise_for_status()
-        # Online parsing logic would go here
         logger.info("Damodaran spreads fetched successfully (using fallback)")
     except Exception as e:
         logger.warning(f"Damodaran online fetch failed, using fallback: {str(e)}")
@@ -1797,6 +1796,47 @@ with st.sidebar:
             
             _api = fetch_company_profile_from_api(target_ticker)
             st.caption(f"API: country={_api.get('country','?')} | sector={_api.get('sector','?')}")
+            
+            # ICR → Rating → Spread pipeline debug
+            if 'inputs' in st.session_state:
+                _inp = st.session_state['inputs']
+                _ebit_dbg = _inp.get('ebit', 0)
+                _int_dbg = _inp.get('int_exp', 0)
+                _cat_dbg = _inp.get('category', '?')
+                _icr_dbg = _ebit_dbg / _int_dbg if _int_dbg > 0 else 100.0
+                
+                st.divider()
+                st.caption("**ICR → Spread Pipeline:**")
+                st.caption(f"① ICR = {_ebit_dbg:,.0f} / {_int_dbg:,.0f} = **{_icr_dbg:.2f}x**")
+                
+                # Damodaran lookup
+                _dam_dict = get_damodaran_spreads()
+                _dam_tbl, _dam_src = _dam_dict.get(_cat_dbg, (None, ""))
+                _dam_rating = "N/A"
+                _dam_spread = 0.0
+                _fred_key = "BB US High Yield"
+                if _dam_tbl is not None:
+                    for _, _row in _dam_tbl.iterrows():
+                        try:
+                            _lo = float(str(_row.get('greater than','-')).replace('greater than','').replace('-','-99999').strip())
+                            _hi = float(str(_row.get('≤ to','-')).replace('-','99999').strip())
+                            if _lo < _icr_dbg <= _hi:
+                                _dam_rating = _row['Rating']
+                                _dam_spread = float(str(_row['Spread']).replace('%',''))
+                                if 'FRED' in _row and pd.notna(_row['FRED']):
+                                    _fred_key = _row['FRED']
+                                break
+                        except:
+                            continue
+                st.caption(f"② Damodaran ({_cat_dbg}): Rating=**{_dam_rating}** | Spread=**{_dam_spread:.2f}%**")
+                st.caption(f"③ FRED map: {_dam_rating} → **{_fred_key}** (from table)")
+                
+                _fred_row = df_oas[df_oas['OAS Name'] == _fred_key]
+                _fred_val = None
+                if not _fred_row.empty:
+                    _fred_val = _fred_row.iloc[0]['Latest Spread (%)']
+                st.caption(f"④ FRED OAS ({_fred_key}): **{_fred_val}%**" if _fred_val else f"④ FRED OAS: NOT FOUND")
+                st.caption(f"⑤ Final Spread used: **{_fred_val if _fred_val else _dam_spread:.2f}%**")
         except Exception as _e:
             st.caption(f"Error: {_e}")
     
@@ -1894,6 +1934,7 @@ if 'result' in st.session_state:
         
         implied_rating = "N/A"
         implied_spread_val = 2.00
+        target_fred_key = "BB US High Yield"  # default fallback
         
         if rating_table is not None:
             for idx, row in rating_table.iterrows():
@@ -1904,27 +1945,14 @@ if 'result' in st.session_state:
                         implied_rating = row['Rating']
                         spread_str = str(row['Spread']).replace('%','')
                         implied_spread_val = float(spread_str)
+                        # Read FRED mapping directly from table
+                        if 'FRED' in row and pd.notna(row['FRED']):
+                            target_fred_key = row['FRED']
                         break
                 except Exception as e:
                     logger.debug(f"Rating table parsing error: {str(e)}")
                     continue
         
-        # 2. Map Rating to OAS
-        target_fred_key = "BB US High Yield"
-        if "AAA" in implied_rating: 
-            target_fred_key = "AAA US Corporate"
-        elif "AA" in implied_rating: 
-            target_fred_key = "AA US Corporate"
-        elif "A" in implied_rating: 
-            target_fred_key = "Single-A US Corporate"
-        elif "BBB" in implied_rating: 
-            target_fred_key = "BBB US Corporate"
-        elif "BB" in implied_rating: 
-            target_fred_key = "BB US High Yield"
-        elif "B" in implied_rating: 
-            target_fred_key = "Single-B US High Yield"
-        elif "C" in implied_rating: 
-            target_fred_key = "CCC & Lower US High Yield"
         
         final_spread = implied_spread_val 
         fred_row = df_oas[df_oas['OAS Name'] == target_fred_key]
