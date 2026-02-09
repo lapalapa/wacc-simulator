@@ -105,115 +105,339 @@ def safe_yf_info(ticker_obj, max_retries=3):
     return {}
 
 # ==============================================================================
-# [MODULE] Helper: Yahoo Finance quoteSummary API for Company Profile
+# [MODULE] Helper: Yahoo Finance Company Profile Fetcher (3-tier fallback)
 # ==============================================================================
-# When yfinance .info fails (403, timeout, empty), we call Yahoo's quoteSummary
-# API directly to get country, sector, marketCap, totalDebt, currency, etc.
-# This is the same endpoint yfinance uses internally but we bypass its error handling.
+# When yfinance .info fails (403, timeout, empty), we try multiple methods:
+#   1. quoteSummary API (v10) - direct JSON API
+#   2. Profile page HTML scraping - embedded JSON in <script> tags  
+#   3. Quote page HTML scraping - fallback embedded JSON
 # ==============================================================================
 _profile_cache = {}
 
+def _extract_json_from_html(html_text):
+    """
+    Yahoo Finance 페이지의 HTML에서 embedded JSON 데이터를 추출.
+    
+    Yahoo Finance는 서버사이드 렌더링 시 페이지 데이터를 <script> 태그 안에
+    JSON으로 포함합니다. 여러 패턴을 시도:
+      1. root.App.main = {...}  (legacy)
+      2. window.__PRELOADED_STATE__ (newer SPA)
+      3. "context":{"dispatcher":{"stores": {...}}} 패턴
+    """
+    import json as _json
+    
+    result = {}
+    
+    # Pattern 1: root.App.main (legacy Yahoo Finance)
+    pattern1 = re.compile(r'root\.App\.main\s*=\s*(\{.*?\})\s*;\s*\n', re.DOTALL)
+    match = pattern1.search(html_text)
+    if match:
+        try:
+            data = _json.loads(match.group(1))
+            stores = data.get("context", {}).get("dispatcher", {}).get("stores", {})
+            
+            # QuoteSummaryStore has everything
+            qss = stores.get("QuoteSummaryStore", {})
+            if qss:
+                profile = qss.get("assetProfile", {})
+                price = qss.get("price", {})
+                fin = qss.get("financialData", {})
+                stats = qss.get("defaultKeyStatistics", {})
+                
+                if profile:
+                    result["country"] = profile.get("country", "")
+                    result["sector"] = profile.get("sector", "")
+                    result["industry"] = profile.get("industry", "")
+                    result["industryKey"] = profile.get("industryKey", "")
+                if price:
+                    result["currency"] = price.get("currency", "USD")
+                    result["longName"] = price.get("longName", "")
+                    mc = price.get("marketCap", {})
+                    result["marketCap"] = mc.get("raw", 0) if isinstance(mc, dict) else mc
+                if fin:
+                    for k in ["totalRevenue","ebitda","totalDebt","operatingMargins","interestExpense"]:
+                        v = fin.get(k, {})
+                        result[k] = v.get("raw", 0) if isinstance(v, dict) else (v or 0)
+                if stats:
+                    shares = stats.get("sharesOutstanding", {})
+                    result["sharesOutstanding"] = shares.get("raw", 0) if isinstance(shares, dict) else (shares or 0)
+                
+                logger.info(f"[HTML Parse] Extracted {len([v for v in result.values() if v])} fields via root.App.main")
+                return result
+        except Exception as e:
+            logger.debug(f"[HTML Parse] root.App.main parse failed: {e}")
+    
+    # Pattern 2: Inline JSON blocks containing "assetProfile" or "country"
+    # Yahoo embeds data like: {"assetProfile":{"country":"United States",...}}
+    profile_patterns = [
+        re.compile(r'"assetProfile"\s*:\s*\{[^{}]*"country"\s*:\s*"([^"]+)"[^{}]*"sector"\s*:\s*"([^"]+)"'),
+        re.compile(r'"country"\s*:\s*"([^"]+)".*?"sector"\s*:\s*"([^"]+)"'),
+    ]
+    
+    for pat in profile_patterns:
+        match = pat.search(html_text)
+        if match:
+            result["country"] = match.group(1)
+            if match.lastindex >= 2:
+                result["sector"] = match.group(2)
+            logger.info(f"[HTML Parse] Regex extracted country={result.get('country')}")
+            break
+    
+    # Extract industry 
+    ind_match = re.search(r'"industry"\s*:\s*"([^"]+)"', html_text)
+    if ind_match:
+        result["industry"] = ind_match.group(1)
+    
+    ind_key_match = re.search(r'"industryKey"\s*:\s*"([^"]+)"', html_text)
+    if ind_key_match:
+        result["industryKey"] = ind_key_match.group(1)
+    
+    # Extract currency
+    curr_match = re.search(r'"currency"\s*:\s*"([A-Z]{3})"', html_text)
+    if curr_match:
+        result["currency"] = curr_match.group(1)
+    
+    # Extract longName
+    name_match = re.search(r'"longName"\s*:\s*"([^"]+)"', html_text)
+    if name_match:
+        result["longName"] = name_match.group(1)
+    
+    # Extract marketCap (look for raw value)
+    mc_match = re.search(r'"marketCap"\s*:\s*\{\s*"raw"\s*:\s*(\d+)', html_text)
+    if mc_match:
+        result["marketCap"] = int(mc_match.group(1))
+    
+    # Extract totalDebt
+    debt_match = re.search(r'"totalDebt"\s*:\s*\{\s*"raw"\s*:\s*(\d+)', html_text)
+    if debt_match:
+        result["totalDebt"] = int(debt_match.group(1))
+    
+    # Extract totalRevenue
+    rev_match = re.search(r'"totalRevenue"\s*:\s*\{\s*"raw"\s*:\s*(\d+)', html_text)
+    if rev_match:
+        result["totalRevenue"] = int(rev_match.group(1))
+    
+    return result
+
+def _scrape_profile_from_text(text, ticker):
+    """
+    Yahoo Finance profile 페이지의 text 내용에서 HQ 정보를 텍스트 파싱으로 추출.
+    
+    Profile 페이지에는 항상 "headquartered in [City], [State/Country]" 패턴이 있음.
+    예: "is headquartered in Durham, North Carolina"
+    예: "is based in Kranichfeld, Germany"
+    """
+    result = {}
+    
+    # HQ pattern: "headquartered in City, State/Country" or "is based in City, Country"
+    hq_patterns = [
+        re.compile(r'(?:headquartered|based)\s+in\s+([^.]+?)\.', re.IGNORECASE),
+    ]
+    
+    for pat in hq_patterns:
+        match = pat.search(text)
+        if match:
+            hq_str = match.group(1).strip()
+            # Parse "Durham, North Carolina" -> country = "United States"
+            # Parse "Kranichfeld, Germany" -> country = "Germany"
+            parts = [p.strip() for p in hq_str.split(",")]
+            
+            if len(parts) >= 2:
+                last_part = parts[-1].strip()
+                # US state detection
+                us_states = {
+                    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
+                    "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+                    "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
+                    "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
+                    "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
+                    "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
+                    "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
+                    "Wisconsin","Wyoming","District of Columbia"
+                }
+                if last_part in us_states:
+                    result["country"] = "United States"
+                else:
+                    result["country"] = last_part
+                
+                logger.info(f"[Text Parse] {ticker}: HQ='{hq_str}' -> country='{result['country']}'")
+            break
+    
+    # Sector detection from description keywords
+    text_lower = text.lower()
+    sector_keywords = {
+        "semiconductor": "Technology",
+        "software": "Technology",
+        "financial services": "Financial Services",
+        "banking": "Financial Services",
+        "insurance": "Financial Services",
+        "pharmaceutical": "Healthcare",
+        "biotechnology": "Healthcare",
+        "energy": "Energy",
+        "oil and gas": "Energy",
+        "real estate": "Real Estate",
+        "consumer": "Consumer Cyclical",
+        "automotive": "Consumer Cyclical",
+        "industrial": "Industrials",
+        "telecommunications": "Communication Services",
+        "utility": "Utilities",
+        "mining": "Basic Materials",
+        "chemical": "Basic Materials",
+    }
+    
+    for kw, sector in sector_keywords.items():
+        if kw in text_lower:
+            result["sector"] = sector
+            break
+    
+    return result
+
+
 def fetch_company_profile_from_api(ticker):
     """
-    Direct Yahoo Finance quoteSummary API call for company metadata.
+    Yahoo Finance에서 회사 프로필 (country, sector, marketCap 등) 조회.
     
-    Fetches: country, sector, industry, marketCap, totalDebt, currency,
-             totalRevenue, ebitda, operatingMargins, interestExpense, longName
+    3단계 fallback:
+      1. quoteSummary API (v10) - 가장 빠르고 정확
+      2. Profile 페이지 HTML 스크래핑 - embedded JSON 추출  
+      3. Profile 페이지 텍스트 파싱 - "headquartered in..." 패턴
     
-    Uses multiple quoteSummary modules in a single request:
-      - assetProfile (country, sector, industry)
-      - defaultKeyStatistics (marketCap)
-      - financialData (totalRevenue, ebitda, totalDebt, operatingMargins)
-      - price (currency, longName, marketCap)
-    
-    Returns: dict matching yfinance .info format, or {} if fails.
+    Returns: dict matching yfinance .info format, or {} if all fail.
     """
     cache_key = ticker.upper()
     if cache_key in _profile_cache:
         return _profile_cache[cache_key]
     
-    modules = "assetProfile,defaultKeyStatistics,financialData,price"
-    url = (
-        f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{cache_key}"
-        f"?modules={modules}"
-    )
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
     }
     
     result = {}
     
+    # =========================================================================
+    # Phase 1: quoteSummary API (v10 JSON endpoint)
+    # =========================================================================
     try:
-        logger.info(f"[Profile API] Fetching company profile for {cache_key}...")
-        r = requests.get(url, headers=headers, timeout=15, verify=False)
+        modules = "assetProfile,defaultKeyStatistics,financialData,price"
+        api_url = (
+            f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{cache_key}"
+            f"?modules={modules}"
+        )
+        
+        logger.info(f"[Profile] Phase 1: quoteSummary API for {cache_key}...")
+        r = requests.get(api_url, headers=headers, timeout=15, verify=False)
         r.raise_for_status()
         data = r.json()
         
         summary = data.get("quoteSummary", {}).get("result", [])
-        if not summary:
-            logger.warning(f"[Profile API] No quoteSummary results for {cache_key}")
-            _profile_cache[cache_key] = {}
-            return {}
-        
-        item = summary[0]
-        
-        # assetProfile: country, sector, industry
-        profile = item.get("assetProfile", {})
-        if profile:
-            result["country"] = profile.get("country", "")
-            result["sector"] = profile.get("sector", "")
-            result["industry"] = profile.get("industry", "")
-            result["industryKey"] = profile.get("industryKey", "")
-            result["longBusinessSummary"] = profile.get("longBusinessSummary", "")
-        
-        # price: currency, longName, marketCap (most reliable source)
-        price_data = item.get("price", {})
-        if price_data:
-            result["currency"] = price_data.get("currency", "USD")
-            result["longName"] = price_data.get("longName", cache_key)
-            mc = price_data.get("marketCap", {})
-            if isinstance(mc, dict):
-                result["marketCap"] = mc.get("raw", 0)
-            elif isinstance(mc, (int, float)):
-                result["marketCap"] = mc
-        
-        # financialData: revenue, ebitda, totalDebt, margins, interest expense
-        fin_data = item.get("financialData", {})
-        if fin_data:
-            for key in ["totalRevenue", "ebitda", "totalDebt", "operatingMargins", 
-                        "interestExpense", "totalCash", "currentRatio"]:
-                val = fin_data.get(key, {})
-                if isinstance(val, dict):
-                    result[key] = val.get("raw", 0)
-                elif isinstance(val, (int, float)):
-                    result[key] = val
-        
-        # defaultKeyStatistics: fallback marketCap, shares
-        key_stats = item.get("defaultKeyStatistics", {})
-        if key_stats:
-            if not result.get("marketCap"):
-                mc2 = key_stats.get("enterpriseValue", {})
-                if isinstance(mc2, dict):
-                    result["marketCap"] = mc2.get("raw", 0)
-            shares = key_stats.get("sharesOutstanding", {})
-            if isinstance(shares, dict):
-                result["sharesOutstanding"] = shares.get("raw", 0)
-        
-        n_keys = len([v for v in result.values() if v])
-        logger.info(f"[Profile API] {cache_key}: Got {n_keys} fields "
-                    f"(country={result.get('country', 'N/A')}, "
-                    f"sector={result.get('sector', 'N/A')}, "
-                    f"mktCap=${result.get('marketCap', 0):,.0f})")
-        
-        _profile_cache[cache_key] = result
-        return result
-        
+        if summary:
+            item = summary[0]
+            
+            profile = item.get("assetProfile", {})
+            if profile:
+                result["country"] = profile.get("country", "")
+                result["sector"] = profile.get("sector", "")
+                result["industry"] = profile.get("industry", "")
+                result["industryKey"] = profile.get("industryKey", "")
+            
+            price_data = item.get("price", {})
+            if price_data:
+                result["currency"] = price_data.get("currency", "USD")
+                result["longName"] = price_data.get("longName", cache_key)
+                mc = price_data.get("marketCap", {})
+                result["marketCap"] = mc.get("raw", 0) if isinstance(mc, dict) else (mc or 0)
+            
+            fin_data = item.get("financialData", {})
+            if fin_data:
+                for key in ["totalRevenue","ebitda","totalDebt","operatingMargins",
+                            "interestExpense","totalCash","currentRatio"]:
+                    val = fin_data.get(key, {})
+                    result[key] = val.get("raw", 0) if isinstance(val, dict) else (val or 0)
+            
+            key_stats = item.get("defaultKeyStatistics", {})
+            if key_stats:
+                if not result.get("marketCap"):
+                    mc2 = key_stats.get("enterpriseValue", {})
+                    result["marketCap"] = mc2.get("raw", 0) if isinstance(mc2, dict) else (mc2 or 0)
+                shares = key_stats.get("sharesOutstanding", {})
+                result["sharesOutstanding"] = shares.get("raw", 0) if isinstance(shares, dict) else (shares or 0)
+            
+            if result.get("country"):
+                logger.info(f"[Profile] Phase 1 SUCCESS: {cache_key} country={result['country']}")
+                _profile_cache[cache_key] = result
+                return result
     except Exception as e:
-        logger.warning(f"[Profile API] Failed for {cache_key}: {str(e)}")
-        _profile_cache[cache_key] = {}
-        return {}
+        logger.warning(f"[Profile] Phase 1 failed for {cache_key}: {str(e)}")
+    
+    time.sleep(random.uniform(0.5, 1.0))
+    
+    # =========================================================================
+    # Phase 2: Profile page HTML scraping (embedded JSON extraction)
+    # =========================================================================
+    try:
+        profile_url = f"https://finance.yahoo.com/quote/{cache_key}/profile/"
+        logger.info(f"[Profile] Phase 2: HTML scraping {profile_url}...")
+        
+        r = requests.get(profile_url, headers=headers, timeout=15, verify=False)
+        if r.status_code == 200 and len(r.text) > 1000:
+            # Try JSON extraction from HTML
+            html_result = _extract_json_from_html(r.text)
+            if html_result:
+                result.update({k: v for k, v in html_result.items() if v})
+            
+            # Try text-based parsing as supplement
+            text_result = _scrape_profile_from_text(r.text, cache_key)
+            if text_result:
+                # Only fill in missing fields
+                for k, v in text_result.items():
+                    if v and not result.get(k):
+                        result[k] = v
+            
+            if result.get("country"):
+                logger.info(f"[Profile] Phase 2 SUCCESS: {cache_key} country={result['country']}")
+                _profile_cache[cache_key] = result
+                return result
+    except Exception as e:
+        logger.warning(f"[Profile] Phase 2 failed for {cache_key}: {str(e)}")
+    
+    time.sleep(random.uniform(0.5, 1.0))
+    
+    # =========================================================================
+    # Phase 3: Main quote page HTML scraping (last resort)
+    # =========================================================================
+    try:
+        quote_url = f"https://finance.yahoo.com/quote/{cache_key}/"
+        logger.info(f"[Profile] Phase 3: Quote page scraping {quote_url}...")
+        
+        r = requests.get(quote_url, headers=headers, timeout=15, verify=False)
+        if r.status_code == 200 and len(r.text) > 1000:
+            html_result = _extract_json_from_html(r.text)
+            if html_result:
+                result.update({k: v for k, v in html_result.items() if v})
+            
+            text_result = _scrape_profile_from_text(r.text, cache_key)
+            if text_result:
+                for k, v in text_result.items():
+                    if v and not result.get(k):
+                        result[k] = v
+            
+            if result.get("country"):
+                logger.info(f"[Profile] Phase 3 SUCCESS: {cache_key} country={result['country']}")
+    except Exception as e:
+        logger.warning(f"[Profile] Phase 3 failed for {cache_key}: {str(e)}")
+    
+    n_keys = len([v for v in result.values() if v])
+    if n_keys > 0:
+        logger.info(f"[Profile] {cache_key}: Got {n_keys} fields total "
+                    f"(country={result.get('country', 'N/A')}, sector={result.get('sector', 'N/A')})")
+    else:
+        logger.warning(f"[Profile] {cache_key}: All 3 phases failed - no profile data")
+    
+    _profile_cache[cache_key] = result
+    return result
 
 def fetch_financial_ttm_from_api(ticker):
     """
