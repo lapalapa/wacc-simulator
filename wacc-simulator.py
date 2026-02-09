@@ -1,38 +1,42 @@
 # ==============================================================================
 # Strategic WACC Simulator
-# Version: 1.5.0
+# Version: 1.4.0
 # Last Updated: 2025-02-09
 # 
 # Changelog:
-# v1.5.0 (2025-02-09)
-# - [NEW] 3-tier company profile fallback (fetch_company_profile_from_api):
-#   Phase 1: quoteSummary API (v10 JSON)
-#   Phase 2: Profile page HTML scraping (embedded JSON + text parsing)
-#   Phase 3: Quote page HTML scraping (last resort)
-# - [NEW] _extract_json_from_html(): root.App.main JSON + regex fragment extraction
-# - [NEW] _scrape_profile_from_text(): "headquartered in..." pattern with US state detection
-# - [FIX] safe_yf_info() now calls fetch_company_profile_from_api() when .info fails
-# - [FIX] Peer get_financials_latest(): no longer early-returns on empty info;
-#   tries fast_info + balance_sheet fallback for mkt_cap and debt
-# - [FIX] Target get_target_financials(): info={} fallback instead of early return
-#
 # v1.4.0 (2025-02-09)
 # - [NEW] fetch_financial_ttm_from_api(): single API call fetches both
 #   CreditLossesProvision AND PretaxIncome TTM from Yahoo Timeseries API
-# - [REFACTOR] Priority logic: P1 Annual -> P2 TTM (API) -> P3 Quarterly Sum
-# - [FIX] 4x multiplication bug in TTM provision
+#   (same endpoint as yfinance: query2.finance.yahoo.com/ws/fundamentals-timeseries)
+# - [REFACTOR] Priority logic now strictly follows:
+#   P1: Annual (Year-1) from yfinance income_stmt + API annual provision fallback
+#   P2: TTM from info_dict (rev/ebitda/int_exp) + API TTM (pretax/provision)
+#       No more quarterly loop in P2; API provides TTM directly
+#   P3: Sum of 4 most recent quarters from yfinance + API TTM fallback
+# - [FIX] 4x multiplication bug: TTM provision was returned per-quarter in loop
+#   extract_from_col() now uses yfinance-only provision (no API TTM)
+#   API TTM applied once at the priority level, outside loops
 #
 # v1.3.1 (2025-02-09)
-# - [FIX] NameError: Initialize variables outside 'if not df_init.empty:' block
+# - [FIX] NameError: Initialize final_spread, icr, implied_rating, category,
+#   target_fred_key, int_exp, ebit outside of 'if not df_init.empty:' block
+#   so Cost of Debt display section works even when peer data is empty
 #
 # v1.3.0 (2025-02-06)
 # - Added web scraping for Credit Losses Provision from Yahoo Finance HTML
+# - Fixed regex pattern for comma-separated numbers (3,091,000)
+# - Improved HTML parsing logic with cell-by-cell extraction
+# - Enhanced logging for debugging provision search
 #
 # v1.2.0 (2025-02-06)
 # - Added priority-based fuzzy search for provision keywords
+# - Implemented Cash Flow Statement fallback search
+# - Added comprehensive exclusion keywords (tax, changein, etc.)
 #
 # v1.1.0 (2025-02-06)
-# - Removed all UI emojis, Fixed IndentationError
+# - Removed all UI emojis
+# - Fixed IndentationError and duplicate code blocks
+# - Enhanced error handling with logging
 #
 # v1.0.0 (Initial)
 # - Core WACC calculation functionality
@@ -64,461 +68,36 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Strategic WACC Simulator", layout="wide")
 
 # Version display in sidebar
-VERSION = "1.5.0"
+VERSION = "1.4.0"
 BUILD_DATE = "2025-02-09"
 
 # ==============================================================================
 # [MODULE] Helper: Safe Fetcher with Retry
 # ==============================================================================
 def safe_yf_info(ticker_obj, max_retries=3):
-    """안전한 Yahoo Finance 정보 조회 (재시도 + API fallback + 필드 보강)
-    
-    Strategy:
-      1. Try yfinance .info (standard path) up to max_retries
-      2. If .info fails entirely, call Yahoo API fallback
-      3. If .info succeeds but CRITICAL fields (country, sector) are missing,
-         call API fallback and MERGE results (API fills gaps, .info takes priority)
-    """
-    CRITICAL_FIELDS = ['country', 'sector']
-    
-    info = {}
-    
-    # Phase 1: Try yfinance .info
+    """안전한 Yahoo Finance 정보 조회 (재시도 로직 포함)"""
     for i in range(max_retries):
         try:
-            raw_info = ticker_obj.info
-            if raw_info and len(raw_info) > 5:
-                info = raw_info
-                break
+            info = ticker_obj.info
+            if info and len(info) > 5:
+                return info
         except Exception as e:
             if i == max_retries - 1:
-                logger.warning(f"Failed to fetch .info after {max_retries} attempts: {str(e)}")
+                logger.warning(f"Failed to fetch info after {max_retries} attempts: {str(e)}")
         time.sleep(random.uniform(0.5, 1.5))
-    
-    # Check if critical fields are present
-    has_critical = all(info.get(f) for f in CRITICAL_FIELDS)
-    
-    if has_critical:
-        return info
-    
-    # Phase 2: API fallback (either .info failed entirely OR critical fields missing)
-    ticker_str = getattr(ticker_obj, 'ticker', '')
-    if ticker_str:
-        reason = "no .info data" if not info else f"missing {[f for f in CRITICAL_FIELDS if not info.get(f)]}"
-        logger.info(f"[safe_yf_info] {ticker_str}: {reason} -> trying API fallback...")
-        
-        api_info = fetch_company_profile_from_api(ticker_str)
-        
-        if api_info:
-            if info:
-                # Merge: API fills gaps, existing .info values take priority
-                merged = {**api_info, **{k: v for k, v in info.items() if v is not None and v != '' and v != 0}}
-                logger.info(f"[safe_yf_info] {ticker_str}: Merged .info ({len(info)} keys) + API ({len(api_info)} keys) -> {len(merged)} keys")
-                logger.info(f"[safe_yf_info] {ticker_str}: country={merged.get('country','N/A')}, sector={merged.get('sector','N/A')}")
-                return merged
-            elif len(api_info) > 3:
-                logger.info(f"[safe_yf_info] {ticker_str}: API fallback only ({len(api_info)} keys)")
-                return api_info
-    
-    return info if info else {}
+    return {}
 
 # ==============================================================================
-# [MODULE] Helper: Yahoo Finance Company Profile Fetcher (3-tier fallback)
+# [MODULE] Helper: Yahoo Finance Timeseries API for Financial TTM Data
 # ==============================================================================
-# When yfinance .info fails (403, timeout, empty), we try multiple methods:
-#   1. quoteSummary API (v10) - direct JSON API
-#   2. Profile page HTML scraping with lxml XPath (user-provided XPath)  
-#   3. Profile page text/regex parsing (fallback)
+# yfinance does not include CreditLossesProvision in its key list, and
+# info_dict does not have PretaxIncome TTM. We call Yahoo's timeseries
+# API directly to get both fields in a single request.
+#
+# API Endpoint (same as yfinance internal):
+#   https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{SYMBOL}
 # ==============================================================================
-_profile_cache = {}
-
-def _parse_profile_with_xpath(html_text, ticker):
-    """
-    Yahoo Finance profile 페이지 HTML을 lxml XPath로 파싱하여 company 정보 추출.
-    
-    Yahoo Finance profile page 구조 (2025-2026):
-      /html/body/div[1]/div[4]/main/section/section/section/section/section[2]/section[2]/div/div/div/
-        div[1] = 주소 1줄 (e.g., "4600 Silicon Drive")
-        div[2] = 시/주/ZIP (e.g., "Durham, NC 27703")  
-        div[3] = 국가 (e.g., "United States")  <-- user-provided XPath
-        
-      Sector/Industry는 같은 section 내 또는 nearby elements에 텍스트로 존재.
-    
-    Returns: dict with country, sector, industry, etc. or {} if parsing fails.
-    """
-    try:
-        from lxml import etree
-    except ImportError:
-        logger.warning("[XPath] lxml not installed - skipping XPath parsing")
-        return {}
-    
-    result = {}
-    
-    try:
-        # Parse HTML (lxml.html supports text_content())
-        from lxml.html import fromstring as html_fromstring
-        tree = html_fromstring(html_text)
-        
-        # ==================================================================
-        # XPath Strategy 1: Exact user-provided path for Country
-        # /html/body/div[1]/div[4]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[3]
-        # ==================================================================
-        country_xpaths = [
-            # User-provided exact XPath
-            '/html/body/div[1]/div[4]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[3]',
-            # Variations (Yahoo may adjust nesting)
-            '/html/body/div[1]/div[3]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[3]',
-            '/html/body/div[1]/div[5]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[3]',
-            # More flexible: find div[3] inside address-like block under main
-            '//main//section//section[2]//div/div/div/div[3]',
-        ]
-        
-        for xpath in country_xpaths:
-            try:
-                elements = tree.xpath(xpath)
-                if elements:
-                    country_text = elements[0].text_content().strip()
-                    # Validate it looks like a country name (not random content)
-                    if country_text and len(country_text) < 50 and not country_text.isdigit():
-                        result["country"] = country_text
-                        logger.info(f"[XPath] {ticker}: Country='{country_text}' via XPath: {xpath}")
-                        break
-            except Exception:
-                continue
-        
-        # ==================================================================
-        # XPath Strategy 2: Address block - also get city/state from div[2]
-        # ==================================================================
-        addr_xpaths = [
-            '/html/body/div[1]/div[4]/main/section/section/section/section/section[2]/section[2]/div/div/div/div[2]',
-            '//main//section//section[2]//div/div/div/div[2]',
-        ]
-        for xpath in addr_xpaths:
-            try:
-                elements = tree.xpath(xpath)
-                if elements:
-                    addr_text = elements[0].text_content().strip()
-                    if addr_text:
-                        logger.info(f"[XPath] {ticker}: Address line='{addr_text}'")
-                    break
-            except Exception:
-                continue
-        
-        # ==================================================================
-        # XPath Strategy 3: Sector & Industry
-        # Usually in nearby elements: look for text containing "Sector" and "Industry"
-        # These appear as labels in the profile sidebar
-        # ==================================================================
-        
-        # Method A: Search all text nodes for "Sector :" / "Industry :" patterns
-        all_text = tree.xpath('//text()')
-        for i, t in enumerate(all_text):
-            t_stripped = t.strip()
-            if t_stripped == 'Sector':
-                # Next non-empty text should be the sector value
-                for j in range(i+1, min(i+5, len(all_text))):
-                    val = all_text[j].strip()
-                    if val and val != ':' and val != 'Sector':
-                        result["sector"] = val
-                        logger.info(f"[XPath] {ticker}: Sector='{val}'")
-                        break
-            elif t_stripped == 'Industry':
-                for j in range(i+1, min(i+5, len(all_text))):
-                    val = all_text[j].strip()
-                    if val and val != ':' and val != 'Industry':
-                        result["industry"] = val
-                        logger.info(f"[XPath] {ticker}: Industry='{val}'")
-                        break
-        
-        # Method B: XPath for common sector/industry containers
-        if not result.get("sector"):
-            sector_xpaths = [
-                '//a[contains(@href, "/sectors/")]//text()',
-                '//span[contains(text(),"Sector")]/following-sibling::*//text()',
-                '//dt[contains(text(),"Sector")]/following-sibling::dd//text()',
-            ]
-            for xpath in sector_xpaths:
-                try:
-                    vals = tree.xpath(xpath)
-                    for v in vals:
-                        v_s = v.strip()
-                        if v_s and v_s != 'Sector' and len(v_s) < 40:
-                            result["sector"] = v_s
-                            logger.info(f"[XPath] {ticker}: Sector='{v_s}' (href/sibling)")
-                            break
-                except Exception:
-                    continue
-                if result.get("sector"):
-                    break
-        
-        if not result.get("industry"):
-            industry_xpaths = [
-                '//a[contains(@href, "/industries/")]//text()',
-                '//span[contains(text(),"Industry")]/following-sibling::*//text()',
-                '//dt[contains(text(),"Industry")]/following-sibling::dd//text()',
-            ]
-            for xpath in industry_xpaths:
-                try:
-                    vals = tree.xpath(xpath)
-                    for v in vals:
-                        v_s = v.strip()
-                        if v_s and v_s != 'Industry' and len(v_s) < 60:
-                            result["industry"] = v_s
-                            logger.info(f"[XPath] {ticker}: Industry='{v_s}' (href/sibling)")
-                            break
-                except Exception:
-                    continue
-                if result.get("industry"):
-                    break
-        
-        # ==================================================================
-        # XPath Strategy 4: Company name from <h1> or title
-        # ==================================================================
-        if not result.get("longName"):
-            name_xpaths = [
-                '//h1//text()',
-                '//title//text()',
-            ]
-            for xpath in name_xpaths:
-                try:
-                    vals = tree.xpath(xpath)
-                    for v in vals:
-                        v_s = v.strip()
-                        if v_s and len(v_s) > 3 and ticker.upper() in v_s.upper():
-                            # Clean up: "Wolfspeed, Inc. (WOLF) Company Profile" -> "Wolfspeed, Inc."
-                            name = re.sub(r'\s*\(' + re.escape(ticker.upper()) + r'\).*', '', v_s).strip()
-                            if name:
-                                result["longName"] = name
-                                break
-                except Exception:
-                    continue
-                if result.get("longName"):
-                    break
-        
-        n_found = len([v for v in result.values() if v])
-        if n_found > 0:
-            logger.info(f"[XPath] {ticker}: Total {n_found} fields extracted")
-        
-    except Exception as e:
-        logger.warning(f"[XPath] {ticker}: Parse failed - {str(e)}")
-    
-    return result
-
-
-def _parse_profile_with_regex(html_text, ticker):
-    """
-    Regex/text-based fallback for extracting profile info from Yahoo Finance HTML.
-    Used when lxml XPath fails or returns incomplete data.
-    """
-    result = {}
-    
-    # --- Embedded JSON extraction ---
-    import json as _json
-    
-    # Pattern 1: root.App.main (legacy)
-    pat1 = re.compile(r'root\.App\.main\s*=\s*(\{.*?\})\s*;\s*\n', re.DOTALL)
-    m = pat1.search(html_text)
-    if m:
-        try:
-            data = _json.loads(m.group(1))
-            qss = data.get("context", {}).get("dispatcher", {}).get("stores", {}).get("QuoteSummaryStore", {})
-            if qss:
-                profile = qss.get("assetProfile", {})
-                price = qss.get("price", {})
-                if profile.get("country"):
-                    result["country"] = profile["country"]
-                if profile.get("sector"):
-                    result["sector"] = profile["sector"]
-                if profile.get("industry"):
-                    result["industry"] = profile["industry"]
-                if price.get("currency"):
-                    result["currency"] = price["currency"]
-                if price.get("longName"):
-                    result["longName"] = price["longName"]
-                mc = price.get("marketCap", {})
-                if isinstance(mc, dict) and mc.get("raw"):
-                    result["marketCap"] = mc["raw"]
-                
-                if result.get("country"):
-                    logger.info(f"[Regex] {ticker}: Got {len(result)} fields via root.App.main JSON")
-                    return result
-        except Exception:
-            pass
-    
-    # Pattern 2: Direct JSON fragments
-    json_patterns = {
-        "country": re.compile(r'"country"\s*:\s*"([^"]+)"'),
-        "sector": re.compile(r'"sector"\s*:\s*"([^"]+)"'),
-        "industry": re.compile(r'"industry"\s*:\s*"([^"]+)"'),
-        "currency": re.compile(r'"currency"\s*:\s*"([A-Z]{3})"'),
-        "longName": re.compile(r'"longName"\s*:\s*"([^"]+)"'),
-    }
-    
-    for field, pat in json_patterns.items():
-        if not result.get(field):
-            m = pat.search(html_text)
-            if m:
-                result[field] = m.group(1)
-    
-    # Pattern 3: "headquartered in" text
-    if not result.get("country"):
-        hq_match = re.search(r'(?:headquartered|based)\s+in\s+([^.]+?)\.', html_text, re.IGNORECASE)
-        if hq_match:
-            hq_str = hq_match.group(1).strip()
-            parts = [p.strip() for p in hq_str.split(",")]
-            if len(parts) >= 2:
-                last = parts[-1].strip()
-                us_states = {
-                    "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
-                    "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
-                    "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
-                    "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
-                    "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
-                    "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
-                    "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
-                    "Wisconsin","Wyoming","District of Columbia"
-                }
-                result["country"] = "United States" if last in us_states else last
-                logger.info(f"[Regex] {ticker}: HQ='{hq_str}' -> country='{result['country']}'")
-    
-    if result:
-        logger.info(f"[Regex] {ticker}: Got {len([v for v in result.values() if v])} fields via regex")
-    
-    return result
-
-
-def fetch_company_profile_from_api(ticker):
-    """
-    Yahoo Finance에서 회사 프로필 (country, sector, marketCap 등) 조회.
-    
-    3단계 fallback:
-      1. quoteSummary API (v10) - 가장 빠르고 정확한 JSON API
-      2. Profile page XPath parsing (lxml) - user-provided XPath로 DOM 파싱
-      3. Profile page regex/text parsing - embedded JSON + "headquartered in" 패턴
-    
-    Returns: dict matching yfinance .info format, or {} if all fail.
-    """
-    cache_key = ticker.upper()
-    if cache_key in _profile_cache:
-        return _profile_cache[cache_key]
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
-    
-    result = {}
-    
-    # =========================================================================
-    # Phase 1: quoteSummary API (v10 JSON endpoint)
-    # =========================================================================
-    try:
-        modules = "assetProfile,defaultKeyStatistics,financialData,price"
-        api_url = (
-            f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{cache_key}"
-            f"?modules={modules}"
-        )
-        
-        logger.info(f"[Profile] Phase 1: quoteSummary API for {cache_key}...")
-        r = requests.get(api_url, headers=headers, timeout=15, verify=False)
-        r.raise_for_status()
-        data = r.json()
-        
-        summary = data.get("quoteSummary", {}).get("result", [])
-        if summary:
-            item = summary[0]
-            
-            profile = item.get("assetProfile", {})
-            if profile:
-                result["country"] = profile.get("country", "")
-                result["sector"] = profile.get("sector", "")
-                result["industry"] = profile.get("industry", "")
-                result["industryKey"] = profile.get("industryKey", "")
-            
-            price_data = item.get("price", {})
-            if price_data:
-                result["currency"] = price_data.get("currency", "USD")
-                result["longName"] = price_data.get("longName", cache_key)
-                mc = price_data.get("marketCap", {})
-                result["marketCap"] = mc.get("raw", 0) if isinstance(mc, dict) else (mc or 0)
-            
-            fin_data = item.get("financialData", {})
-            if fin_data:
-                for key in ["totalRevenue","ebitda","totalDebt","operatingMargins",
-                            "interestExpense","totalCash","currentRatio"]:
-                    val = fin_data.get(key, {})
-                    result[key] = val.get("raw", 0) if isinstance(val, dict) else (val or 0)
-            
-            key_stats = item.get("defaultKeyStatistics", {})
-            if key_stats:
-                if not result.get("marketCap"):
-                    mc2 = key_stats.get("enterpriseValue", {})
-                    result["marketCap"] = mc2.get("raw", 0) if isinstance(mc2, dict) else (mc2 or 0)
-                shares = key_stats.get("sharesOutstanding", {})
-                result["sharesOutstanding"] = shares.get("raw", 0) if isinstance(shares, dict) else (shares or 0)
-            
-            if result.get("country"):
-                logger.info(f"[Profile] Phase 1 SUCCESS: {cache_key} country={result['country']}")
-                _profile_cache[cache_key] = result
-                return result
-    except Exception as e:
-        logger.warning(f"[Profile] Phase 1 failed for {cache_key}: {str(e)}")
-    
-    time.sleep(random.uniform(0.5, 1.0))
-    
-    # =========================================================================
-    # Phase 2 & 3: Profile page HTML scraping (XPath + Regex fallback)
-    # =========================================================================
-    profile_urls = [
-        f"https://finance.yahoo.com/quote/{cache_key}/profile/",
-        f"https://finance.yahoo.com/quote/{cache_key}/",
-    ]
-    
-    for url_idx, profile_url in enumerate(profile_urls):
-        phase = url_idx + 2
-        try:
-            logger.info(f"[Profile] Phase {phase}: Scraping {profile_url}...")
-            r = requests.get(profile_url, headers=headers, timeout=15, verify=False)
-            
-            if r.status_code != 200 or len(r.text) < 1000:
-                logger.warning(f"[Profile] Phase {phase}: HTTP {r.status_code}, len={len(r.text)}")
-                continue
-            
-            html_text = r.text
-            
-            # Try XPath parsing first (most precise with user-provided path)
-            xpath_result = _parse_profile_with_xpath(html_text, cache_key)
-            if xpath_result:
-                result.update({k: v for k, v in xpath_result.items() if v})
-            
-            # Supplement with regex parsing (fills gaps)
-            regex_result = _parse_profile_with_regex(html_text, cache_key)
-            if regex_result:
-                for k, v in regex_result.items():
-                    if v and not result.get(k):
-                        result[k] = v
-            
-            if result.get("country"):
-                logger.info(f"[Profile] Phase {phase} SUCCESS: {cache_key} country={result['country']}, sector={result.get('sector','N/A')}")
-                _profile_cache[cache_key] = result
-                return result
-                
-        except Exception as e:
-            logger.warning(f"[Profile] Phase {phase} failed for {cache_key}: {str(e)}")
-        
-        time.sleep(random.uniform(0.5, 1.0))
-    
-    # Final: cache whatever we got
-    n_keys = len([v for v in result.values() if v])
-    if n_keys > 0:
-        logger.info(f"[Profile] {cache_key}: Partial result ({n_keys} fields)")
-    else:
-        logger.warning(f"[Profile] {cache_key}: All phases failed - no profile data")
-    
-    _profile_cache[cache_key] = result
-    return result
+_financial_ttm_cache = {}
 
 def fetch_financial_ttm_from_api(ticker):
     """
@@ -708,14 +287,12 @@ def get_value_max_fuzzy_with_priority(df, col_idx, keyword_priority_list, exclus
     
     return 0
 
-def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, debug_provision=False, keep_sign=False):
+def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, debug_provision=False):
     """
     Scans ALL rows. Normalizes strings (remove spaces, lower case) for matching.
-    Returns the value with the largest absolute magnitude found.
+    Returns the absolute largest value found.
     
     Args:
-        keep_sign: If True, return the original signed value (for EBIT, PretaxIncome etc.)
-                   If False (default), return abs(value) (for Revenue, Interest Expense etc.)
         debug_provision: If True, prints all provision-related rows found (for debugging)
     """
     candidates = []
@@ -749,9 +326,9 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, d
                     try:
                         val = df.loc[idx].iloc[col_idx]
                         if pd.notna(val) and val != 0:
-                            candidates.append(val)  # Keep original signed value
+                            candidates.append(abs(val))
                             if debug_provision:
-                                debug_matches.append(f"    MATCHED '{norm_kw}' -> Value: {val:,.0f}")
+                                debug_matches.append(f"    MATCHED '{norm_kw}' -> Value: {abs(val):,.0f}")
                         elif debug_provision:
                             debug_matches.append(f"    MATCHED '{norm_kw}' but value is 0 or NaN")
                     except Exception as e:
@@ -766,9 +343,7 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, d
             logger.info(f"Final candidates: {candidates}")
         
         if candidates:
-            # Pick the candidate with the largest absolute magnitude
-            best = max(candidates, key=abs)
-            return best if keep_sign else abs(best)
+            return max(candidates)
     except Exception as e:
         logger.warning(f"Fuzzy search failed: {str(e)}")
     return 0
@@ -1011,9 +586,6 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     Priority Logic v125.1 (Restored Normalization Logic):
     Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
     
-    - ebit: Yahoo-style EBIT (includes unusual items) - used for both sidebar and ICR
-    - For financial companies: PPNR = Pretax + abs(Provision)
-    
     1. Annual (Year-1)
     2. Yahoo Info TTM
     3. Calc TTM (Manual Sum)
@@ -1082,23 +654,18 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
         # Helper: extract values from a single column of a statement
         def extract_from_col(df, col_idx, df_cf=None, col_idx_cf=None):
             """Extract rev, ebit, ebitda, int_exp, pretax, provision from one column.
-            
-            - For non-financial: EBIT from Yahoo's EBIT row (includes unusual items).
-              Falls back to Operating Income if EBIT row not found.
-            - For financial: PPNR = Pretax + abs(Provision)
-            
             Provision uses yfinance fuzzy search only (NOT API TTM).
             API TTM is applied at the priority level, not per-column."""
             r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
             i = get_value_max_fuzzy(df, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
-            ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'], keep_sign=True)
+            ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'])
             
             p_tax = 0
             p_prov = 0
             val_e = 0
             
             if is_financial:
-                p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'], keep_sign=True)
+                p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'])
                 
                 # Provision: yfinance fuzzy search only (per-column)
                 provision_keywords = [
@@ -1136,17 +703,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     val_e = p_tax + abs(p_prov)
             
             if val_e == 0:
-                # Use Yahoo-style EBIT (includes unusual items) as standard
-                val_e = get_value_max_fuzzy(df, col_idx, 
-                    ['EBIT'], 
-                    exclusion_keywords=['EBITDA', 'Normalized EBITDA'],
-                    keep_sign=True)
-                # Fallback to Operating Income if no EBIT row
-                if val_e == 0:
-                    val_e = get_value_max_fuzzy(df, col_idx, 
-                        ['Operating Income', 'Operating Profit'], 
-                        exclusion_keywords=['EBITDA', 'Normalized EBITDA', 'Non Operating'],
-                        keep_sign=True)
+                val_e = get_value_max_fuzzy(df, col_idx, ['EBIT', 'Operating Income', 'Operating Profit'])
             
             return r, val_e, ed, i, p_tax, abs(p_prov)
 
@@ -1398,8 +955,12 @@ def get_target_financials(ticker):
         info = safe_yf_info(t, max_retries=5)
         
         if not info:
-            logger.warning(f"No info available for {ticker} - will try financial statements directly")
-            info = {}  # Use empty dict instead of early return
+            logger.warning(f"No info available for {ticker}")
+            return {
+                "int_exp": 0.0, "ebit": 0.0, "label_int": "N/A", "label_ebit": "N/A", 
+                "raw_pretax": 0, "raw_provision": 0, "category": "Small/Risky Firms", 
+                "tax_rate": 25.0, "country_name": "Unknown"
+            }
         
         country = info.get('country', 'Unknown')
         country_norm = str(country).upper().strip()
@@ -1435,8 +996,7 @@ def get_target_financials(ticker):
     except Exception as e:
         logger.error(f"Target financials fetch failed for {ticker}: {str(e)}")
         return {
-            "int_exp": 0.0, "ebit": 0.0,
-            "label_int": "N/A", "label_ebit": "N/A", 
+            "int_exp": 0.0, "ebit": 0.0, "label_int": "N/A", "label_ebit": "N/A", 
             "raw_pretax": 0, "raw_provision": 0, "category": "Small/Risky Firms", 
             "tax_rate": 25.0, "country_name": "Unknown"
         }
@@ -1473,9 +1033,8 @@ class DetailWACCModel:
             t = yf.Ticker(ticker)
             info = safe_yf_info(t)
             
-            if not info or len(info) < 5:
-                logger.warning(f"No info for {ticker} - trying alternative sources")
-                info = {}
+            if not info or len(info) < 5: 
+                return None, f"⚠️ {ticker}: No data available"
             
             curr = info.get('currency', 'USD')
             country = info.get('country', 'Unknown')
@@ -1484,36 +1043,12 @@ class DetailWACCModel:
             mkt_cap = info.get('marketCap', 0)
             debt = info.get('totalDebt', 0)
             
-            # Fallback: try fast_info for market cap
             if mkt_cap == 0: 
                 try: 
-                    fi = t.fast_info
-                    mkt_cap = getattr(fi, 'market_cap', 0) or 0
-                    if curr == 'USD' and mkt_cap == 0:
-                        # Try shares * price
-                        shares = getattr(fi, 'shares', 0) or 0
-                        price = getattr(fi, 'last_price', 0) or 0
-                        if shares > 0 and price > 0:
-                            mkt_cap = shares * price
-                    if mkt_cap > 0:
-                        logger.info(f"[Peer] {ticker}: Got mkt_cap from fast_info: ${mkt_cap:,.0f}")
+                    mkt_cap = t.fast_info.get('market_cap', 0)
                 except Exception as e:
                     logger.debug(f"Fast info failed for {ticker}: {str(e)}")
-            
-            if mkt_cap == 0:
-                return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)"
-            
-            # Fallback: try balance_sheet for total debt
-            if debt == 0:
-                try:
-                    bs = t.balance_sheet
-                    if not bs.empty:
-                        debt_val = get_value_max_fuzzy(bs, 0, ['Total Debt', 'Long Term Debt', 'Total Non Current Liabilities Net Minority Interest'])
-                        if debt_val > 0:
-                            debt = debt_val
-                            logger.info(f"[Peer] {ticker}: Got debt from balance_sheet: ${debt:,.0f}")
-                except Exception as e:
-                    logger.debug(f"Balance sheet failed for {ticker}: {str(e)}")
+                    return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)"
 
             rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int, pt, pp = \
                 get_financial_data_with_priority(t, info, ticker_symbol=ticker)
@@ -2143,3 +1678,4 @@ if 'result' in st.session_state:
                 st.dataframe(df3, use_container_width=True, hide_index=True)
             else: 
                 st.info(note)
+
