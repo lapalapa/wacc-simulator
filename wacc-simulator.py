@@ -600,15 +600,26 @@ def fetch_financial_ttm_from_api(ticker):
         }
         
         # Request provision, pretax income, and interest fields in a single API call
+        # Include many possible deposit interest key variants for bank detection
         keys = [
             "trailingCreditLossesProvision",
             "annualCreditLossesProvision",
             "trailingPretaxIncome",
             "annualPretaxIncome",
-            "trailingInterestExpenseOnDeposits",
-            "annualInterestExpenseOnDeposits",
             "trailingInterestExpense",
             "trailingInterestIncome",
+            # Deposit interest - try every possible naming convention
+            "trailingInterestExpenseOnDeposits",
+            "annualInterestExpenseOnDeposits",
+            "trailingInterestExpenseForDeposit",
+            "annualInterestExpenseForDeposit",
+            "trailingInterestExpenseForDeposits",
+            "annualInterestExpenseForDeposits",
+            "trailingInterestPaidOnDeposits",
+            "trailingDepositInterestExpense",
+            "trailingInterestOnDeposits",
+            "trailingInterestExpenseDeposit",
+            "annualInterestExpenseForDeposit",
         ]
         
         end_ts = int(time.time())
@@ -665,9 +676,9 @@ def fetch_financial_ttm_from_api(ticker):
                             if "creditloss" in type_lower or "provision" in type_lower:
                                 api_data["provision_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM Provision: ${raw_val:,.0f}")
-                            elif "interestexpenseondeposits" in type_lower:
+                            elif "deposit" in type_lower and "interest" in type_lower:
                                 api_data["int_exp_on_deposits_ttm"] = raw_val
-                                logger.info(f"[Financial API] {cache_key} TTM IntExpOnDeposits: ${raw_val:,.0f}")
+                                logger.info(f"[Financial API] {cache_key} TTM IntExpOnDeposits: ${raw_val:,.0f} (key: {type_name})")
                             elif "interestexpense" in type_lower and "deposit" not in type_lower:
                                 api_data["int_exp_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM IntExp: ${raw_val:,.0f}")
@@ -718,6 +729,94 @@ def fetch_financial_ttm_from_api(ticker):
     _financial_ttm_cache[cache_key] = None
     return None
 
+def scrape_yahoo_deposit_interest(ticker):
+    """
+    Scrape Yahoo Finance HTML page for Interest Expense on Deposits.
+    Yahoo Finance embeds financial data as JSON in the page source.
+    Falls back to multiple URL patterns.
+    Returns dollar amount or 0 if not found.
+    """
+    cache_key = f"_deposit_{ticker.upper()}"
+    if cache_key in _financial_ttm_cache:
+        return _financial_ttm_cache[cache_key] or 0
+    
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
+        
+        # Try financials page - data is embedded as JSON in script tags
+        urls = [
+            f"https://finance.yahoo.com/quote/{ticker}/financials/",
+            f"https://finance.yahoo.com/quote/{ticker}/financials",
+        ]
+        
+        for url in urls:
+            try:
+                r = requests.get(url, headers=headers, timeout=15, verify=False)
+                if r.status_code != 200:
+                    continue
+                
+                html = r.text
+                
+                # Method 1: Search for JSON data embedded in page
+                # Yahoo Finance embeds data in window.__PRELOADED_STATE__ or similar
+                import re, json
+                
+                # Look for deposit interest in raw HTML/JSON
+                deposit_patterns = [
+                    r'"InterestExpenseForDeposit[s]?"[^}]*?"raw"\s*:\s*(-?\d+)',
+                    r'"InterestExpenseOnDeposit[s]?"[^}]*?"raw"\s*:\s*(-?\d+)',
+                    r'"InterestOnDeposit[s]?"[^}]*?"raw"\s*:\s*(-?\d+)',
+                    r'"DepositInterestExpense"[^}]*?"raw"\s*:\s*(-?\d+)',
+                    r'"InterestPaidOnDeposit[s]?"[^}]*?"raw"\s*:\s*(-?\d+)',
+                    r'"interestExpenseForDeposit[s]?"[^}]*?"raw"\s*:\s*(-?\d+)',
+                    # Also try searching in text content
+                    r'[Ii]nterest\s+[Ee]xpense\s+(?:for|on)\s+[Dd]eposit[^"]*?(\d[\d,]+)',
+                ]
+                
+                for pattern in deposit_patterns:
+                    match = re.search(pattern, html)
+                    if match:
+                        val_str = match.group(1).replace(',', '')
+                        val = abs(int(val_str))
+                        if val > 1_000_000:  # Sanity check: > $1M
+                            logger.info(f"[Scrape] {ticker} Interest on Deposits from HTML: ${val:,.0f} (pattern: {pattern[:40]})")
+                            _financial_ttm_cache[cache_key] = val
+                            return val
+                
+                # Method 2: Parse embedded JSON from __PRELOADED_STATE__
+                json_match = re.search(r'root\.App\.main\s*=\s*({.*?});\s*\n', html, re.DOTALL)
+                if not json_match:
+                    json_match = re.search(r'"financialData"\s*:\s*({[^}]+})', html)
+                
+                if json_match:
+                    try:
+                        json_str = json_match.group(1)
+                        # Search for deposit keywords in this JSON blob
+                        deposit_search = re.findall(r'"([^"]*[Dd]eposit[^"]*)":\s*\{[^}]*"raw"\s*:\s*(-?\d+)', json_str)
+                        for key_found, val_str in deposit_search:
+                            val = abs(int(val_str))
+                            if val > 1_000_000 and 'interest' in key_found.lower():
+                                logger.info(f"[Scrape] {ticker} Found via JSON key '{key_found}': ${val:,.0f}")
+                                _financial_ttm_cache[cache_key] = val
+                                return val
+                    except:
+                        pass
+                        
+            except requests.RequestException:
+                continue
+        
+        logger.info(f"[Scrape] {ticker}: Interest on Deposits not found in HTML")
+        _financial_ttm_cache[cache_key] = 0
+        return 0
+        
+    except Exception as e:
+        logger.debug(f"[Scrape] {ticker} failed: {e}")
+        _financial_ttm_cache[cache_key] = 0
+        return 0
+
 # ==============================================================================
 # [MODULE] Helper: Deep Search with Normalization (v125 Logic)
 # ==============================================================================
@@ -757,14 +856,14 @@ def get_value_max_fuzzy_with_priority(df, col_idx, keyword_priority_list, exclus
                     try:
                         val = df.loc[idx].iloc[col_idx]
                         if pd.notna(val) and val != 0:
-                            matches.append((priority, abs(val), raw_idx_str))
+                            matches.append((priority, val, raw_idx_str))
                     except Exception as e:
                         logger.debug(f"Value extraction failed: {str(e)}")
                     break  # Only match once per row
         
-        # Return value from highest priority match
+        # Return value from highest priority match (by abs magnitude for ranking, but keep sign)
         if matches:
-            matches.sort(key=lambda x: x[0], reverse=True)  # Sort by priority (highest first)
+            matches.sort(key=lambda x: (x[0], abs(x[1])), reverse=True)  # Sort by priority then abs magnitude
             best_match = matches[0]
             logger.info(f"Provision matched: '{best_match[2]}' (priority: {best_match[0]}, value: ${best_match[1]:,.0f})")
             return best_match[1]
@@ -1150,7 +1249,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             
             - For non-financial: EBIT from Yahoo's EBIT row (includes unusual items).
               No Operating Income fallback (v1.4.1+).
-            - For financial: PPNR = Pretax + abs(Provision)
+            - For financial: PPNR = Pretax + Provision (keep original sign)
             
             Provision uses yfinance fuzzy search only (NOT API TTM).
             API TTM is applied at the priority level, not per-column."""
@@ -1198,7 +1297,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     )
                 
                 if p_tax != 0: 
-                    val_e = p_tax + abs(p_prov)
+                    val_e = p_tax - p_prov
             
             if val_e == 0:
                 # Use Yahoo-style EBIT only (includes unusual items) - no Operating Income fallback
@@ -1209,7 +1308,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 
                 logger.info(f"[extract_from_col] col={col_idx}: EBIT={val_e:,.0f}, EBITDA={ed:,.0f}, Rev={r:,.0f}, IntExp={i:,.0f}")
             
-            return r, val_e, ed, i, p_tax, abs(p_prov)
+            return r, val_e, ed, i, p_tax, p_prov
 
         # =================================================================
         # --- Priority 1: Annual (Year-1) from yfinance income_stmt ---
@@ -1232,8 +1331,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     if is_financial and pp == 0 and api_data:
                         for date_str, val in api_data.get('provision_annual', []):
                             if str(target_year) in date_str:
-                                pp = abs(val)
-                                e = pt + pp  # Recalculate PPNR
+                                pp = val  # keep original sign
+                                e = pt - pp  # Recalculate PPNR
                                 logger.info(f"[P1] Using API annual provision for {target_year}: ${pp:,.0f}")
                                 break
                     
@@ -1292,12 +1391,12 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             # EBIT / PPNR
             ebit = 0
             if is_financial:
-                # Financial companies: PPNR = PretaxIncome + abs(Provision)
+                # Financial companies: PPNR = PretaxIncome + Provision (keep original sign)
                 # Primary: Use Timeseries API TTM values
                 if api_data and api_data.get('pretax_ttm', 0) != 0:
                     raw_pretax = api_data['pretax_ttm']
-                    raw_provision = abs(api_data.get('provision_ttm', 0))
-                    ebit = raw_pretax + raw_provision
+                    raw_provision = api_data.get('provision_ttm', 0)
+                    ebit = raw_pretax - raw_provision
                     label_ebit = "TTM (Yahoo API)"
                     logger.info(f"[P2] Financial PPNR from API: pretax=${raw_pretax:,.0f} + provision=${raw_provision:,.0f} = ${ebit:,.0f}")
                 else:
@@ -1315,14 +1414,14 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         
                         # If yfinance found no provision, try API TTM as last resort
                         if q_prov == 0 and api_data:
-                            api_prov = abs(api_data.get('provision_ttm', 0))
-                            if api_prov > 0:
+                            api_prov = api_data.get('provision_ttm', 0)
+                            if api_prov != 0:
                                 q_prov = api_prov
                         
                         raw_pretax = q_pretax
                         raw_provision = q_prov
                         if q_pretax != 0:
-                            ebit = q_pretax + q_prov
+                            ebit = q_pretax - q_prov
                         label_ebit = "TTM (Calc Quarters)"
                         logger.info(f"[P2] Financial PPNR from quarters: pretax=${raw_pretax:,.0f} + provision=${raw_provision:,.0f}")
                     else:
@@ -1377,8 +1476,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             
             # [v1.4.0] If yfinance found no provision per-quarter, use API TTM
             if is_financial and raw_provision == 0 and api_data:
-                api_prov = abs(api_data.get('provision_ttm', 0))
-                if api_prov > 0:
+                api_prov = api_data.get('provision_ttm', 0)
+                if api_prov != 0:
                     raw_provision = api_prov
                     logger.info(f"[P3] Using API TTM provision: ${raw_provision:,.0f}")
             
@@ -1390,7 +1489,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     logger.info(f"[P3] Using API TTM pretax: ${raw_pretax:,.0f}")
             
             if is_financial: 
-                ebit = raw_pretax + raw_provision
+                ebit = raw_pretax - raw_provision
             
             return rev, ebit, ebitda, abs(int_exp), common_label, common_label, raw_pretax, raw_provision
 
@@ -1493,7 +1592,7 @@ def get_target_financials(ticker):
             except Exception as e:
                 logger.debug(f"Interest on Deposits API fetch failed: {e}")
             
-            # Fallback: try yfinance quarterly/annual income stmt
+            # Fallback 1: try yfinance quarterly/annual income stmt
             if int_on_deposits == 0:
                 try:
                     q_inc = t.quarterly_income_stmt
@@ -1501,7 +1600,8 @@ def get_target_financials(ticker):
                         for qi in range(min(4, q_inc.shape[1])):
                             iod_val = get_value_max_fuzzy(q_inc, qi, 
                                 ['Interest Expense On Deposits', 'Interest Paid On Deposits',
-                                 'Interest On Deposits', 'Deposit Interest Expense'])
+                                 'Interest On Deposits', 'Deposit Interest Expense',
+                                 'Interest Expense For Deposit', 'Interest Expense For Deposits'])
                             int_on_deposits += iod_val
                         if int_on_deposits > 0:
                             logger.info(f"[Target] Interest on Deposits from 4Q sum: ${int_on_deposits:,.0f}")
@@ -1512,13 +1612,20 @@ def get_target_financials(ticker):
                             for ci in range(min(3, a_inc.shape[1])):
                                 iod_val = get_value_max_fuzzy(a_inc, ci,
                                     ['Interest Expense On Deposits', 'Interest Paid On Deposits',
-                                     'Interest On Deposits', 'Deposit Interest Expense'])
+                                     'Interest On Deposits', 'Deposit Interest Expense',
+                                     'Interest Expense For Deposit', 'Interest Expense For Deposits'])
                                 if iod_val > 0:
                                     int_on_deposits = iod_val
                                     logger.info(f"[Target] Interest on Deposits from annual col {ci}: ${int_on_deposits:,.0f}")
                                     break
                 except Exception as e:
                     logger.debug(f"Interest on Deposits yfinance fetch failed: {e}")
+            
+            # Fallback 2: Scrape Yahoo Finance HTML page
+            if int_on_deposits == 0:
+                int_on_deposits = scrape_yahoo_deposit_interest(ticker)
+                if int_on_deposits > 0:
+                    logger.info(f"[Target] Interest on Deposits from HTML scrape: ${int_on_deposits:,.0f}")
         
         mkt_cap = info.get('marketCap', 0)
         sector = sector_str
@@ -1878,7 +1985,7 @@ with st.sidebar:
         if is_fin_target:
             # === FINANCIAL FIRMS ===
             # ICR = PPNR / (Total IE - Interest on Deposits)
-            st.caption("🏦 *Financial Firm: ICR = PPNR / (Total IE − Interest on Deposits)*")
+            st.caption("🏦 *Financial Firm: ICR = (PPNR + Fin.Interest) / Fin.Interest*")
             
             # Total Interest Expense
             _ie_default = _fmt_dollar(tf['int_exp'])
@@ -1904,13 +2011,13 @@ with st.sidebar:
             else:
                 st.caption(f"{_fmt_k(int_on_deposits_in)}")
             
-            # Non-Deposit Interest Expense (auto-calculated, editable) — used for ICR
+            # Financial Interest (auto-calculated, editable) — used for ICR
             _ndie_calc = max(int_exp_in - int_on_deposits_in, 0)
             _ndie_default = _fmt_dollar(_ndie_calc)
             _ndie_text = st.text_input(
-                "Non-Deposit Interest Exp (USD) — *used for ICR*",
+                "Financial Interest (USD) — *used for ICR*",
                 value=_ndie_default,
-                help="Total IE − Interest on Deposits (editable)"
+                help="Total IE − Interest on Deposits = debt/borrowing interest only (editable)"
             )
             non_deposit_ie_in = _parse_dollar(_ndie_text, _ndie_calc)
             st.caption(f"{_fmt_k(non_deposit_ie_in)} = Total IE {_fmt_k(int_exp_in)} − Deposits {_fmt_k(int_on_deposits_in)}")
@@ -1935,7 +2042,7 @@ with st.sidebar:
                 unsafe_allow_html=True
             )
             st.markdown(
-                f"<div class='small-font'>• (+) Provision: <b>{_fmt_k(tf.get('raw_provision', 0))}</b></div>", 
+                f"<div class='small-font'>• (−) Provision: <b>{_fmt_k(tf.get('raw_provision', 0))}</b></div>", 
                 unsafe_allow_html=True
             )
             st.markdown(
@@ -2099,6 +2206,11 @@ with st.sidebar:
                     _ie_api = _api_cache.get('int_exp_ttm', 0)
                     _ii_api = _api_cache.get('int_income_ttm', 0)
                     st.caption(f"  API: IntExp=${_ie_api:,.0f} DepositInt=${_iod:,.0f} IntIncome=${_ii_api:,.0f}")
+                
+                # Show scraping result
+                _scrape_key = f"_deposit_{target_ticker.upper()}"
+                _scrape_val = _financial_ttm_cache.get(_scrape_key, 'not tried')
+                st.caption(f"  HTML Scrape DepositInt: {('${:,.0f}'.format(_scrape_val) if isinstance(_scrape_val, (int, float)) else str(_scrape_val))}")
             except Exception as _pe:
                 st.caption(f"Priority path error: {_pe}")
             
@@ -2108,11 +2220,17 @@ with st.sidebar:
                 _ebit_dbg = _inp.get('ebit', 0)
                 _int_dbg = _inp.get('int_exp', 0)
                 _cat_dbg = _inp.get('category', '?')
-                _icr_dbg = _ebit_dbg / _int_dbg if _int_dbg > 0 else 100.0
+                if _cat_dbg == "Financial Firms":
+                    _icr_dbg = (_ebit_dbg + _int_dbg) / _int_dbg if _int_dbg > 0 else 100.0
+                else:
+                    _icr_dbg = _ebit_dbg / _int_dbg if _int_dbg > 0 else 100.0
                 
                 st.divider()
                 st.caption("**ICR → Spread Pipeline:**")
-                st.caption(f"① ICR = {_ebit_dbg:,.0f} / {_int_dbg:,.0f} = **{_icr_dbg:.2f}x**")
+                if _cat_dbg == "Financial Firms":
+                    st.caption(f"① ICR = ({_ebit_dbg:,.0f} + {_int_dbg:,.0f}) / {_int_dbg:,.0f} = **{_icr_dbg:.2f}x**")
+                else:
+                    st.caption(f"① ICR = {_ebit_dbg:,.0f} / {_int_dbg:,.0f} = **{_icr_dbg:.2f}x**")
                 
                 # Damodaran lookup
                 _dam_dict = get_damodaran_spreads()
@@ -2231,7 +2349,12 @@ if 'result' in st.session_state:
         ebit = inp.get('ebit', 0.0)
         category = inp.get('category', "Small/Risky Firms")
         
-        icr = ebit / int_exp if int_exp > 0 else 100.0
+        if category == "Financial Firms":
+            # Financial Firms: ICR = (PPNR + Financial Interest) / Financial Interest
+            icr = (ebit + int_exp) / int_exp if int_exp > 0 else 100.0
+        else:
+            # Non-Financial: ICR = EBIT / Interest Expense
+            icr = ebit / int_exp if int_exp > 0 else 100.0
         
         # 1. Get Table
         damodaran_dict = get_damodaran_spreads()
@@ -2397,7 +2520,7 @@ if 'result' in st.session_state:
         if category == "Financial Firms":
             st.caption(
                 f"Based on {category} Table from Damodaran. "
-                f"ICR = PPNR / (Total IE − Deposit Int) = {ebit:,.0f} / {int_exp:,.0f}"
+                f"ICR = (PPNR + Fin.Int) / Fin.Int = ({ebit:,.0f} + {int_exp:,.0f}) / {int_exp:,.0f}"
             )
         else:
             st.caption(
