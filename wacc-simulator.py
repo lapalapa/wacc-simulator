@@ -1200,7 +1200,6 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     is_financial = 'financial' in sector or 'bank' in sector
     
     current_year = datetime.now().year
-    target_year = current_year - 1
     
     # [v1.4.0] Pre-fetch TTM data from Yahoo Finance Timeseries API
     # Gets CreditLossesProvision and PretaxIncome (not available via yfinance info_dict)
@@ -1311,52 +1310,59 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             return r, val_e, ed, i, p_tax, p_prov
 
         # =================================================================
-        # --- Priority 1: Annual (Year-1) from yfinance income_stmt ---
+        # --- Priority 1: Most Recent Annual from yfinance income_stmt ---
+        # Use the first non-ghost (revenue > 0) annual column.
+        # Triple Lock is a warning only — does NOT block usage.
         # =================================================================
         if not a_fin.empty:
-            for idx, col in enumerate(a_fin.columns):
+            for col_idx_p1, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
-                if col_dt.year == target_year:
-                    # Find matching cash flow column
-                    cf_idx = None
-                    if not a_cf.empty:
-                        for cf_col_idx, cf_col in enumerate(a_cf.columns):
-                            if pd.to_datetime(cf_col).year == target_year:
-                                cf_idx = cf_col_idx
-                                break
+                
+                # Find matching cash flow column (same year)
+                cf_idx = None
+                if not a_cf.empty:
+                    for cf_col_idx, cf_col in enumerate(a_cf.columns):
+                        if pd.to_datetime(cf_col).year == col_dt.year:
+                            cf_idx = cf_col_idx
+                            break
+                
+                r_annual, e, ed, i, pt, pp = extract_from_col(a_fin, col_idx_p1, a_cf, cf_idx)
+                
+                # Skip ghost columns (all NaN / no revenue)
+                if not (pd.notna(r_annual) and r_annual > 1000):
+                    logger.info(f"[P1] {col.strftime('%Y-%m-%d')}: Ghost column (rev={r_annual}), trying next...")
+                    continue
+                
+                # [v1.4.0] If yfinance couldn't find provision, try API annual data
+                if is_financial and pp == 0 and api_data:
+                    for date_str, val in api_data.get('provision_annual', []):
+                        if str(col_dt.year) in date_str:
+                            pp = val  # keep original sign
+                            e = pt - pp  # Recalculate PPNR
+                            logger.info(f"[P1] Using API annual provision for {col_dt.year}: ${pp:,.0f}")
+                            break
+                
+                # Triple Lock Validation (warning only)
+                if not q_fin.empty:
+                    cutoff_date = col_dt - timedelta(days=360)
+                    valid_quarters = []
+                    q_rev_sum = 0
+                    for q_idx, q_col in enumerate(q_fin.columns):
+                        q_dt = pd.to_datetime(q_col)
+                        if cutoff_date < q_dt <= col_dt:
+                            valid_quarters.append(q_idx)
+                            q_rev_sum += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
                     
-                    r_annual, e, ed, i, pt, pp = extract_from_col(a_fin, idx, a_cf, cf_idx)
-                    
-                    # [v1.4.0] If yfinance couldn't find provision, try API annual data
-                    if is_financial and pp == 0 and api_data:
-                        for date_str, val in api_data.get('provision_annual', []):
-                            if str(target_year) in date_str:
-                                pp = val  # keep original sign
-                                e = pt - pp  # Recalculate PPNR
-                                logger.info(f"[P1] Using API annual provision for {target_year}: ${pp:,.0f}")
-                                break
-                    
-                    if pd.notna(r_annual) and r_annual > 1000:
-                        # Triple Lock Validation: annual rev ≈ sum of 4 quarters
-                        is_valid = False
-                        if not q_fin.empty:
-                            cutoff_date = col_dt - timedelta(days=360)
-                            valid_quarters = []
-                            q_rev_sum = 0
-                            for q_idx, q_col in enumerate(q_fin.columns):
-                                q_dt = pd.to_datetime(q_col)
-                                if cutoff_date < q_dt <= col_dt:
-                                    valid_quarters.append(q_idx)
-                                    q_rev_sum += get_value_max_fuzzy(q_fin, q_idx, ['Total Revenue', 'Revenue'])
-                            
-                            if len(valid_quarters) >= 4:
-                                if 0.9 <= (q_rev_sum / r_annual) <= 1.1:
-                                    is_valid = True
-                        
-                        if is_valid:
-                            lbl = col.strftime('%Y-%m-%d')
-                            logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}")
-                            return r_annual, e, ed, abs(i), lbl, lbl, pt, pp
+                    if len(valid_quarters) >= 4 and r_annual > 0:
+                        ratio = q_rev_sum / r_annual
+                        if not (0.9 <= ratio <= 1.1):
+                            logger.warning(f"[P1] Triple Lock WARNING: ratio={ratio:.2f} (Q_sum=${q_rev_sum:,.0f} vs Annual=${r_annual:,.0f})")
+                    elif len(valid_quarters) < 4:
+                        logger.info(f"[P1] Triple Lock: only {len(valid_quarters)} quarters for {col.strftime('%Y-%m-%d')}")
+                
+                lbl = col.strftime('%Y-%m-%d')
+                logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}, ie=${i:,.0f}")
+                return r_annual, e, ed, abs(i), lbl, lbl, pt, pp
         
         # =================================================================
         # --- Priority 2: Yahoo Info TTM (info_dict + Timeseries API) ---
