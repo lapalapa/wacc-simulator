@@ -1173,7 +1173,7 @@ def get_damodaran_spreads():
 def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     """
     Priority Logic v125.1 (Restored Normalization Logic):
-    Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision
+    Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision, int_on_deposits
     
     - ebit: Yahoo-style EBIT (includes unusual items) - used for both sidebar and ICR
     - For financial companies: PPNR = Pretax + abs(Provision)
@@ -1244,17 +1244,25 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
 
         # Helper: extract values from a single column of a statement
         def extract_from_col(df, col_idx, df_cf=None, col_idx_cf=None):
-            """Extract rev, ebit, ebitda, int_exp, pretax, provision from one column.
+            """Extract rev, ebit, ebitda, int_exp, pretax, provision, int_on_deposits from one column.
             
             - For non-financial: EBIT from Yahoo's EBIT row (includes unusual items).
               No Operating Income fallback (v1.4.1+).
-            - For financial: PPNR = Pretax + Provision (keep original sign)
+            - For financial: PPNR = Pretax - Provision (keep original sign)
             
             Provision uses yfinance fuzzy search only (NOT API TTM).
             API TTM is applied at the priority level, not per-column."""
             r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
             i = get_value_max_fuzzy(df, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
             ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'], keep_sign=True)
+            
+            # Interest on Deposits (for financial firms)
+            iod = 0
+            if is_financial:
+                iod = get_value_max_fuzzy(df, col_idx, 
+                    ['Interest Expense For Deposit', 'Interest Expense For Deposits',
+                     'Interest Expense On Deposits', 'Interest Paid On Deposits',
+                     'Interest On Deposits', 'Deposit Interest Expense'])
             
             p_tax = 0
             p_prov = 0
@@ -1307,7 +1315,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 
                 logger.info(f"[extract_from_col] col={col_idx}: EBIT={val_e:,.0f}, EBITDA={ed:,.0f}, Rev={r:,.0f}, IntExp={i:,.0f}")
             
-            return r, val_e, ed, i, p_tax, p_prov
+            return r, val_e, ed, i, p_tax, p_prov, iod
 
         # =================================================================
         # --- Priority 1: Most Recent Annual from yfinance income_stmt ---
@@ -1326,7 +1334,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                             cf_idx = cf_col_idx
                             break
                 
-                r_annual, e, ed, i, pt, pp = extract_from_col(a_fin, col_idx_p1, a_cf, cf_idx)
+                r_annual, e, ed, i, pt, pp, iod_annual = extract_from_col(a_fin, col_idx_p1, a_cf, cf_idx)
                 
                 # Skip ghost columns (all NaN / no revenue)
                 if not (pd.notna(r_annual) and r_annual > 1000):
@@ -1361,8 +1369,8 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         logger.info(f"[P1] Triple Lock: only {len(valid_quarters)} quarters for {col.strftime('%Y-%m-%d')}")
                 
                 lbl = col.strftime('%Y-%m-%d')
-                logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}, ie=${i:,.0f}")
-                return r_annual, e, ed, abs(i), lbl, lbl, pt, pp
+                logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}, ie=${i:,.0f}, iod=${iod_annual:,.0f}")
+                return r_annual, e, ed, abs(i), lbl, lbl, pt, pp, iod_annual
         
         # =================================================================
         # --- Priority 2: Yahoo Info TTM (info_dict + Timeseries API) ---
@@ -1414,7 +1422,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         q_prov = 0
                         for q_idx in range(4):
                             cf_idx = q_idx if recent_4_cf is not None else None
-                            _, _, _, _, pt, pp = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
+                            _, _, _, _, pt, pp, _ = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
                             q_pretax += pt
                             q_prov += pp
                         
@@ -1446,7 +1454,11 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             
             if int_exp is None: 
                 int_exp = 0
-            return rev, ebit, ebitda, abs(int_exp), label_ebit, label_int, raw_pretax, raw_provision
+            # P2: get int_on_deposits from API TTM (same period as other TTM data)
+            iod_p2 = 0
+            if is_financial and api_data:
+                iod_p2 = abs(api_data.get('int_exp_on_deposits_ttm', 0))
+            return rev, ebit, ebitda, abs(int_exp), label_ebit, label_int, raw_pretax, raw_provision, iod_p2
 
         # =================================================================
         # --- Priority 3: Calc TTM (sum of 4 most recent quarters) ---
@@ -1464,15 +1476,17 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             ebit = 0
             raw_pretax = 0
             raw_provision = 0
+            iod_p3 = 0
             
             for q_idx in range(4):
                 cf_idx = q_idx if recent_4_cf is not None else None
-                r_q, e_q, ed_q, i_q, pt_q, pp_q = extract_from_col(
+                r_q, e_q, ed_q, i_q, pt_q, pp_q, iod_q = extract_from_col(
                     recent_4, q_idx, recent_4_cf, cf_idx
                 )
                 rev += r_q
                 ebitda += ed_q
                 int_exp += i_q
+                iod_p3 += iod_q
                 
                 if is_financial:
                     raw_pretax += pt_q
@@ -1497,12 +1511,12 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             if is_financial: 
                 ebit = raw_pretax - raw_provision
             
-            return rev, ebit, ebitda, abs(int_exp), common_label, common_label, raw_pretax, raw_provision
+            return rev, ebit, ebitda, abs(int_exp), common_label, common_label, raw_pretax, raw_provision, iod_p3
 
     except Exception as e:
         logger.error(f"Financial data extraction failed: {str(e)}")
     
-    return 0, 0, 0, 0, "No Data", "No Data", 0, 0
+    return 0, 0, 0, 0, "No Data", "No Data", 0, 0, 0
 
 # ==============================================================================
 # [MODULE] Peer Recommender & Financials
@@ -1579,59 +1593,16 @@ def get_target_financials(ticker):
             else: 
                 target_tax = 25.0
         
-        rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision = \
+        rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision, int_on_deposits = \
             get_financial_data_with_priority(t, info, ticker_symbol=ticker)
         
-        # Fetch Interest on Deposits for Financial Firms
-        # ICR = PPNR / (Total Interest Expense - Interest on Deposits)
-        int_on_deposits = 0
+        # For financial firms, if int_on_deposits still 0, try HTML scraping as last resort
         sector_str = str(info.get('sector', '')).lower()
         is_fin_check = 'financial' in sector_str or 'bank' in sector_str
-        if is_fin_check:
-            # Primary: Yahoo Timeseries API (fetched during get_financial_data_with_priority)
-            try:
-                api_cache = _financial_ttm_cache.get(ticker.upper())
-                if api_cache:
-                    int_on_deposits = abs(api_cache.get('int_exp_on_deposits_ttm', 0))
-                    if int_on_deposits > 0:
-                        logger.info(f"[Target] Interest on Deposits from API TTM: ${int_on_deposits:,.0f}")
-            except Exception as e:
-                logger.debug(f"Interest on Deposits API fetch failed: {e}")
-            
-            # Fallback 1: try yfinance quarterly/annual income stmt
-            if int_on_deposits == 0:
-                try:
-                    q_inc = t.quarterly_income_stmt
-                    if not q_inc.empty and q_inc.shape[1] >= 4:
-                        for qi in range(min(4, q_inc.shape[1])):
-                            iod_val = get_value_max_fuzzy(q_inc, qi, 
-                                ['Interest Expense On Deposits', 'Interest Paid On Deposits',
-                                 'Interest On Deposits', 'Deposit Interest Expense',
-                                 'Interest Expense For Deposit', 'Interest Expense For Deposits'])
-                            int_on_deposits += iod_val
-                        if int_on_deposits > 0:
-                            logger.info(f"[Target] Interest on Deposits from 4Q sum: ${int_on_deposits:,.0f}")
-                    
-                    if int_on_deposits == 0:
-                        a_inc = t.income_stmt
-                        if not a_inc.empty:
-                            for ci in range(min(3, a_inc.shape[1])):
-                                iod_val = get_value_max_fuzzy(a_inc, ci,
-                                    ['Interest Expense On Deposits', 'Interest Paid On Deposits',
-                                     'Interest On Deposits', 'Deposit Interest Expense',
-                                     'Interest Expense For Deposit', 'Interest Expense For Deposits'])
-                                if iod_val > 0:
-                                    int_on_deposits = iod_val
-                                    logger.info(f"[Target] Interest on Deposits from annual col {ci}: ${int_on_deposits:,.0f}")
-                                    break
-                except Exception as e:
-                    logger.debug(f"Interest on Deposits yfinance fetch failed: {e}")
-            
-            # Fallback 2: Scrape Yahoo Finance HTML page
-            if int_on_deposits == 0:
-                int_on_deposits = scrape_yahoo_deposit_interest(ticker)
-                if int_on_deposits > 0:
-                    logger.info(f"[Target] Interest on Deposits from HTML scrape: ${int_on_deposits:,.0f}")
+        if is_fin_check and int_on_deposits == 0:
+            int_on_deposits = scrape_yahoo_deposit_interest(ticker)
+            if int_on_deposits > 0:
+                logger.info(f"[Target] Interest on Deposits from HTML scrape: ${int_on_deposits:,.0f}")
         
         mkt_cap = info.get('marketCap', 0)
         sector = sector_str
@@ -1803,7 +1774,7 @@ class DetailWACCModel:
                 except Exception as e:
                     logger.debug(f"Balance sheet failed for {ticker}: {str(e)}")
 
-            rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int, pt, pp = \
+            rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int, pt, pp, _ = \
                 get_financial_data_with_priority(t, info, ticker_symbol=ticker)
             
             if rev == 0: 
@@ -2200,9 +2171,9 @@ with st.sidebar:
                     st.caption("income_stmt: **EMPTY**")
                 
                 # Test get_financial_data_with_priority directly
-                _dbg_rev, _dbg_ebit, _dbg_ebitda, _dbg_ie, _dbg_le, _dbg_li, _dbg_pt, _dbg_pp = \
+                _dbg_rev, _dbg_ebit, _dbg_ebitda, _dbg_ie, _dbg_le, _dbg_li, _dbg_pt, _dbg_pp, _dbg_iod = \
                     get_financial_data_with_priority(_dbg_t, _dbg_info, ticker_symbol=target_ticker)
-                st.caption(f"Priority result: rev=${_dbg_rev:,.0f} ebit=${_dbg_ebit:,.0f} ie=${_dbg_ie:,.0f}")
+                st.caption(f"Priority result: rev=${_dbg_rev:,.0f} ebit=${_dbg_ebit:,.0f} ie=${_dbg_ie:,.0f} iod=${_dbg_iod:,.0f}")
                 st.caption(f"  pretax=${_dbg_pt:,.0f} provision=${_dbg_pp:,.0f} label={_dbg_le}")
                 
                 # Show API interest data for financial firms
