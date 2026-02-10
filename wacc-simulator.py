@@ -1318,13 +1318,19 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             return r, val_e, ed, i, p_tax, p_prov, iod
 
         # =================================================================
-        # --- Priority 1: Most Recent Annual from yfinance income_stmt ---
-        # Use the first non-ghost (revenue > 0) annual column.
-        # Triple Lock is a warning only — does NOT block usage.
+        # --- Priority 1: Annual from yfinance income_stmt ---
+        # Only accept columns from current_year or current_year - 1.
+        # Skip ghost columns (NaN revenue). Triple Lock is warning only.
         # =================================================================
+        target_year = current_year - 1  # 2025 as of Feb 2026
         if not a_fin.empty:
             for col_idx_p1, col in enumerate(a_fin.columns):
                 col_dt = pd.to_datetime(col)
+                
+                # Only accept current_year or current_year - 1
+                if col_dt.year < target_year:
+                    logger.info(f"[P1] {col.strftime('%Y-%m-%d')}: Too old (need >={target_year}), skipping P1")
+                    break  # Columns are sorted newest first, so stop
                 
                 # Find matching cash flow column (same year)
                 cf_idx = None
@@ -1364,7 +1370,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     if len(valid_quarters) >= 4 and r_annual > 0:
                         ratio = q_rev_sum / r_annual
                         if not (0.9 <= ratio <= 1.1):
-                            logger.warning(f"[P1] Triple Lock WARNING: ratio={ratio:.2f} (Q_sum=${q_rev_sum:,.0f} vs Annual=${r_annual:,.0f})")
+                            logger.warning(f"[P1] Triple Lock WARNING: ratio={ratio:.2f}")
                     elif len(valid_quarters) < 4:
                         logger.info(f"[P1] Triple Lock: only {len(valid_quarters)} quarters for {col.strftime('%Y-%m-%d')}")
                 
