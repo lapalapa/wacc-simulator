@@ -2444,16 +2444,26 @@ if 'result' in st.session_state:
             
             st.divider()
             st.markdown("##### Beta Calculation Methodologies")
-            mc1, mc2, mc3 = st.columns(3)
-            with mc1: 
-                st.markdown("**1. Adjusted Beta**")
-                st.latex(r"\beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33")
-            with mc2: 
-                st.markdown("**2. Unlevered Beta**")
-                st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
-            with mc3: 
-                st.markdown("**3. Re-levered Beta**")
-                st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
+            if is_financial_firm:
+                st.info("🏦 **Financial Firms**: Adjusted Beta (Bloomberg) is used directly — Hamada unlevering/relevering is skipped because financial firms' debt is primarily operational (deposits), not financial leverage.")
+                mc1, mc2 = st.columns(2)
+                with mc1:
+                    st.markdown("**1. Raw Beta**")
+                    st.latex(r"\beta_{raw} = \text{5Y Monthly Regression vs Market}")
+                with mc2:
+                    st.markdown("**2. Adjusted Beta (= used for Ke)**")
+                    st.latex(r"\beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33")
+            else:
+                mc1, mc2, mc3 = st.columns(3)
+                with mc1: 
+                    st.markdown("**1. Adjusted Beta**")
+                    st.latex(r"\beta_{adj} = 0.67 \cdot \beta_{raw} + 0.33")
+                with mc2: 
+                    st.markdown("**2. Unlevered Beta**")
+                    st.latex(r"\beta_U = \frac{\beta_{adj}}{1 + (1 - T_{peer}) \frac{D}{E}}")
+                with mc3: 
+                    st.markdown("**3. Re-levered Beta**")
+                    st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
 
             st.divider()
             st.markdown("##### Adjust Peer Tax Rates")
@@ -2477,7 +2487,7 @@ if 'result' in st.session_state:
         c1.metric("Final WACC", f"{wacc:.2%}")
         c2.metric("Cost of Equity", f"{ke:.2%}")
         c3.metric("Cost of Debt (A-T)", f"{kd:.2%}")
-        c4.metric("Observed Beta" if is_financial_firm else "Re-levered Beta", f"{target_relevered_beta:.2f}")
+        c4.metric("Adjusted Beta" if is_financial_firm else "Re-levered Beta", f"{target_relevered_beta:.2f}")
         st.caption(
             f"**Target Structure ({sens_method}):** Debt {wd:.1%} | Equity {we:.1%} (Implied D/E: {target_de:.2%})"
         )
@@ -2515,7 +2525,7 @@ if 'result' in st.session_state:
     )
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
-    k2.metric("Beta (Observed)" if category == "Financial Firms" else "Beta (Re-levered)", f"{target_relevered_beta:.2f}")
+    k2.metric("Beta (Adjusted)" if category == "Financial Firms" else "Beta (Re-levered)", f"{target_relevered_beta:.2f}")
     k3.metric("Market Risk Prem", f"{m['MRP']*100:.2f}%")
     k4.metric("Country Risk Prem", f"{inp['crp']:.2f}%")
     k5.metric("Size Premium", f"{inp['sp']:.2f}%")
