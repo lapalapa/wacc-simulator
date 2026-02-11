@@ -1207,7 +1207,39 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     label_int = "N/A"
     
     sector = str(info_dict.get('sector', '')).lower()
+    industry = str(info_dict.get('industry', '')).lower()
     is_financial = 'financial' in sector or 'bank' in sector
+    
+    # Financial industry subtype for ICR numerator formula
+    # Group 1: Banks/Credit → PPNR = Pretax + Provision (add-back credit losses)
+    # Group 2: Insurance → Pretax − Realized Gain/Loss on Investments + Interest Expense
+    # Group 3: Others (Asset Mgmt, Brokers, Exchanges, etc.) → Non-financial EBIT logic
+    BANK_INDUSTRIES = [
+        'banks - diversified', 'banks - regional', 'mortgage finance', 'credit services',
+        'banks—diversified', 'banks—regional',
+    ]
+    INSURANCE_INDUSTRIES = [
+        'insurance - life', 'insurance - property & casualty', 'insurance - diversified',
+        'insurance - reinsurance', 'insurance - specialty',
+        'insurance—life', 'insurance—property & casualty', 'insurance—diversified',
+        'insurance—reinsurance', 'insurance—specialty',
+    ]
+    NONFINANCIAL_LOGIC_INDUSTRIES = [
+        'financial data & stock exchanges', 'insurance brokers', 'asset management',
+        'capital markets', 'financial conglomerates', 'shell companies',
+    ]
+    
+    fin_subtype = 'non_financial'  # default
+    if is_financial:
+        if any(ind in industry for ind in BANK_INDUSTRIES):
+            fin_subtype = 'bank'
+        elif any(ind in industry for ind in INSURANCE_INDUSTRIES):
+            fin_subtype = 'insurance'
+        elif any(ind in industry for ind in NONFINANCIAL_LOGIC_INDUSTRIES):
+            fin_subtype = 'fin_nonbank'  # use non-financial EBIT logic
+        else:
+            fin_subtype = 'bank'  # default for unrecognized financial industry
+        logger.info(f"[Financial Subtype] industry='{industry}' → subtype='{fin_subtype}'")
     
     current_year = datetime.now().year
     
@@ -1256,21 +1288,21 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
 
         # Helper: extract values from a single column of a statement
         def extract_from_col(df, col_idx, df_cf=None, col_idx_cf=None):
-            """Extract rev, ebit, ebitda, int_exp, pretax, provision, int_on_deposits from one column.
+            """Extract rev, ebit, ebitda, int_exp, pretax, provision, int_on_deposits, realized_gl from one column.
             
-            - For non-financial: EBIT from Yahoo's EBIT row (includes unusual items).
-              No Operating Income fallback (v1.4.1+).
-            - For financial: PPNR = Pretax - Provision (keep original sign)
-            
-            Provision uses yfinance fuzzy search only (NOT API TTM).
-            API TTM is applied at the priority level, not per-column."""
+            Financial subtypes:
+            - bank: PPNR = Pretax - Provision (add-back credit losses)
+            - insurance: Adj Pretax = Pretax - Net Realized Gain/Loss on Investments
+            - fin_nonbank: same as non-financial (use EBIT)
+            - non_financial: EBIT from Yahoo's EBIT row
+            """
             r = get_value_max_fuzzy(df, col_idx, ['Total Revenue', 'Revenue'])
             i = get_value_max_fuzzy(df, col_idx, ['Interest Expense', 'Interest Expense Non Operating'])
             ed = get_value_max_fuzzy(df, col_idx, ['EBITDA', 'Normalized EBITDA'], keep_sign=True)
             
-            # Interest on Deposits (for financial firms)
+            # Interest on Deposits (for bank subtype)
             iod = 0
-            if is_financial:
+            if fin_subtype == 'bank':
                 iod = get_value_max_fuzzy(df, col_idx, 
                     ['Interest Expense For Deposit', 'Interest Expense For Deposits',
                      'Interest Expense On Deposits', 'Interest Paid On Deposits',
@@ -1278,12 +1310,13 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             
             p_tax = 0
             p_prov = 0
+            realized_gl = 0
             val_e = 0
             
-            if is_financial:
+            if fin_subtype == 'bank':
+                # Banks/Credit: PPNR = Pretax - Provision
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'], keep_sign=True)
                 
-                # Provision: yfinance fuzzy search only (per-column)
                 provision_keywords = [
                     ('provisionforcreditlosses', 10),
                     ('creditlossesprovision', 10),
@@ -1303,13 +1336,10 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     'taxbenefit', 'changein', 'beginningbalance', 'endingbalance',
                 ]
                 
-                # Try Cash Flow Statement first
                 if df_cf is not None and not df_cf.empty and col_idx_cf is not None:
                     p_prov = get_value_max_fuzzy_with_priority(
                         df_cf, col_idx_cf, provision_keywords, exclusion_keywords
                     )
-                
-                # Then Income Statement
                 if p_prov == 0:
                     p_prov = get_value_max_fuzzy_with_priority(
                         df, col_idx, provision_keywords, exclusion_keywords
@@ -1317,9 +1347,21 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 
                 if p_tax != 0: 
                     val_e = p_tax - p_prov
+                    
+            elif fin_subtype == 'insurance':
+                # Insurance: Adj Pretax = Pretax - Net Realized Gain/Loss on Investments
+                p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'], keep_sign=True)
+                realized_gl = get_value_max_fuzzy(df, col_idx, 
+                    ['Gain On Sale Of Security', 'Net Realized Gain Loss On Investments',
+                     'Realized Gain Loss On Investments', 'Gain Loss On Investment Securities'],
+                    keep_sign=True)
+                
+                if p_tax != 0:
+                    val_e = p_tax - realized_gl  # Remove realized gains to get operating pretax
+                    
+            # fin_nonbank and non_financial: fall through to EBIT
             
             if val_e == 0:
-                # Use Yahoo-style EBIT only (includes unusual items) - no Operating Income fallback
                 val_e = get_value_max_fuzzy(df, col_idx, 
                     ['EBIT'], 
                     exclusion_keywords=['EBITDA', 'Normalized EBITDA'],
@@ -1327,7 +1369,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 
                 logger.info(f"[extract_from_col] col={col_idx}: EBIT={val_e:,.0f}, EBITDA={ed:,.0f}, Rev={r:,.0f}, IntExp={i:,.0f}")
             
-            return r, val_e, ed, i, p_tax, p_prov, iod
+            return r, val_e, ed, i, p_tax, p_prov, iod, realized_gl
 
         # =================================================================
         # --- Priority 1: Annual from yfinance income_stmt ---
@@ -1352,7 +1394,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                             cf_idx = cf_col_idx
                             break
                 
-                r_annual, e, ed, i, pt, pp, iod_annual = extract_from_col(a_fin, col_idx_p1, a_cf, cf_idx)
+                r_annual, e, ed, i, pt, pp, iod_annual, rgl_annual = extract_from_col(a_fin, col_idx_p1, a_cf, cf_idx)
                 
                 # Skip ghost columns (all NaN / no revenue)
                 if not (pd.notna(r_annual) and r_annual > 1000):
@@ -1388,7 +1430,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 
                 lbl = col.strftime('%Y-%m-%d')
                 logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}, ie=${i:,.0f}, iod=${iod_annual:,.0f}")
-                return r_annual, e, ed, abs(i), lbl, lbl, pt, pp, iod_annual
+                return r_annual, e, ed, abs(i), lbl, lbl, pt, pp, iod_annual, fin_subtype
         
         # =================================================================
         # --- Priority 2: Yahoo Info TTM (info_dict + Timeseries API) ---
@@ -1428,19 +1470,17 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     int_exp = 0
                     label_int = "N/A"
 
-            # EBIT / PPNR
+            # EBIT / PPNR by financial subtype
             ebit = 0
-            if is_financial:
-                # Financial companies: PPNR = PretaxIncome + Provision (keep original sign)
-                # Primary: Use Timeseries API TTM values
+            if fin_subtype == 'bank':
+                # Banks: PPNR = PretaxIncome - Provision
                 if api_data and api_data.get('pretax_ttm', 0) != 0:
                     raw_pretax = api_data['pretax_ttm']
                     raw_provision = api_data.get('provision_ttm', 0)
                     ebit = raw_pretax - raw_provision
                     label_ebit = "TTM (Yahoo API)"
-                    logger.info(f"[P2] Financial PPNR from API: pretax=${raw_pretax:,.0f} + provision=${raw_provision:,.0f} = ${ebit:,.0f}")
+                    logger.info(f"[P2] Bank PPNR from API: pretax=${raw_pretax:,.0f} - provision=${raw_provision:,.0f} = ${ebit:,.0f}")
                 else:
-                    # Fallback: sum quarterly pretax/provision from yfinance
                     if not q_fin.empty and q_fin.shape[1] >= 4:
                         recent_4 = q_fin.iloc[:, :4]
                         recent_4_cf = q_cf.iloc[:, :4] if not q_cf.empty and q_cf.shape[1] >= 4 else None
@@ -1448,37 +1488,61 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         q_prov = 0
                         for q_idx in range(4):
                             cf_idx = q_idx if recent_4_cf is not None else None
-                            _, _, _, _, pt, pp, _ = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
+                            _, _, _, _, pt, pp, _, _ = extract_from_col(recent_4, q_idx, recent_4_cf, cf_idx)
                             q_pretax += pt
                             q_prov += pp
-                        
-                        # If yfinance found no provision, try API TTM as last resort
                         if q_prov == 0 and api_data:
                             api_prov = api_data.get('provision_ttm', 0)
                             if api_prov != 0:
                                 q_prov = api_prov
-                        
                         raw_pretax = q_pretax
                         raw_provision = q_prov
                         if q_pretax != 0:
                             ebit = q_pretax - q_prov
                         label_ebit = "TTM (Calc Quarters)"
-                        logger.info(f"[P2] Financial PPNR from quarters: pretax=${raw_pretax:,.0f} + provision=${raw_provision:,.0f}")
+                    else:
+                        label_ebit = "N/A"
+                        
+            elif fin_subtype == 'insurance':
+                # Insurance: Adj Pretax = Pretax - Net Realized Gain/Loss on Investments
+                if api_data and api_data.get('pretax_ttm', 0) != 0:
+                    raw_pretax = api_data['pretax_ttm']
+                    # realized_gl from API not available, try quarterly sum
+                    rgl_sum = 0
+                    if not q_fin.empty and q_fin.shape[1] >= 4:
+                        for q_idx in range(4):
+                            _, _, _, _, _, _, _, rgl_q = extract_from_col(q_fin.iloc[:, :4], q_idx)
+                            rgl_sum += rgl_q
+                    ebit = raw_pretax - rgl_sum
+                    label_ebit = "TTM (Yahoo API)"
+                    logger.info(f"[P2] Insurance Adj Pretax from API: pretax=${raw_pretax:,.0f} - realized_gl=${rgl_sum:,.0f} = ${ebit:,.0f}")
+                else:
+                    if not q_fin.empty and q_fin.shape[1] >= 4:
+                        recent_4 = q_fin.iloc[:, :4]
+                        q_pretax = 0
+                        q_rgl = 0
+                        for q_idx in range(4):
+                            _, _, _, _, pt, _, _, rgl_q = extract_from_col(recent_4, q_idx)
+                            q_pretax += pt
+                            q_rgl += rgl_q
+                        raw_pretax = q_pretax
+                        if q_pretax != 0:
+                            ebit = q_pretax - q_rgl
+                        label_ebit = "TTM (Calc Quarters)"
                     else:
                         label_ebit = "N/A"
             else:
-                # Non-financial: EBIT from API TTM first, then sum of 4 quarters
+                # Non-financial & fin_nonbank: EBIT from API TTM first, then 4Q sum
                 if api_data and api_data.get('ebit_ttm', 0) != 0:
                     ebit = api_data['ebit_ttm']
                     label_ebit = "TTM (Yahoo API)"
                     logger.info(f"[P2] Non-Financial EBIT from API TTM: ${ebit:,.0f}")
                 else:
-                    # Fallback: sum quarterly EBIT from yfinance
                     if not q_fin.empty and q_fin.shape[1] >= 4:
                         recent_4 = q_fin.iloc[:, :4]
                         q_ebit_sum = 0
                         for q_idx in range(4):
-                            _, e_q, _, _, _, _, _ = extract_from_col(recent_4, q_idx)
+                            _, e_q, _, _, _, _, _, _ = extract_from_col(recent_4, q_idx)
                             q_ebit_sum += e_q
                         if q_ebit_sum != 0:
                             ebit = q_ebit_sum
@@ -1501,7 +1565,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             iod_p2 = 0
             if is_financial and api_data:
                 iod_p2 = abs(api_data.get('int_exp_on_deposits_ttm', 0))
-            return rev, ebit, ebitda, abs(int_exp), label_ebit, label_int, raw_pretax, raw_provision, iod_p2
+            return rev, ebit, ebitda, abs(int_exp), label_ebit, label_int, raw_pretax, raw_provision, iod_p2, fin_subtype
 
         # =================================================================
         # --- Priority 3: Calc TTM (sum of 4 most recent quarters) ---
@@ -1520,46 +1584,50 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             raw_pretax = 0
             raw_provision = 0
             iod_p3 = 0
+            rgl_p3 = 0
             
             for q_idx in range(4):
                 cf_idx = q_idx if recent_4_cf is not None else None
-                r_q, e_q, ed_q, i_q, pt_q, pp_q, iod_q = extract_from_col(
+                r_q, e_q, ed_q, i_q, pt_q, pp_q, iod_q, rgl_q = extract_from_col(
                     recent_4, q_idx, recent_4_cf, cf_idx
                 )
                 rev += r_q
                 ebitda += ed_q
                 int_exp += i_q
                 iod_p3 += iod_q
+                rgl_p3 += rgl_q
                 
-                if is_financial:
+                if fin_subtype in ('bank', 'insurance'):
                     raw_pretax += pt_q
                     raw_provision += pp_q
                 else:
                     ebit += e_q
             
             # [v1.4.0] If yfinance found no provision per-quarter, use API TTM
-            if is_financial and raw_provision == 0 and api_data:
+            if fin_subtype == 'bank' and raw_provision == 0 and api_data:
                 api_prov = api_data.get('provision_ttm', 0)
                 if api_prov != 0:
                     raw_provision = api_prov
                     logger.info(f"[P3] Using API TTM provision: ${raw_provision:,.0f}")
             
             # [v1.4.0] If yfinance found no pretax per-quarter, use API TTM
-            if is_financial and raw_pretax == 0 and api_data:
+            if fin_subtype in ('bank', 'insurance') and raw_pretax == 0 and api_data:
                 api_pt = api_data.get('pretax_ttm', 0)
                 if api_pt != 0:
                     raw_pretax = api_pt
                     logger.info(f"[P3] Using API TTM pretax: ${raw_pretax:,.0f}")
             
-            if is_financial: 
+            if fin_subtype == 'bank':
                 ebit = raw_pretax - raw_provision
+            elif fin_subtype == 'insurance':
+                ebit = raw_pretax - rgl_p3
             
-            return rev, ebit, ebitda, abs(int_exp), common_label, common_label, raw_pretax, raw_provision, iod_p3
+            return rev, ebit, ebitda, abs(int_exp), common_label, common_label, raw_pretax, raw_provision, iod_p3, fin_subtype
 
     except Exception as e:
         logger.error(f"Financial data extraction failed: {str(e)}")
     
-    return 0, 0, 0, 0, "No Data", "No Data", 0, 0, 0
+    return 0, 0, 0, 0, "No Data", "No Data", 0, 0, 0, "non_financial"
 
 # ==============================================================================
 # [MODULE] Peer Recommender & Financials
@@ -1636,13 +1704,11 @@ def get_target_financials(ticker):
             else: 
                 target_tax = 25.0
         
-        rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision, int_on_deposits = \
+        rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision, int_on_deposits, fin_subtype = \
             get_financial_data_with_priority(t, info, ticker_symbol=ticker)
         
-        # For financial firms, if int_on_deposits still 0, try HTML scraping as last resort
-        sector_str = str(info.get('sector', '')).lower()
-        is_fin_check = 'financial' in sector_str or 'bank' in sector_str
-        if is_fin_check and int_on_deposits == 0:
+        # For bank subtype, if int_on_deposits still 0, try HTML scraping as last resort
+        if fin_subtype == 'bank' and int_on_deposits == 0:
             int_on_deposits = scrape_yahoo_deposit_interest(ticker)
             if int_on_deposits > 0:
                 logger.info(f"[Target] Interest on Deposits from HTML scrape: ${int_on_deposits:,.0f}")
@@ -1726,6 +1792,7 @@ def get_target_financials(ticker):
             "raw_pretax_local": raw_pretax, "raw_provision_local": raw_provision,
             "category": category, "tax_rate": target_tax, "country_name": country,
             "currency": local_currency, "fx_rate": fx_rate, "fx_basis": fx_basis,
+            "fin_subtype": fin_subtype,
         }
     except Exception as e:
         import traceback
@@ -1741,6 +1808,7 @@ def get_target_financials(ticker):
             "category": "Small/Risky Firms", 
             "tax_rate": 25.0, "country_name": "Unknown",
             "currency": "USD", "fx_rate": 1.0, "fx_basis": "",
+            "fin_subtype": "non_financial",
         }
 
 # ==============================================================================
@@ -1817,7 +1885,7 @@ class DetailWACCModel:
                 except Exception as e:
                     logger.debug(f"Balance sheet failed for {ticker}: {str(e)}")
 
-            rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int, pt, pp, _ = \
+            rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int, pt, pp, _, _ = \
                 get_financial_data_with_priority(t, info, ticker_symbol=ticker)
             
             if rev == 0: 
@@ -1964,8 +2032,15 @@ with st.sidebar:
         st.caption(f"Corporate Tax based on HQ: **{tf.get('country_name', 'Unknown/Default')}**")
         
         st.divider()
-        is_fin_target = 'Financial' in tf['category'] or 'Bank' in tf['category']
-        ebit_label = "PPNR" if is_fin_target else "EBIT"
+        _fin_subtype = tf.get('fin_subtype', 'non_financial')
+        is_fin_target = _fin_subtype in ('bank', 'insurance')
+        
+        if _fin_subtype == 'bank':
+            ebit_label = "PPNR"
+        elif _fin_subtype == 'insurance':
+            ebit_label = "Adj. Pretax"
+        else:
+            ebit_label = "EBIT"
         
         st.markdown("**Target Financials** (for Credit Spread)")
         
@@ -2001,11 +2076,10 @@ with st.sidebar:
                 return f"-${abs(v_k):,.0f}k"
             return f"${v_k:,.0f}k"
         
-        # Interest Expense section (different for Financial vs Non-Financial)
-        if is_fin_target:
-            # === FINANCIAL FIRMS ===
-            # ICR = PPNR / (Total IE - Interest on Deposits)
-            st.caption("🏦 *Financial Firm: ICR = (PPNR + Fin.Interest) / Fin.Interest*")
+        # Interest Expense section by financial subtype
+        if _fin_subtype == 'bank':
+            # === BANKS: ICR = (PPNR + Financial Interest) / Financial Interest ===
+            st.caption("🏦 *Bank: ICR = (PPNR + Fin.Interest) / Fin.Interest*")
             
             # Total Interest Expense
             _ie_default = _fmt_dollar(tf['int_exp'])
@@ -2023,60 +2097,78 @@ with st.sidebar:
             _iod_text = st.text_input(
                 "(−) Interest on Deposits (USD)",
                 value=_iod_default,
-                help="Interest paid to depositors (operating cost for banks). Often not available via API — enter manually from 10-K/Annual Report."
+                help="Interest paid to depositors. Often not available via API — enter from 10-K."
             )
             int_on_deposits_in = _parse_dollar(_iod_text, _iod_val)
             if int_on_deposits_in == 0 and int_exp_in > 0:
-                st.warning("⚠️ Interest on Deposits = $0. This line item is often unavailable via Yahoo Finance API. Please enter manually from the company's 10-K or Annual Report.")
+                st.warning("⚠️ Interest on Deposits = $0. Enter manually from 10-K.")
             else:
                 st.caption(f"{_fmt_k(int_on_deposits_in)}")
             
-            # Financial Interest (auto-calculated, editable) — used for ICR
+            # Financial Interest
             _ndie_calc = max(int_exp_in - int_on_deposits_in, 0)
             _ndie_default = _fmt_dollar(_ndie_calc)
             _ndie_text = st.text_input(
                 "Financial Interest (USD) — *used for ICR*",
                 value=_ndie_default,
-                help="Total IE − Interest on Deposits = debt/borrowing interest only (editable)"
+                help="Total IE − Interest on Deposits = debt/borrowing interest only"
             )
             non_deposit_ie_in = _parse_dollar(_ndie_text, _ndie_calc)
-            st.caption(f"{_fmt_k(non_deposit_ie_in)} = Total IE {_fmt_k(int_exp_in)} − Deposits {_fmt_k(int_on_deposits_in)}")
+            st.caption(f"{_fmt_k(non_deposit_ie_in)} = Total IE − Deposits")
             
             # PPNR
             _ebit_default = _fmt_dollar(tf['ebit'])
             _ebit_text = st.text_input(
                 f"{ebit_label} (USD)",
                 value=_ebit_default,
-                help="Pre-Provision Net Revenue = Pretax Income + Provision"
+                help="Pre-Provision Net Revenue = Pretax Income − Provision"
             )
             ebit_in = _parse_dollar(_ebit_text, tf['ebit'])
             
             # PPNR breakdown
-            st.markdown("""
-            <style>
-            .small-font { font-size: 12px; color: #666; margin-bottom: 0px; }
-            </style>
-            """, unsafe_allow_html=True)
-            st.markdown(
-                f"<div class='small-font'>• Pre-tax Income: <b>{_fmt_k(tf.get('raw_pretax', 0))}</b></div>", 
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                f"<div class='small-font'>• (−) Provision: <b>{_fmt_k(tf.get('raw_provision', 0))}</b></div>", 
-                unsafe_allow_html=True
-            )
-            st.markdown(
-                f"<div class='small-font'>• Source: <b>{tf.get('label_ebit', 'N/A')}</b></div>", 
-                unsafe_allow_html=True
-            )
+            st.markdown("""<style>.small-font { font-size: 12px; color: #666; margin-bottom: 0px; }</style>""", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• Pre-tax Income: <b>{_fmt_k(tf.get('raw_pretax', 0))}</b></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• (−) Provision: <b>{_fmt_k(tf.get('raw_provision', 0))}</b></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• Source: <b>{tf.get('label_ebit', 'N/A')}</b></div>", unsafe_allow_html=True)
             
             if tf.get('raw_provision', 0) != 0:
                 st.success(f"Credit Losses Provision detected: {_fmt_k(tf.get('raw_provision', 0))}")
             else:
-                st.warning("Credit Losses Provision = $0 (Check if company reports this metric)")
+                st.warning("Credit Losses Provision = $0 (Check 10-K)")
             
-            # For ICR calc later: use net_int_exp instead of gross int_exp
             int_exp_for_icr = non_deposit_ie_in
+            
+        elif _fin_subtype == 'insurance':
+            # === INSURANCE: ICR = (Adj.Pretax + IE) / IE ===
+            st.caption("🛡️ *Insurance: ICR = (Adj.Pretax + IE) / IE*")
+            st.caption("*Adj.Pretax = Pretax − Net Realized Gain/Loss on Investments*")
+            
+            # Interest Expense (standard for insurance)
+            _ie_default = _fmt_dollar(tf['int_exp'])
+            _ie_text = st.text_input(
+                "Interest Expense (USD)",
+                value=_ie_default,
+                help="Interest expense on borrowings/debt"
+            )
+            int_exp_in = _parse_dollar(_ie_text, tf['int_exp'])
+            st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')}")
+            
+            # Adj. Pretax Income
+            _ebit_default = _fmt_dollar(tf['ebit'])
+            _ebit_text = st.text_input(
+                f"{ebit_label} (USD)",
+                value=_ebit_default,
+                help="Pretax Income − Net Realized Gain/Loss on Investments"
+            )
+            ebit_in = _parse_dollar(_ebit_text, tf['ebit'])
+            
+            # Breakdown
+            st.markdown("""<style>.small-font { font-size: 12px; color: #666; margin-bottom: 0px; }</style>""", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• Pre-tax Income: <b>{_fmt_k(tf.get('raw_pretax', 0))}</b></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• (−) Realized Gain/Loss: <em>embedded in Adj.Pretax</em></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• Source: <b>{tf.get('label_ebit', 'N/A')}</b></div>", unsafe_allow_html=True)
+            
+            int_exp_for_icr = int_exp_in
             
         else:
             # === NON-FINANCIAL FIRMS: Standard IE and EBIT ===
@@ -2214,10 +2306,10 @@ with st.sidebar:
                     st.caption("income_stmt: **EMPTY**")
                 
                 # Test get_financial_data_with_priority directly
-                _dbg_rev, _dbg_ebit, _dbg_ebitda, _dbg_ie, _dbg_le, _dbg_li, _dbg_pt, _dbg_pp, _dbg_iod = \
+                _dbg_rev, _dbg_ebit, _dbg_ebitda, _dbg_ie, _dbg_le, _dbg_li, _dbg_pt, _dbg_pp, _dbg_iod, _dbg_subtype = \
                     get_financial_data_with_priority(_dbg_t, _dbg_info, ticker_symbol=target_ticker)
                 st.caption(f"Priority result: rev=${_dbg_rev:,.0f} ebit=${_dbg_ebit:,.0f} ie=${_dbg_ie:,.0f} iod=${_dbg_iod:,.0f}")
-                st.caption(f"  pretax=${_dbg_pt:,.0f} provision=${_dbg_pp:,.0f} label={_dbg_le}")
+                st.caption(f"  pretax=${_dbg_pt:,.0f} provision=${_dbg_pp:,.0f} label={_dbg_le} subtype={_dbg_subtype}")
                 
                 # Show API data for all firms
                 _api_cache = _financial_ttm_cache.get(target_ticker.upper())
@@ -2241,15 +2333,15 @@ with st.sidebar:
                 _ebit_dbg = _inp.get('ebit', 0)
                 _int_dbg = _inp.get('int_exp', 0)
                 _cat_dbg = _inp.get('category', '?')
-                if _cat_dbg == "Financial Firms":
+                if _cat_dbg == "Financial Firms" and _fin_subtype in ('bank', 'insurance'):
                     _icr_dbg = (_ebit_dbg + _int_dbg) / _int_dbg if _int_dbg > 0 else 100.0
                 else:
                     _icr_dbg = _ebit_dbg / _int_dbg if _int_dbg > 0 else 100.0
                 
                 st.divider()
                 st.caption("**ICR → Spread Pipeline:**")
-                if _cat_dbg == "Financial Firms":
-                    st.caption(f"① ICR = ({_ebit_dbg:,.0f} + {_int_dbg:,.0f}) / {_int_dbg:,.0f} = **{_icr_dbg:.2f}x**")
+                if _cat_dbg == "Financial Firms" and _fin_subtype in ('bank', 'insurance'):
+                    st.caption(f"① ICR = ({_ebit_dbg:,.0f} + {_int_dbg:,.0f}) / {_int_dbg:,.0f} = **{_icr_dbg:.2f}x** [{_fin_subtype}]")
                 else:
                     st.caption(f"① ICR = {_ebit_dbg:,.0f} / {_int_dbg:,.0f} = **{_icr_dbg:.2f}x**")
                 
@@ -2327,7 +2419,7 @@ if 'result' in st.session_state:
     target_fred_key = "N/A"
     int_exp = inp.get('int_exp', 0.0)
     ebit = inp.get('ebit', 0.0)
-    is_financial_firm = (category == "Financial Firms")
+    is_financial_firm = (_fin_subtype in ("bank", "insurance"))
 
     if res.get('errors'):
         st.error("The following peers were excluded due to missing critical data (Strict Validation):")
@@ -2346,7 +2438,7 @@ if 'result' in st.session_state:
         calc_df = df_init.copy()
         calc_df["Tax Rate"] = calc_df["Ticker"].map(user_tax_rates)
         
-        is_financial_firm = (category == "Financial Firms")
+        is_financial_firm = (_fin_subtype in ("bank", "insurance"))
         
         if is_financial_firm:
             # Financial Firms: Use observed (raw) beta directly
@@ -2398,11 +2490,12 @@ if 'result' in st.session_state:
         ebit = inp.get('ebit', 0.0)
         category = inp.get('category', "Small/Risky Firms")
         
-        if category == "Financial Firms":
-            # Financial Firms: ICR = (PPNR + Financial Interest) / Financial Interest
+        if category == "Financial Firms" and _fin_subtype in ('bank', 'insurance'):
+            # Bank/Insurance: ICR = (Numerator + IE) / IE
+            # bank: Numerator = PPNR, insurance: Numerator = Adj.Pretax
             icr = (ebit + int_exp) / int_exp if int_exp > 0 else 100.0
         else:
-            # Non-Financial: ICR = EBIT / Interest Expense
+            # Non-Financial & fin_nonbank: ICR = EBIT / Interest Expense
             icr = ebit / int_exp if int_exp > 0 else 100.0
         
         # 1. Get Table
@@ -2576,10 +2669,15 @@ if 'result' in st.session_state:
         sc2.metric("Firm Category", category)
         sc3.metric("Implied Rating", implied_rating)
         sc4.metric("Implied OAS Spread", f"{final_spread:.2f}%", help=f"Mapped to FRED: {target_fred_key}")
-        if category == "Financial Firms":
+        if category == "Financial Firms" and _fin_subtype == 'bank':
             st.caption(
-                f"Based on {category} Table from Damodaran. "
+                f"Based on {category} Table. "
                 f"ICR = (PPNR + Fin.Int) / Fin.Int = ({ebit:,.0f} + {int_exp:,.0f}) / {int_exp:,.0f}"
+            )
+        elif category == "Financial Firms" and _fin_subtype == 'insurance':
+            st.caption(
+                f"Based on {category} Table. "
+                f"ICR = (Adj.Pretax + IE) / IE = ({ebit:,.0f} + {int_exp:,.0f}) / {int_exp:,.0f}"
             )
         else:
             st.caption(
