@@ -2041,7 +2041,7 @@ with st.sidebar:
                 unsafe_allow_html=True
             )
             
-            if tf.get('raw_provision', 0) > 0:
+            if tf.get('raw_provision', 0) != 0:
                 st.success(f"Credit Losses Provision detected: {_fmt_k(tf.get('raw_provision', 0))}")
             else:
                 st.warning("Credit Losses Provision = $0 (Check if company reports this metric)")
