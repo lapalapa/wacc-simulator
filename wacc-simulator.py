@@ -1389,14 +1389,22 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             rev = rev_ttm
             ebitda = info_dict.get('ebitda', 0)
             
-            # Interest Expense: info_dict first, then calc from quarters
-            int_exp = info_dict.get('interestExpense', 0)
-            if int_exp is None or int_exp == 0:
-                int_exp = info_dict.get('totalInterestExpense', 0)
+            # Interest Expense: API timeseries TTM first (matches Yahoo Finance web),
+            # then info_dict, then quarterly sum
+            int_exp = 0
+            if api_data and api_data.get('int_exp_ttm', 0) != 0:
+                int_exp = abs(api_data['int_exp_ttm'])
+                label_int = "TTM (Yahoo API)"
+                logger.info(f"[P2] InterestExp from API TTM: ${int_exp:,.0f}")
             
-            if int_exp is not None and int_exp > 0:
-                label_int = "TTM (Yahoo Info)"
-            else:
+            if int_exp == 0:
+                int_exp = info_dict.get('interestExpense', 0)
+                if int_exp is None or int_exp == 0:
+                    int_exp = info_dict.get('totalInterestExpense', 0)
+                if int_exp is not None and int_exp > 0:
+                    label_int = "TTM (Yahoo Info)"
+            
+            if int_exp is None or int_exp == 0:
                 if not q_fin.empty and q_fin.shape[1] >= 4:
                     recent_4 = q_fin.iloc[:, :4]
                     q_int = 0
