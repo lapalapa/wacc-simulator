@@ -599,8 +599,8 @@ def fetch_financial_ttm_from_api(ticker):
                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
         
-        # Request provision, pretax income, and interest fields in a single API call
-        # Include many possible deposit interest key variants for bank detection
+        # Request key financial metrics via Yahoo Timeseries API
+        # Works for both financial and non-financial companies
         keys = [
             "trailingCreditLossesProvision",
             "annualCreditLossesProvision",
@@ -608,6 +608,8 @@ def fetch_financial_ttm_from_api(ticker):
             "annualPretaxIncome",
             "trailingInterestExpense",
             "trailingInterestIncome",
+            "trailingEBIT",
+            "trailingInterestExpenseNonOperating",
             # Deposit interest - try every possible naming convention
             "trailingInterestExpenseOnDeposits",
             "annualInterestExpenseOnDeposits",
@@ -653,6 +655,7 @@ def fetch_financial_ttm_from_api(ticker):
             "int_exp_on_deposits_ttm": 0,
             "int_exp_ttm": 0,
             "int_income_ttm": 0,
+            "ebit_ttm": 0,
             "source": f"Yahoo Timeseries API ({cache_key})"
         }
         
@@ -679,9 +682,16 @@ def fetch_financial_ttm_from_api(ticker):
                             elif "deposit" in type_lower and "interest" in type_lower:
                                 api_data["int_exp_on_deposits_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM IntExpOnDeposits: ${raw_val:,.0f} (key: {type_name})")
-                            elif "interestexpense" in type_lower and "deposit" not in type_lower:
+                            elif type_lower == "trailingebit":
+                                api_data["ebit_ttm"] = raw_val
+                                logger.info(f"[Financial API] {cache_key} TTM EBIT: ${raw_val:,.0f}")
+                            elif "interestexpense" in type_lower and "deposit" not in type_lower and "nonoperating" not in type_lower:
                                 api_data["int_exp_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM IntExp: ${raw_val:,.0f}")
+                            elif "interestexpensenonoperating" in type_lower:
+                                if api_data["int_exp_ttm"] == 0:
+                                    api_data["int_exp_ttm"] = raw_val
+                                    logger.info(f"[Financial API] {cache_key} TTM IntExpNonOp: ${raw_val:,.0f}")
                             elif "interestincome" in type_lower:
                                 api_data["int_income_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM IntIncome: ${raw_val:,.0f}")
@@ -1201,17 +1211,19 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     
     current_year = datetime.now().year
     
-    # [v1.4.0] Pre-fetch TTM data from Yahoo Finance Timeseries API
-    # Gets CreditLossesProvision and PretaxIncome (not available via yfinance info_dict)
+    # [v1.5.1] Pre-fetch TTM data from Yahoo Finance Timeseries API for ALL tickers
+    # Gets EBIT, InterestExpense, PretaxIncome, Provision TTM (consistent with Yahoo Finance web)
     api_data = None
-    if is_financial and ticker_symbol:
+    if ticker_symbol:
         api_data = fetch_financial_ttm_from_api(ticker_symbol)
         if api_data:
-            logger.info(f"[v1.4.0] API data for {ticker_symbol}: "
+            logger.info(f"[v1.5.1] API data for {ticker_symbol}: "
+                        f"ebit_ttm=${api_data.get('ebit_ttm', 0):,.0f}, "
+                        f"int_exp_ttm=${api_data.get('int_exp_ttm', 0):,.0f}, "
                         f"provision_ttm=${api_data['provision_ttm']:,.0f}, "
                         f"pretax_ttm=${api_data['pretax_ttm']:,.0f}")
         else:
-            logger.info(f"[v1.4.0] API returned no data for {ticker_symbol}, will use yfinance fallback")
+            logger.info(f"[v1.5.1] API returned no data for {ticker_symbol}, will use yfinance fallback")
     
     try:
         # Load Statements
@@ -1455,16 +1467,33 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                     else:
                         label_ebit = "N/A"
             else:
-                # Non-financial: EBIT from operatingMargins or EBITDA proxy
-                op_margin = info_dict.get('operatingMargins', 0)
-                if op_margin: 
-                    ebit = rev * op_margin
-                    label_ebit = "TTM (Yahoo Info)"
-                elif ebitda: 
-                    ebit = ebitda
-                    label_ebit = "TTM (EBITDA Proxy)"
+                # Non-financial: EBIT from API TTM first, then sum of 4 quarters
+                if api_data and api_data.get('ebit_ttm', 0) != 0:
+                    ebit = api_data['ebit_ttm']
+                    label_ebit = "TTM (Yahoo API)"
+                    logger.info(f"[P2] Non-Financial EBIT from API TTM: ${ebit:,.0f}")
                 else:
-                    label_ebit = "N/A"
+                    # Fallback: sum quarterly EBIT from yfinance
+                    if not q_fin.empty and q_fin.shape[1] >= 4:
+                        recent_4 = q_fin.iloc[:, :4]
+                        q_ebit_sum = 0
+                        for q_idx in range(4):
+                            _, e_q, _, _, _, _, _ = extract_from_col(recent_4, q_idx)
+                            q_ebit_sum += e_q
+                        if q_ebit_sum != 0:
+                            ebit = q_ebit_sum
+                            label_ebit = "TTM (Calc Quarters)"
+                            logger.info(f"[P2] Non-Financial EBIT from 4Q sum: ${ebit:,.0f}")
+                        elif ebitda:
+                            ebit = ebitda
+                            label_ebit = "TTM (EBITDA Proxy)"
+                        else:
+                            label_ebit = "N/A"
+                    elif ebitda:
+                        ebit = ebitda
+                        label_ebit = "TTM (EBITDA Proxy)"
+                    else:
+                        label_ebit = "N/A"
             
             if int_exp is None: 
                 int_exp = 0
@@ -2190,13 +2219,14 @@ with st.sidebar:
                 st.caption(f"Priority result: rev=${_dbg_rev:,.0f} ebit=${_dbg_ebit:,.0f} ie=${_dbg_ie:,.0f} iod=${_dbg_iod:,.0f}")
                 st.caption(f"  pretax=${_dbg_pt:,.0f} provision=${_dbg_pp:,.0f} label={_dbg_le}")
                 
-                # Show API interest data for financial firms
+                # Show API data for all firms
                 _api_cache = _financial_ttm_cache.get(target_ticker.upper())
                 if _api_cache:
                     _iod = _api_cache.get('int_exp_on_deposits_ttm', 0)
                     _ie_api = _api_cache.get('int_exp_ttm', 0)
                     _ii_api = _api_cache.get('int_income_ttm', 0)
-                    st.caption(f"  API: IntExp=${_ie_api:,.0f} DepositInt=${_iod:,.0f} IntIncome=${_ii_api:,.0f}")
+                    _ebit_api = _api_cache.get('ebit_ttm', 0)
+                    st.caption(f"  API: EBIT=${_ebit_api:,.0f} IntExp=${_ie_api:,.0f} DepositInt=${_iod:,.0f} IntIncome=${_ii_api:,.0f}")
                 
                 # Show scraping result
                 _scrape_key = f"_deposit_{target_ticker.upper()}"
