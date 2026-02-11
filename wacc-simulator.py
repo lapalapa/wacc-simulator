@@ -2297,6 +2297,7 @@ if 'result' in st.session_state:
     target_fred_key = "N/A"
     int_exp = inp.get('int_exp', 0.0)
     ebit = inp.get('ebit', 0.0)
+    is_financial_firm = (category == "Financial Firms")
 
     if res.get('errors'):
         st.error("The following peers were excluded due to missing critical data (Strict Validation):")
@@ -2314,24 +2315,51 @@ if 'result' in st.session_state:
 
         calc_df = df_init.copy()
         calc_df["Tax Rate"] = calc_df["Ticker"].map(user_tax_rates)
-        calc_df["Unlevered Beta"] = calc_df["Adj Beta"] / (1 + (1 - calc_df["Tax Rate"]/100) * calc_df["D/E Ratio"])
         
-        if sens_method == "Average":
-            sel_unlev = calc_df["Unlevered Beta"].mean()
-            sel_dtic = calc_df["Debt/TIC Ratio"].mean()
-        elif sens_method == "Median":
-            sel_unlev = calc_df["Unlevered Beta"].median()
-            sel_dtic = calc_df["Debt/TIC Ratio"].median()
-        elif sens_method == "Maximum":
-            sel_unlev = calc_df["Unlevered Beta"].max()
-            sel_dtic = calc_df["Debt/TIC Ratio"].max()
-        else:
-            sel_unlev = calc_df["Unlevered Beta"].min()
-            sel_dtic = calc_df["Debt/TIC Ratio"].min()
+        is_financial_firm = (category == "Financial Firms")
+        
+        if is_financial_firm:
+            # Financial Firms: Use observed (raw) beta directly
+            # Hamada unlevering/relevering is not appropriate for financials
+            # because their debt is operational (deposits), not financial leverage
+            if sens_method == "Average":
+                target_relevered_beta = calc_df["Adj Beta"].mean()
+                sel_dtic = calc_df["Debt/TIC Ratio"].mean()
+            elif sens_method == "Median":
+                target_relevered_beta = calc_df["Adj Beta"].median()
+                sel_dtic = calc_df["Debt/TIC Ratio"].median()
+            elif sens_method == "Maximum":
+                target_relevered_beta = calc_df["Adj Beta"].max()
+                sel_dtic = calc_df["Debt/TIC Ratio"].max()
+            else:
+                target_relevered_beta = calc_df["Adj Beta"].min()
+                sel_dtic = calc_df["Debt/TIC Ratio"].min()
             
-        target_de = sel_dtic / (1 - sel_dtic) if (1-sel_dtic) != 0 else 0
-        target_relevered_beta = sel_unlev * (1 + (1 - inp['tax']/100) * target_de)
-        calc_df["Re-levered Beta"] = calc_df["Unlevered Beta"] * (1 + (1 - inp['tax']/100) * target_de)
+            target_de = sel_dtic / (1 - sel_dtic) if (1-sel_dtic) != 0 else 0
+            # No unlevered/relevered columns for financial firms
+            calc_df["Unlevered Beta"] = calc_df["Adj Beta"]  # Display: same as observed
+            calc_df["Re-levered Beta"] = calc_df["Adj Beta"]  # Display: same as observed
+            sel_unlev = target_relevered_beta  # For display consistency
+        else:
+            # Non-Financial: Standard Hamada unlevering → relevering
+            calc_df["Unlevered Beta"] = calc_df["Adj Beta"] / (1 + (1 - calc_df["Tax Rate"]/100) * calc_df["D/E Ratio"])
+            
+            if sens_method == "Average":
+                sel_unlev = calc_df["Unlevered Beta"].mean()
+                sel_dtic = calc_df["Debt/TIC Ratio"].mean()
+            elif sens_method == "Median":
+                sel_unlev = calc_df["Unlevered Beta"].median()
+                sel_dtic = calc_df["Debt/TIC Ratio"].median()
+            elif sens_method == "Maximum":
+                sel_unlev = calc_df["Unlevered Beta"].max()
+                sel_dtic = calc_df["Debt/TIC Ratio"].max()
+            else:
+                sel_unlev = calc_df["Unlevered Beta"].min()
+                sel_dtic = calc_df["Debt/TIC Ratio"].min()
+            
+            target_de = sel_dtic / (1 - sel_dtic) if (1-sel_dtic) != 0 else 0
+            target_relevered_beta = sel_unlev * (1 + (1 - inp['tax']/100) * target_de)
+            calc_df["Re-levered Beta"] = calc_df["Unlevered Beta"] * (1 + (1 - inp['tax']/100) * target_de)
         
         ke = (inp['rf']/100) + (target_relevered_beta * m['MRP']) + (inp['crp']/100) + (inp['sp']/100)
         
@@ -2449,7 +2477,7 @@ if 'result' in st.session_state:
         c1.metric("Final WACC", f"{wacc:.2%}")
         c2.metric("Cost of Equity", f"{ke:.2%}")
         c3.metric("Cost of Debt (A-T)", f"{kd:.2%}")
-        c4.metric("Re-levered Beta", f"{target_relevered_beta:.2f}")
+        c4.metric("Observed Beta" if is_financial_firm else "Re-levered Beta", f"{target_relevered_beta:.2f}")
         st.caption(
             f"**Target Structure ({sens_method}):** Debt {wd:.1%} | Equity {we:.1%} (Implied D/E: {target_de:.2%})"
         )
@@ -2487,7 +2515,7 @@ if 'result' in st.session_state:
     )
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Risk Free Rate", f"{inp['rf']:.2f}%")
-    k2.metric("Beta (Re-levered)", f"{target_relevered_beta:.2f}")
+    k2.metric("Beta (Observed)" if category == "Financial Firms" else "Beta (Re-levered)", f"{target_relevered_beta:.2f}")
     k3.metric("Market Risk Prem", f"{m['MRP']*100:.2f}%")
     k4.metric("Country Risk Prem", f"{inp['crp']:.2f}%")
     k5.metric("Size Premium", f"{inp['sp']:.2f}%")
