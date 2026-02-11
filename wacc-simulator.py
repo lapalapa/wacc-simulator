@@ -1714,7 +1714,7 @@ def get_target_financials(ticker):
                 logger.info(f"[Target] Interest on Deposits from HTML scrape: ${int_on_deposits:,.0f}")
         
         mkt_cap = info.get('marketCap', 0)
-        sector = sector_str
+        sector = str(info.get('sector', '')).lower()
         local_currency = info.get('currency', 'USD')
         
         # Get FX rate to USD (fiscal year average based on financial statement date)
