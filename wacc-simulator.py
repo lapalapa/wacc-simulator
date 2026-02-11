@@ -610,6 +610,13 @@ def fetch_financial_ttm_from_api(ticker):
             "trailingInterestIncome",
             "trailingEBIT",
             "trailingInterestExpenseNonOperating",
+            # Realized Gain/Loss (for insurance)
+            "trailingGainOnSaleOfSecurity",
+            "trailingNetRealizedGainLossOnInvestments",
+            "annualGainOnSaleOfSecurity",
+            "annualNetRealizedGainLossOnInvestments",
+            "trailingRealizedGainLossOnInvestments",
+            "trailingGainLossOnInvestmentSecurities",
             # Deposit interest - try every possible naming convention
             "trailingInterestExpenseOnDeposits",
             "annualInterestExpenseOnDeposits",
@@ -656,6 +663,7 @@ def fetch_financial_ttm_from_api(ticker):
             "int_exp_ttm": 0,
             "int_income_ttm": 0,
             "ebit_ttm": 0,
+            "realized_gl_ttm": 0,
             "source": f"Yahoo Timeseries API ({cache_key})"
         }
         
@@ -682,6 +690,10 @@ def fetch_financial_ttm_from_api(ticker):
                             elif "deposit" in type_lower and "interest" in type_lower:
                                 api_data["int_exp_on_deposits_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM IntExpOnDeposits: ${raw_val:,.0f} (key: {type_name})")
+                            elif ("gainonsaleofsecurity" in type_lower or 
+                                  "realizedgainloss" in type_lower):
+                                api_data["realized_gl_ttm"] = raw_val
+                                logger.info(f"[Financial API] {cache_key} TTM RealizedGL: ${raw_val:,.0f} (key: {type_name})")
                             elif type_lower == "trailingebit":
                                 api_data["ebit_ttm"] = raw_val
                                 logger.info(f"[Financial API] {cache_key} TTM EBIT: ${raw_val:,.0f}")
@@ -1353,8 +1365,10 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 p_tax = get_value_max_fuzzy(df, col_idx, ['Pretax Income', 'Income Before Tax'], keep_sign=True)
                 realized_gl = get_value_max_fuzzy(df, col_idx, 
                     ['Gain On Sale Of Security', 'Net Realized Gain Loss On Investments',
-                     'Realized Gain Loss On Investments', 'Gain Loss On Investment Securities'],
+                     'Realized Gain Loss On Investments', 'Gain Loss On Investment Securities',
+                     'Net Realized Capital Gain Loss'],
                     keep_sign=True)
+                logger.info(f"[extract_from_col] Insurance col={col_idx}: pretax={p_tax:,.0f} realized_gl={realized_gl:,.0f}")
                 
                 if p_tax != 0:
                     val_e = p_tax - realized_gl  # Remove realized gains to get operating pretax
@@ -1507,15 +1521,17 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 # Insurance: Adj Pretax = Pretax - Net Realized Gain/Loss on Investments
                 if api_data and api_data.get('pretax_ttm', 0) != 0:
                     raw_pretax = api_data['pretax_ttm']
-                    # realized_gl from API not available, try quarterly sum
-                    rgl_sum = 0
-                    if not q_fin.empty and q_fin.shape[1] >= 4:
+                    # 1) Try API realized_gl_ttm first
+                    rgl_val = api_data.get('realized_gl_ttm', 0)
+                    # 2) If API has no realized G/L, try quarterly sum from yfinance
+                    if rgl_val == 0 and not q_fin.empty and q_fin.shape[1] >= 4:
                         for q_idx in range(4):
                             _, _, _, _, _, _, _, rgl_q = extract_from_col(q_fin.iloc[:, :4], q_idx)
-                            rgl_sum += rgl_q
-                    ebit = raw_pretax - rgl_sum
+                            rgl_val += rgl_q
+                        logger.info(f"[P2] Insurance RealizedGL from 4Q sum: ${rgl_val:,.0f}")
+                    ebit = raw_pretax - rgl_val
                     label_ebit = "TTM (Yahoo API)"
-                    logger.info(f"[P2] Insurance Adj Pretax from API: pretax=${raw_pretax:,.0f} - realized_gl=${rgl_sum:,.0f} = ${ebit:,.0f}")
+                    logger.info(f"[P2] Insurance Adj Pretax: pretax=${raw_pretax:,.0f} - realized_gl=${rgl_val:,.0f} = ${ebit:,.0f}")
                 else:
                     if not q_fin.empty and q_fin.shape[1] >= 4:
                         recent_4 = q_fin.iloc[:, :4]
@@ -2162,11 +2178,17 @@ with st.sidebar:
             )
             ebit_in = _parse_dollar(_ebit_text, tf['ebit'])
             
-            # Breakdown
+            # Breakdown: show realized G/L = pretax - adj_pretax
+            _raw_pt = tf.get('raw_pretax', 0)
+            _rgl_implied = _raw_pt - tf['ebit'] if _raw_pt != 0 else 0
             st.markdown("""<style>.small-font { font-size: 12px; color: #666; margin-bottom: 0px; }</style>""", unsafe_allow_html=True)
-            st.markdown(f"<div class='small-font'>• Pre-tax Income: <b>{_fmt_k(tf.get('raw_pretax', 0))}</b></div>", unsafe_allow_html=True)
-            st.markdown(f"<div class='small-font'>• (−) Realized Gain/Loss: <em>embedded in Adj.Pretax</em></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• Pre-tax Income: <b>{_fmt_k(_raw_pt)}</b></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• (−) Realized G/L: <b>{_fmt_k(_rgl_implied)}</b></div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='small-font'>• = Adj.Pretax: <b>{_fmt_k(tf['ebit'])}</b></div>", unsafe_allow_html=True)
             st.markdown(f"<div class='small-font'>• Source: <b>{tf.get('label_ebit', 'N/A')}</b></div>", unsafe_allow_html=True)
+            
+            if _rgl_implied == 0:
+                st.warning("⚠️ Realized Gain/Loss = $0. This item may not be available via API. Enter Adj.Pretax manually from 10-K.")
             
             int_exp_for_icr = int_exp_in
             
@@ -2283,11 +2305,11 @@ with st.sidebar:
                         else:
                             st.caption(f"  {_kr}: ❌ NOT IN INDEX")
                     
-                    # Dump ALL interest/deposit related rows
+                    # Dump ALL interest/deposit/gain/loss related rows
                     _int_rows = [r for r in _dbg_inc.index 
-                                 if any(kw in str(r).lower() for kw in ['interest', 'deposit', 'net income'])]
+                                 if any(kw in str(r).lower() for kw in ['interest', 'deposit', 'net income', 'gain', 'loss', 'realized', 'investment'])]
                     if _int_rows:
-                        st.caption("**All interest/deposit rows (Annual):**")
+                        st.caption("**All interest/deposit/gain/loss rows (Annual):**")
                         for _ir in _int_rows:
                             _v = _dbg_inc.loc[_ir].iloc[0]
                             st.caption(f"  → {_ir}: {'${:,.0f}'.format(_v) if pd.notna(_v) else 'NaN'}")
@@ -2318,7 +2340,9 @@ with st.sidebar:
                     _ie_api = _api_cache.get('int_exp_ttm', 0)
                     _ii_api = _api_cache.get('int_income_ttm', 0)
                     _ebit_api = _api_cache.get('ebit_ttm', 0)
+                    _rgl_api = _api_cache.get('realized_gl_ttm', 0)
                     st.caption(f"  API: EBIT=${_ebit_api:,.0f} IntExp=${_ie_api:,.0f} DepositInt=${_iod:,.0f} IntIncome=${_ii_api:,.0f}")
+                    st.caption(f"  API: RealizedGL=${_rgl_api:,.0f}")
                 
                 # Show scraping result
                 _scrape_key = f"_deposit_{target_ticker.upper()}"
