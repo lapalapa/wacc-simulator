@@ -102,10 +102,34 @@ def collect_kpmg_tax_rates():
         r = requests.get(url, headers=HEADERS, timeout=15, verify=False)
         r.raise_for_status()
         dfs = pd.read_html(io.StringIO(r.text))
-        df = dfs[0]
-        df.rename(columns={df.columns[0]: "Country"}, inplace=True)
-        col_name = df.columns[-1]
-        result = df[["Country", col_name]].copy()
+        
+        # Find the correct table: has "Country" and year columns (2020-2025)
+        target_df = None
+        for i, df in enumerate(dfs):
+            cols_str = ' '.join(str(c) for c in df.columns)
+            if '2025' in cols_str or '2024' in cols_str:
+                target_df = df
+                print(f"  Found KPMG table at index {i}: {df.columns.tolist()}")
+                break
+        
+        if target_df is None:
+            # Fallback: use first table
+            target_df = dfs[0]
+            print(f"  Using fallback table[0]: {target_df.columns.tolist()}")
+        
+        # First column is Country, last column is latest year rate
+        target_df.rename(columns={target_df.columns[0]: "Country"}, inplace=True)
+        
+        # Use the latest year column (rightmost numeric)
+        year_cols = [c for c in target_df.columns if str(c).strip().isdigit()]
+        if year_cols:
+            latest_col = sorted(year_cols, key=lambda x: int(str(x).strip()))[-1]
+            print(f"  Using year column: {latest_col}")
+        else:
+            latest_col = target_df.columns[-1]
+            print(f"  No year column found, using last column: {latest_col}")
+        
+        result = target_df[["Country", latest_col]].copy()
         result.columns = ["Country", "Rate"]
         result["Rate"] = pd.to_numeric(result["Rate"], errors='coerce')
         result = result.dropna(subset=["Rate"])
