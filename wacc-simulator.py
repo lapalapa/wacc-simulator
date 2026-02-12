@@ -1701,6 +1701,15 @@ class PeerRecommender:
             info = safe_yf_info(t)
             ind_key = info.get('industryKey')
             
+            # Fallback: generate industryKey from industry name
+            if not ind_key:
+                industry_name = info.get('industry', '')
+                if industry_name:
+                    # Convert "Credit Services" → "credit-services"
+                    ind_key = industry_name.lower().replace(' - ', '-').replace('—', '-').replace(' & ', '-').replace(' ', '-')
+                    ind_key = re.sub(r'[^a-z0-9-]', '', ind_key)
+                    logger.info(f"[Recommend] industryKey missing, generated from industry name: '{industry_name}' → '{ind_key}'")
+            
             if ind_key: 
                 industry = yf.Industry(ind_key)
                 top_df = industry.top_companies
