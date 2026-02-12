@@ -1271,6 +1271,13 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
         else:
             logger.info(f"[v1.5.1] API returned no data for {ticker_symbol}, will use yfinance fallback")
     
+    # [v1.6.1] Provision-based reclassification for financial firms
+    # If industry says fin_nonbank but Provision exists → reclassify to bank
+    if is_financial and fin_subtype == 'fin_nonbank' and api_data:
+        if api_data.get('provision_ttm', 0) != 0:
+            logger.info(f"[Reclassify] {ticker_symbol}: fin_nonbank → bank (Provision=${api_data['provision_ttm']:,.0f} detected)")
+            fin_subtype = 'bank'
+    
     try:
         # Load Statements
         a_fin = ticker_obj.income_stmt
@@ -1446,7 +1453,12 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 
                 lbl = col.strftime('%Y-%m-%d')
                 
-                logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}, ie=${i:,.0f}, iod=${iod_annual:,.0f}")
+                # [v1.6.1] fin_nonbank fallback: EBIT=0 → use Pretax + IE
+                if e == 0 and fin_subtype == 'fin_nonbank' and pt != 0:
+                    e = pt + abs(i)
+                    logger.info(f"[P1] fin_nonbank EBIT=0 fallback: Pretax=${pt:,.0f} + IE=${abs(i):,.0f} = ${e:,.0f}")
+                
+                logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}, ie=${i:,.0f}")
                 return r_annual, e, ed, abs(i), lbl, lbl, pt, pp, iod_annual, fin_subtype
         
         # =================================================================
@@ -1577,6 +1589,14 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         label_ebit = "TTM (EBITDA Proxy)"
                     else:
                         label_ebit = "N/A"
+                
+                # [v1.6.1] fin_nonbank fallback: EBIT=0 → use Pretax + IE
+                if ebit == 0 and fin_subtype == 'fin_nonbank':
+                    _fb_pretax = api_data.get('pretax_ttm', 0) if api_data else 0
+                    if _fb_pretax != 0:
+                        ebit = _fb_pretax + abs(int_exp or 0)
+                        label_ebit = "TTM (Pretax+IE proxy)"
+                        logger.info(f"[P2] fin_nonbank EBIT=0 fallback: Pretax=${_fb_pretax:,.0f} + IE=${abs(int_exp or 0):,.0f} = ${ebit:,.0f}")
             
             if int_exp is None: 
                 int_exp = 0
@@ -1640,6 +1660,16 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 ebit = raw_pretax - raw_provision
             elif fin_subtype == 'insurance':
                 ebit = raw_pretax - rgl_p3
+            
+            # [v1.6.1] fin_nonbank fallback: EBIT=0 → use Pretax + IE
+            if ebit == 0 and fin_subtype == 'fin_nonbank':
+                q_pt_sum = sum(
+                    extract_from_col(recent_4, qi)[4]  # pretax at index 4
+                    for qi in range(4)
+                )
+                if q_pt_sum != 0:
+                    ebit = q_pt_sum + abs(int_exp)
+                    logger.info(f"[P3] fin_nonbank EBIT=0 fallback: Pretax=${q_pt_sum:,.0f} + IE=${abs(int_exp):,.0f} = ${ebit:,.0f}")
             
             return rev, ebit, ebitda, abs(int_exp), common_label, common_label, raw_pretax, raw_provision, iod_p3, fin_subtype
 
