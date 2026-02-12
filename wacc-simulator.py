@@ -1694,33 +1694,59 @@ class PeerRecommender:
             logger.warning(f"Revenue fetch failed for {ticker}: {str(e)}")
             return 0
 
+    def _fetch_industry_peers_from_screener(self, industry_name, target_ticker):
+        """Yahoo Finance screener API로 동종업계 ticker 조회 (yf.Industry 실패 시 fallback)"""
+        try:
+            # Yahoo screener: query for same industry, sort by market cap
+            url = "https://query2.finance.yahoo.com/v1/finance/screener"
+            payload = {
+                "size": 10,
+                "offset": 0,
+                "sortField": "intradaymarketcap",
+                "sortType": "DESC",
+                "quoteType": "EQUITY",
+                "query": {
+                    "operator": "AND",
+                    "operands": [
+                        {"operator": "eq", "operands": ["industry", industry_name]}
+                    ]
+                }
+            }
+            headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+            r = requests.post(url, json=payload, headers=headers, timeout=15, verify=False)
+            data = r.json()
+            quotes = data.get('finance', {}).get('result', [{}])[0].get('quotes', [])
+            symbols = [q['symbol'] for q in quotes if q.get('symbol', '').upper() != target_ticker.upper()]
+            logger.info(f"[Recommend] Screener fallback for '{industry_name}': found {len(symbols)} peers")
+            return symbols[:10]
+        except Exception as e:
+            logger.warning(f"[Recommend] Screener fallback failed: {e}")
+            return []
+
     def recommend(self, target_ticker, progress_bar=None):
         """타겟 티커의 동종 업계 Top 5 기업 추천"""
         try:
             t = yf.Ticker(target_ticker)
             info = safe_yf_info(t)
             ind_key = info.get('industryKey')
+            industry_name = info.get('industry', '')
             
             # Fallback: generate industryKey from industry name
-            if not ind_key:
-                industry_name = info.get('industry', '')
-                if industry_name:
-                    # Convert "Credit Services" → "credit-services"
-                    ind_key = industry_name.lower().replace(' - ', '-').replace('—', '-').replace(' & ', '-').replace(' ', '-')
-                    ind_key = re.sub(r'[^a-z0-9-]', '', ind_key)
-                    logger.info(f"[Recommend] industryKey missing, generated from industry name: '{industry_name}' → '{ind_key}'")
+            if not ind_key and industry_name:
+                ind_key = industry_name.lower().replace(' - ', '-').replace('—', '-').replace(' & ', '-').replace(' ', '-')
+                ind_key = re.sub(r'[^a-z0-9-]', '', ind_key)
+                logger.info(f"[Recommend] industryKey missing, generated: '{industry_name}' → '{ind_key}'")
             
+            # --- Method 1: yf.Industry ---
+            top_df = None
             if ind_key: 
                 try:
                     industry = yf.Industry(ind_key)
                     top_df = industry.top_companies
                 except Exception as e:
                     logger.warning(f"[Recommend] yf.Industry('{ind_key}') failed: {e}")
-                    top_df = None
-            else: 
-                top_df = None
             
-            # Fallback: use yf.Sector if Industry failed
+            # --- Method 2: yf.Sector fallback ---
             if top_df is None or not isinstance(top_df, pd.DataFrame) or top_df.empty:
                 sector_key = info.get('sectorKey', '')
                 if not sector_key:
@@ -1732,32 +1758,45 @@ class PeerRecommender:
                     try:
                         sector_obj = yf.Sector(sector_key)
                         top_df = sector_obj.top_companies
-                        logger.info(f"[Recommend] Fallback to sector '{sector_key}': got {len(top_df) if top_df is not None else 0} companies")
+                        logger.info(f"[Recommend] Sector fallback '{sector_key}': {len(top_df) if isinstance(top_df, pd.DataFrame) else 0} companies")
                     except Exception as e:
                         logger.warning(f"[Recommend] yf.Sector('{sector_key}') also failed: {e}")
-                        top_df = None
             
-            if top_df is None or not isinstance(top_df, pd.DataFrame) or top_df.empty:
-                return None, "Unknown", [f"No peer data found for industry '{ind_key}'"]
+            # --- Method 3: Yahoo screener API ---
+            candidates = []
+            if top_df is not None and isinstance(top_df, pd.DataFrame) and not top_df.empty:
+                raw_list = top_df['symbol'].tolist() if 'symbol' in top_df.columns else top_df.index.tolist()
+                candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:10]
             
-            raw_list = top_df['symbol'].tolist() if 'symbol' in top_df.columns else top_df.index.tolist()
-            candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
+            if not candidates and industry_name:
+                candidates = self._fetch_industry_peers_from_screener(industry_name, target_ticker)
             
+            # --- Method 4: Yahoo recommendedSymbols ---
+            if not candidates:
+                rec_symbols = info.get('recommendedSymbols', [])
+                if rec_symbols:
+                    candidates = [s.get('symbol', '') for s in rec_symbols if s.get('symbol', '').upper() != target_ticker.upper()]
+                    logger.info(f"[Recommend] Using recommendedSymbols: {candidates}")
+            
+            if not candidates:
+                return None, "Unknown", [f"No peers found for '{industry_name or ind_key}'"]
+            
+            # Rank by revenue
             revenue_map = []
-            for idx, ticker in enumerate(candidates):
+            for idx, ticker in enumerate(candidates[:8]):
                 time.sleep(0.5)
                 rev = self.get_revenue(ticker)
                 revenue_map.append((ticker, rev))
                 if progress_bar: 
                     progress_bar.progress(
-                        0.2 + (0.8 * (idx/len(candidates))), 
+                        0.2 + (0.8 * (idx/len(candidates[:8]))), 
                         text=f"Analyzing {ticker}..."
                     )
             
             revenue_map.sort(key=lambda x: x[1], reverse=True)
             top_5 = [item[0] for item in revenue_map][:5]
             
-            return ", ".join(top_5), f"Industry: {ind_key}", []
+            return ", ".join(top_5), f"Industry: {industry_name or ind_key}", []
         except Exception as e:
             logger.error(f"Peer recommendation failed: {str(e)}")
             return None, "Error", [f"Recommendation error: {str(e)}"]
@@ -2401,6 +2440,7 @@ with st.sidebar:
             try: _di = yf.Ticker(target_ticker).info or {}
             except: pass
             st.caption(f"info: {len(_di)} keys | country={_di.get('country','?')} | sector={_di.get('sector','?')}")
+            st.caption(f"industry={_di.get('industry','?')} | industryKey={_di.get('industryKey','?')} | sectorKey={_di.get('sectorKey','?')}")
             st.caption(f"opMargin={_di.get('operatingMargins','?')} | mktCap={_di.get('marketCap','?')}")
             
             _api = fetch_company_profile_from_api(target_ticker)
