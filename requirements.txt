@@ -3,3 +3,6 @@ yfinance
 pandas
 numpy
 lxml
+matplotlib
+requests
+urllib3
