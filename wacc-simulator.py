@@ -1711,10 +1711,34 @@ class PeerRecommender:
                     logger.info(f"[Recommend] industryKey missing, generated from industry name: '{industry_name}' → '{ind_key}'")
             
             if ind_key: 
-                industry = yf.Industry(ind_key)
-                top_df = industry.top_companies
+                try:
+                    industry = yf.Industry(ind_key)
+                    top_df = industry.top_companies
+                except Exception as e:
+                    logger.warning(f"[Recommend] yf.Industry('{ind_key}') failed: {e}")
+                    top_df = None
             else: 
-                return None, "Unknown", ["Industry key not found"]
+                top_df = None
+            
+            # Fallback: use yf.Sector if Industry failed
+            if top_df is None or not isinstance(top_df, pd.DataFrame) or top_df.empty:
+                sector_key = info.get('sectorKey', '')
+                if not sector_key:
+                    sector_name = info.get('sector', '')
+                    if sector_name:
+                        sector_key = sector_name.lower().replace(' ', '-')
+                        sector_key = re.sub(r'[^a-z0-9-]', '', sector_key)
+                if sector_key:
+                    try:
+                        sector_obj = yf.Sector(sector_key)
+                        top_df = sector_obj.top_companies
+                        logger.info(f"[Recommend] Fallback to sector '{sector_key}': got {len(top_df) if top_df is not None else 0} companies")
+                    except Exception as e:
+                        logger.warning(f"[Recommend] yf.Sector('{sector_key}') also failed: {e}")
+                        top_df = None
+            
+            if top_df is None or not isinstance(top_df, pd.DataFrame) or top_df.empty:
+                return None, "Unknown", [f"No peer data found for industry '{ind_key}'"]
             
             raw_list = top_df['symbol'].tolist() if 'symbol' in top_df.columns else top_df.index.tolist()
             candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
