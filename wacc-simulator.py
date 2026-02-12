@@ -2002,7 +2002,11 @@ class DetailWACCModel:
                     continue
                 
                 # Month-end closing prices → returns
-                peer_returns = hist["Close"].resample("ME").last().pct_change().dropna()
+                peer_close = hist["Close"]
+                # Strip timezone for compatibility with FRED data (tz-naive)
+                if peer_close.index.tz is not None:
+                    peer_close = peer_close.tz_localize(None)
+                peer_returns = peer_close.resample("ME").last().pct_change().dropna()
                 
                 # Filter to last 5 years
                 if not peer_returns.empty:
