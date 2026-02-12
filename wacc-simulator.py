@@ -51,7 +51,6 @@ import re
 import urllib3
 import warnings
 import logging
-import plotly.graph_objects as go
 
 # Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -2730,6 +2729,9 @@ if 'result' in st.session_state:
                 peer_tickers = [t for t in calc_df["Ticker"].tolist() if t in peer_m_dict]
                 
                 # Up to 4 per row
+                import matplotlib.pyplot as plt
+                import matplotlib.ticker as mticker
+                
                 n_peers = len(peer_tickers)
                 cols_per_row = min(4, n_peers) if n_peers > 0 else 1
                 
@@ -2757,30 +2759,19 @@ if 'result' in st.session_state:
                             alpha_val = y.mean() - beta_val * x.mean()
                             r_squared = (cov_xy ** 2) / (var_x * ((y - y.mean()) ** 2).sum()) if var_x > 0 else 0
                             
-                            # Regression line
-                            x_line = pd.Series([x.min(), x.max()])
-                            y_line = alpha_val + beta_val * x_line
-                            
-                            fig = go.Figure()
-                            fig.add_trace(go.Scatter(
-                                x=x, y=y, mode='markers',
-                                marker=dict(size=5, opacity=0.6, color='#1f77b4'),
-                                name='Monthly'
-                            ))
-                            fig.add_trace(go.Scatter(
-                                x=x_line, y=y_line, mode='lines',
-                                line=dict(color='red', width=2),
-                                name=f'β={beta_val:.2f}'
-                            ))
-                            fig.update_layout(
-                                title=dict(text=f"{t}  β={beta_val:.2f}  R²={r_squared:.2f}", font=dict(size=12)),
-                                xaxis_title="S&P 500", yaxis_title=t,
-                                height=280, margin=dict(l=40, r=20, t=40, b=40),
-                                showlegend=False,
-                                xaxis=dict(tickformat='.0%'),
-                                yaxis=dict(tickformat='.0%'),
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
+                            fig, ax = plt.subplots(figsize=(4, 3))
+                            ax.scatter(x, y, s=15, alpha=0.6, color='#1f77b4')
+                            x_line = np.array([x.min(), x.max()])
+                            ax.plot(x_line, alpha_val + beta_val * x_line, 'r-', linewidth=1.5)
+                            ax.set_title(f"{t}  β={beta_val:.2f}  R²={r_squared:.2f}", fontsize=10)
+                            ax.set_xlabel("S&P 500", fontsize=8)
+                            ax.set_ylabel(t, fontsize=8)
+                            ax.xaxis.set_major_formatter(mticker.PercentFormatter(1.0, decimals=0))
+                            ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0, decimals=0))
+                            ax.tick_params(labelsize=7)
+                            fig.tight_layout()
+                            st.pyplot(fig)
+                            plt.close(fig)
                 
                 # --- Summary: Beta by Ticker ---
                 beta_summary = []
