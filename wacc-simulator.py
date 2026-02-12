@@ -1682,121 +1682,103 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
 # [MODULE] Peer Recommender & Financials
 # ==============================================================================
 class PeerRecommender:
-    """동종 업계 Peer 기업 추천 엔진"""
+    """동종 업계 Peer 기업 추천 엔진 (GitHub CSV 기반 + yf.Industry fallback)"""
     
-    def get_revenue(self, ticker):
-        """특정 티커의 매출 조회"""
+    # GitHub raw URL for pre-collected peer data (updated daily via GitHub Actions)
+    PEERS_CSV_URL = "https://raw.githubusercontent.com/lapalapa/wacc-simulator/main/sp1500_peers.csv"
+    
+    @staticmethod
+    @st.cache_data(ttl=3600)  # Cache for 1 hour
+    def _load_peer_csv():
+        """Load S&P 1500 peer data from GitHub CSV"""
         try:
-            t = yf.Ticker(ticker)
-            info = safe_yf_info(t)
-            return info.get('totalRevenue', 0)
+            df = pd.read_csv(PeerRecommender.PEERS_CSV_URL)
+            logger.info(f"[Recommend] Loaded peer CSV: {len(df)} tickers")
+            return df
         except Exception as e:
-            logger.warning(f"Revenue fetch failed for {ticker}: {str(e)}")
-            return 0
-
-    def _fetch_industry_peers_from_screener(self, industry_name, target_ticker):
-        """Yahoo Finance screener API로 동종업계 ticker 조회 (yf.Industry 실패 시 fallback)"""
-        try:
-            # Yahoo screener: query for same industry, sort by market cap
-            url = "https://query2.finance.yahoo.com/v1/finance/screener"
-            payload = {
-                "size": 10,
-                "offset": 0,
-                "sortField": "intradaymarketcap",
-                "sortType": "DESC",
-                "quoteType": "EQUITY",
-                "query": {
-                    "operator": "AND",
-                    "operands": [
-                        {"operator": "eq", "operands": ["industry", industry_name]}
-                    ]
-                }
-            }
-            headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
-            r = requests.post(url, json=payload, headers=headers, timeout=15, verify=False)
-            data = r.json()
-            quotes = data.get('finance', {}).get('result', [{}])[0].get('quotes', [])
-            symbols = [q['symbol'] for q in quotes if q.get('symbol', '').upper() != target_ticker.upper()]
-            logger.info(f"[Recommend] Screener fallback for '{industry_name}': found {len(symbols)} peers")
-            return symbols[:10]
-        except Exception as e:
-            logger.warning(f"[Recommend] Screener fallback failed: {e}")
-            return []
-
+            logger.warning(f"[Recommend] Failed to load peer CSV: {e}")
+            return None
+    
     def recommend(self, target_ticker, progress_bar=None):
         """타겟 티커의 동종 업계 Top 5 기업 추천"""
         try:
+            # --- Method 1: CSV-based (Primary — no Yahoo API calls) ---
+            peers_df = self._load_peer_csv()
+            
+            if peers_df is not None and not peers_df.empty:
+                # Find target's industry in CSV
+                target_row = peers_df[peers_df['ticker'].str.upper() == target_ticker.upper()]
+                
+                if not target_row.empty:
+                    target_industry = target_row.iloc[0].get('yahoo_industry', '')
+                    
+                    if target_industry:
+                        # Find same-industry peers, sorted by revenue (top 5)
+                        same_ind = peers_df[
+                            (peers_df['yahoo_industry'] == target_industry) &
+                            (peers_df['ticker'].str.upper() != target_ticker.upper())
+                        ].sort_values('revenue', ascending=False)
+                        
+                        if len(same_ind) >= 3:
+                            top_5 = same_ind['ticker'].head(5).tolist()
+                            logger.info(f"[Recommend] CSV match: {target_industry} → {top_5}")
+                            return ", ".join(top_5), f"Industry: {target_industry}", []
+                        
+                        # If <3 in same industry, broaden to same sector
+                        target_sector = target_row.iloc[0].get('yahoo_sector', '')
+                        if target_sector:
+                            same_sector = peers_df[
+                                (peers_df['yahoo_sector'] == target_sector) &
+                                (peers_df['ticker'].str.upper() != target_ticker.upper())
+                            ].sort_values('revenue', ascending=False)
+                            combined_peers = pd.concat([same_ind, same_sector]).drop_duplicates(subset='ticker')
+                            combined_peers = combined_peers.sort_values('revenue', ascending=False).head(5)
+                            if not combined_peers.empty:
+                                top_5 = combined_peers['ticker'].tolist()
+                                logger.info(f"[Recommend] CSV+Sector match: {top_5}")
+                                return ", ".join(top_5), f"Industry: {target_industry}", []
+                else:
+                    logger.info(f"[Recommend] {target_ticker} not found in CSV, trying yfinance...")
+            
+            # --- Method 2: yf.Industry fallback (for non-S&P1500 tickers) ---
             t = yf.Ticker(target_ticker)
             info = safe_yf_info(t)
-            ind_key = info.get('industryKey')
             industry_name = info.get('industry', '')
+            ind_key = info.get('industryKey', '')
             
-            # Fallback: generate industryKey from industry name
             if not ind_key and industry_name:
                 ind_key = industry_name.lower().replace(' - ', '-').replace('—', '-').replace(' & ', '-').replace(' ', '-')
                 ind_key = re.sub(r'[^a-z0-9-]', '', ind_key)
-                logger.info(f"[Recommend] industryKey missing, generated: '{industry_name}' → '{ind_key}'")
             
-            # --- Method 1: yf.Industry ---
-            top_df = None
-            if ind_key: 
+            # Try CSV industry name match (even if ticker not in CSV)
+            if peers_df is not None and industry_name:
+                same_ind = peers_df[
+                    (peers_df['yahoo_industry'] == industry_name) &
+                    (peers_df['ticker'].str.upper() != target_ticker.upper())
+                ].sort_values('revenue', ascending=False)
+                if not same_ind.empty:
+                    top_5 = same_ind['ticker'].head(5).tolist()
+                    logger.info(f"[Recommend] CSV industry name match: {industry_name} → {top_5}")
+                    return ", ".join(top_5), f"Industry: {industry_name}", []
+            
+            # Try yf.Industry API (may fail on Streamlit Cloud)
+            if ind_key:
                 try:
                     industry = yf.Industry(ind_key)
                     top_df = industry.top_companies
+                    if top_df is not None and isinstance(top_df, pd.DataFrame) and not top_df.empty:
+                        raw_list = top_df['symbol'].tolist() if 'symbol' in top_df.columns else top_df.index.tolist()
+                        candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:5]
+                        if candidates:
+                            return ", ".join(candidates), f"Industry: {industry_name or ind_key}", []
                 except Exception as e:
                     logger.warning(f"[Recommend] yf.Industry('{ind_key}') failed: {e}")
             
-            # --- Method 2: yf.Sector fallback ---
-            if top_df is None or not isinstance(top_df, pd.DataFrame) or top_df.empty:
-                sector_key = info.get('sectorKey', '')
-                if not sector_key:
-                    sector_name = info.get('sector', '')
-                    if sector_name:
-                        sector_key = sector_name.lower().replace(' ', '-')
-                        sector_key = re.sub(r'[^a-z0-9-]', '', sector_key)
-                if sector_key:
-                    try:
-                        sector_obj = yf.Sector(sector_key)
-                        top_df = sector_obj.top_companies
-                        logger.info(f"[Recommend] Sector fallback '{sector_key}': {len(top_df) if isinstance(top_df, pd.DataFrame) else 0} companies")
-                    except Exception as e:
-                        logger.warning(f"[Recommend] yf.Sector('{sector_key}') also failed: {e}")
+            return None, "Unknown", [
+                f"'{target_ticker}' not found in S&P 1500 peer database, "
+                f"and Yahoo API is unavailable. Please enter peer tickers manually."
+            ]
             
-            # --- Method 3: Yahoo screener API ---
-            candidates = []
-            if top_df is not None and isinstance(top_df, pd.DataFrame) and not top_df.empty:
-                raw_list = top_df['symbol'].tolist() if 'symbol' in top_df.columns else top_df.index.tolist()
-                candidates = [c for c in raw_list if c.upper() != target_ticker.upper()][:10]
-            
-            if not candidates and industry_name:
-                candidates = self._fetch_industry_peers_from_screener(industry_name, target_ticker)
-            
-            # --- Method 4: Yahoo recommendedSymbols ---
-            if not candidates:
-                rec_symbols = info.get('recommendedSymbols', [])
-                if rec_symbols:
-                    candidates = [s.get('symbol', '') for s in rec_symbols if s.get('symbol', '').upper() != target_ticker.upper()]
-                    logger.info(f"[Recommend] Using recommendedSymbols: {candidates}")
-            
-            if not candidates:
-                return None, "Unknown", [f"No peers found for '{industry_name or ind_key}'"]
-            
-            # Rank by revenue
-            revenue_map = []
-            for idx, ticker in enumerate(candidates[:8]):
-                time.sleep(0.5)
-                rev = self.get_revenue(ticker)
-                revenue_map.append((ticker, rev))
-                if progress_bar: 
-                    progress_bar.progress(
-                        0.2 + (0.8 * (idx/len(candidates[:8]))), 
-                        text=f"Analyzing {ticker}..."
-                    )
-            
-            revenue_map.sort(key=lambda x: x[1], reverse=True)
-            top_5 = [item[0] for item in revenue_map][:5]
-            
-            return ", ".join(top_5), f"Industry: {industry_name or ind_key}", []
         except Exception as e:
             logger.error(f"Peer recommendation failed: {str(e)}")
             return None, "Error", [f"Recommendation error: {str(e)}"]
@@ -1830,7 +1812,16 @@ def get_target_financials(ticker):
         
         mkt_cap = info.get('marketCap', 0)
         sector = str(info.get('sector', '')).lower()
+        industry = str(info.get('industry', '')).lower()
         local_currency = info.get('currency', 'USD')
+        
+        # marketCap fallback: try fast_info if .info returned 0
+        if mkt_cap == 0:
+            try:
+                fi = t.fast_info
+                mkt_cap = getattr(fi, 'market_cap', 0) or 0
+            except:
+                pass
         
         # Get FX rate to USD (fiscal year average based on financial statement date)
         fx_rate = 1.0
@@ -1886,7 +1877,10 @@ def get_target_financials(ticker):
         raw_pretax_usd = raw_pretax * fx_rate
         raw_provision_usd = raw_provision * fx_rate
         
-        if 'financial' in sector or 'bank' in sector: 
+        _is_fin_sector = any(x in sector for x in ['financial', 'bank'])
+        _is_fin_industry = any(x in industry for x in ['bank', 'insurance', 'credit', 'capital market',
+                                'mortgage', 'asset management', 'financial'])
+        if _is_fin_sector or _is_fin_industry:
             category = "Financial Firms"
         elif mkt_cap > 5e9: 
             category = "Large Firms" 
