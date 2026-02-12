@@ -965,7 +965,9 @@ def get_value_max_fuzzy(df, col_idx, search_keywords, exclusion_keywords=None, d
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def fetch_all_fred_data():
-    """FRED 데이터 일괄 조회 (GDP, RF, OAS Spreads)"""
+    """FRED 데이터 조회 — GitHub CSV (primary) + FRED API (fallback)"""
+    FRED_CSV_URL = "https://raw.githubusercontent.com/lapalapa/wacc-simulator/main/fred_data.csv"
+    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -983,10 +985,30 @@ def fetch_all_fred_data():
     ]
     
     results = {}
-    failed_series = []
     
+    # --- Primary: Read from GitHub CSV ---
+    try:
+        csv_df = pd.read_csv(FRED_CSV_URL)
+        csv_df["DATE"] = pd.to_datetime(csv_df["DATE"], errors='coerce')
+        csv_df["VALUE"] = pd.to_numeric(csv_df["VALUE"], errors='coerce')
+        csv_df = csv_df.dropna(subset=["DATE", "VALUE"])
+        
+        for key, series_id, is_oas in targets:
+            subset = csv_df[csv_df["series"] == key].copy()
+            if not subset.empty:
+                subset = subset[["DATE", "VALUE"]].sort_values("DATE")
+                results[key] = subset
+        
+        logger.info(f"[FRED] Loaded {len(results)}/{len(targets)} series from GitHub CSV")
+    except Exception as e:
+        logger.warning(f"[FRED] GitHub CSV failed: {e}, falling back to FRED API")
+    
+    # --- Fallback: Fetch missing series from FRED API ---
+    failed_series = []
     for key, series_id, is_oas in targets:
-        time.sleep(random.uniform(1.2, 2.5)) 
+        if key in results:
+            continue
+        time.sleep(random.uniform(1.2, 2.5))
         try:
             url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
             r = requests.get(url, headers=headers, timeout=10, verify=False)
@@ -996,7 +1018,7 @@ def fetch_all_fred_data():
             df["DATE"] = pd.to_datetime(df["DATE"], errors='coerce')
             df["VALUE"] = pd.to_numeric(df["VALUE"], errors='coerce')
             df = df.dropna().sort_values(by="DATE", ascending=True)
-            if not df.empty: 
+            if not df.empty:
                 results[key] = df
             else:
                 failed_series.append(series_id)
@@ -1065,7 +1087,19 @@ def fetch_all_fred_data():
 # ==============================================================================
 @st.cache_data(ttl=3600*24)
 def get_sp_buyback_data():
-    """NYU Stern S&P 500 Buyback/Dividend 데이터 조회"""
+    """NYU Stern S&P 500 Buyback/Dividend — GitHub CSV (primary) + NYU scraping (fallback)"""
+    NYU_CSV_URL = "https://raw.githubusercontent.com/lapalapa/wacc-simulator/main/nyu_sp_earnings.csv"
+    
+    # --- Primary: GitHub CSV ---
+    try:
+        df = pd.read_csv(NYU_CSV_URL)
+        df = df.dropna(subset=[df.columns[0]])
+        logger.info(f"[NYU] Loaded {len(df)} rows from GitHub CSV")
+        return 2.0, 1.5, df, []
+    except Exception as e:
+        logger.warning(f"[NYU] GitHub CSV failed: {e}, falling back to scraping")
+    
+    # --- Fallback: Scrape NYU ---
     url = "https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/spearn.html"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -1083,7 +1117,23 @@ def get_sp_buyback_data():
 
 @st.cache_data(ttl=3600*24)
 def get_kpmg_tax_rates():
-    """KPMG 국가별 법인세율 데이터 조회"""
+    """KPMG 국가별 법인세율 — GitHub CSV (primary) + KPMG scraping (fallback)"""
+    KPMG_CSV_URL = "https://raw.githubusercontent.com/lapalapa/wacc-simulator/main/kpmg_tax_rates.csv"
+    
+    # --- Primary: GitHub CSV ---
+    try:
+        df = pd.read_csv(KPMG_CSV_URL)
+        df["Rate"] = pd.to_numeric(df["Rate"], errors='coerce')
+        tax_dict = dict(zip(df["Country"].str.upper().str.strip(), df["Rate"]))
+        tax_dict["UNITED STATES"] = 25.57
+        tax_dict["USA"] = 25.57
+        tax_dict["KOREA"] = 26.40
+        logger.info(f"[KPMG] Loaded {len(tax_dict)} countries from GitHub CSV")
+        return df, tax_dict, 2025
+    except Exception as e:
+        logger.warning(f"[KPMG] GitHub CSV failed: {e}, falling back to scraping")
+    
+    # --- Fallback: Scrape KPMG ---
     url = "https://kpmg.com/dk/en/services/tax/corporate-tax/corporate-tax-rates-table.html"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
@@ -1098,7 +1148,6 @@ def get_kpmg_tax_rates():
         result_df["Rate"] = pd.to_numeric(result_df["Rate"], errors='coerce')
         tax_dict = dict(zip(result_df["Country"].str.upper().str.strip(), result_df["Rate"]))
         
-        # 보완 데이터
         tax_dict["UNITED STATES"] = 25.57
         tax_dict["USA"] = 25.57
         tax_dict["KOREA"] = 26.40
@@ -2027,34 +2076,50 @@ class DetailWACCModel:
         beta_list = []
         peer_monthly_dict = {}
         
-        # --- 1. Fetch S&P500 monthly from FRED ---
+        # --- 1. Fetch S&P500 monthly — GitHub CSV (primary) + FRED (fallback) ---
+        SP500_CSV_URL = "https://raw.githubusercontent.com/lapalapa/wacc-simulator/main/sp500_monthly.csv"
         sp500_monthly = None
         try:
-            url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            r = requests.get(url, headers=headers, timeout=15, verify=False)
-            r.raise_for_status()
-            sp_df = pd.read_csv(io.StringIO(r.text))
-            sp_df.columns = ["DATE", "VALUE"]
+            sp_df = pd.read_csv(SP500_CSV_URL)
             sp_df["DATE"] = pd.to_datetime(sp_df["DATE"], errors='coerce')
-            sp_df["VALUE"] = pd.to_numeric(sp_df["VALUE"], errors='coerce')
-            sp_df = sp_df.dropna().sort_values("DATE")
-            
-            # Resample to month-end (last observation per month)
-            sp_df = sp_df.set_index("DATE")
-            sp_monthly = sp_df["VALUE"].resample("ME").last().dropna()
+            sp_df["SP500"] = pd.to_numeric(sp_df["SP500"], errors='coerce')
+            sp_df = sp_df.dropna().sort_values("DATE").set_index("DATE")
             
             # Filter to last 5 years
-            cutoff = sp_monthly.index.max() - pd.DateOffset(years=5)
-            sp_monthly = sp_monthly[sp_monthly.index >= cutoff]
+            cutoff = sp_df.index.max() - pd.DateOffset(years=5)
+            sp_monthly = sp_df["SP500"][sp_df.index >= cutoff]
             
-            # Monthly returns
             sp500_monthly = sp_monthly.pct_change().dropna()
             sp500_monthly.name = "SP500"
-            logger.info(f"[Beta] S&P500 monthly returns: {len(sp500_monthly)} months from FRED")
+            logger.info(f"[Beta] S&P500 monthly returns: {len(sp500_monthly)} months from GitHub CSV")
         except Exception as e:
-            error_logs.append(f"⚠️ S&P500 FRED fetch failed: {str(e)}")
-            logger.error(f"[Beta] S&P500 FRED fetch failed: {e}")
+            logger.warning(f"[Beta] GitHub CSV failed: {e}, falling back to FRED")
+        
+        # Fallback: FRED API
+        if sp500_monthly is None:
+            try:
+                url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500"
+                headers = {"User-Agent": "Mozilla/5.0"}
+                r = requests.get(url, headers=headers, timeout=15, verify=False)
+                r.raise_for_status()
+                sp_df = pd.read_csv(io.StringIO(r.text))
+                sp_df.columns = ["DATE", "VALUE"]
+                sp_df["DATE"] = pd.to_datetime(sp_df["DATE"], errors='coerce')
+                sp_df["VALUE"] = pd.to_numeric(sp_df["VALUE"], errors='coerce')
+                sp_df = sp_df.dropna().sort_values("DATE")
+                
+                sp_df = sp_df.set_index("DATE")
+                sp_monthly = sp_df["VALUE"].resample("ME").last().dropna()
+                
+                cutoff = sp_monthly.index.max() - pd.DateOffset(years=5)
+                sp_monthly = sp_monthly[sp_monthly.index >= cutoff]
+                
+                sp500_monthly = sp_monthly.pct_change().dropna()
+                sp500_monthly.name = "SP500"
+                logger.info(f"[Beta] S&P500 monthly returns: {len(sp500_monthly)} months from FRED")
+            except Exception as e:
+                error_logs.append(f"S&P 500 data fetch failed: {e}")
+                logger.error(f"[Beta] S&P500 fetch failed: {e}")
         
         # --- 2. Calculate Raw Beta for each peer ---
         for t in self.peers:
