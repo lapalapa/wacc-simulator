@@ -1443,6 +1443,12 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         logger.info(f"[P1] Triple Lock: only {len(valid_quarters)} quarters for {col.strftime('%Y-%m-%d')}")
                 
                 lbl = col.strftime('%Y-%m-%d')
+                
+                # fin_nonbank fallback: if EBIT=0, use Pretax + IE (financial I/S has no EBIT row)
+                if e == 0 and fin_subtype == 'fin_nonbank' and pt != 0:
+                    e = pt + abs(i)
+                    logger.info(f"[P1] fin_nonbank fallback: Pretax=${pt:,.0f} + IE=${abs(i):,.0f} = EBIT=${e:,.0f}")
+                
                 logger.info(f"[P1] Using Annual {lbl}: rev=${r_annual:,.0f}, ebit=${e:,.0f}, ie=${i:,.0f}, iod=${iod_annual:,.0f}")
                 return r_annual, e, ed, abs(i), lbl, lbl, pt, pp, iod_annual, fin_subtype
         
@@ -1574,6 +1580,20 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                         label_ebit = "TTM (EBITDA Proxy)"
                     else:
                         label_ebit = "N/A"
+                
+                # fin_nonbank fallback: if EBIT still 0, use Pretax + IE (financial I/S has no EBIT row)
+                if ebit == 0 and fin_subtype == 'fin_nonbank':
+                    _fb_pretax = 0
+                    if api_data and api_data.get('pretax_ttm', 0) != 0:
+                        _fb_pretax = api_data['pretax_ttm']
+                    if _fb_pretax != 0 and int_exp is not None and int_exp != 0:
+                        ebit = _fb_pretax + abs(int_exp)
+                        label_ebit = "TTM (Pretax+IE)"
+                        logger.info(f"[P2] fin_nonbank fallback: Pretax=${_fb_pretax:,.0f} + IE=${abs(int_exp):,.0f} = EBIT=${ebit:,.0f}")
+                    elif _fb_pretax != 0:
+                        ebit = _fb_pretax
+                        label_ebit = "TTM (Pretax)"
+                        logger.info(f"[P2] fin_nonbank fallback: Pretax=${_fb_pretax:,.0f} (no IE)")
             
             if int_exp is None: 
                 int_exp = 0
@@ -1637,6 +1657,16 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
                 ebit = raw_pretax - raw_provision
             elif fin_subtype == 'insurance':
                 ebit = raw_pretax - rgl_p3
+            
+            # fin_nonbank fallback: if EBIT=0, try Pretax from quarters
+            if ebit == 0 and fin_subtype == 'fin_nonbank':
+                q_pretax_sum = 0
+                for q_idx in range(4):
+                    _, _, _, _, pt_q, _, _, _ = extract_from_col(recent_4, q_idx)
+                    q_pretax_sum += pt_q
+                if q_pretax_sum != 0:
+                    ebit = q_pretax_sum + abs(int_exp)
+                    logger.info(f"[P3] fin_nonbank fallback: Pretax=${q_pretax_sum:,.0f} + IE=${abs(int_exp):,.0f} = EBIT=${ebit:,.0f}")
             
             return rev, ebit, ebitda, abs(int_exp), common_label, common_label, raw_pretax, raw_provision, iod_p3, fin_subtype
 
