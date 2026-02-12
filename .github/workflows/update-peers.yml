@@ -1,0 +1,36 @@
+name: Update S&P 1500 Peer Data
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC (한국시간 15:00, 미국 장 마감 후)
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # 수동 실행도 가능
+
+jobs:
+  update-peers:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install dependencies
+        run: |
+          pip install yfinance pandas lxml requests
+      
+      - name: Run collection script
+        run: python collect_peers.py
+      
+      - name: Commit and push CSV
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add sp1500_peers.csv
+          # Only commit if there are changes
+          git diff --cached --quiet || git commit -m "Auto-update sp1500_peers.csv [$(date +'%Y-%m-%d')]"
+          git push
