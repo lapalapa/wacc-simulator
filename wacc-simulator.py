@@ -1195,7 +1195,7 @@ def get_damodaran_spreads():
 def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
     """
     Priority Logic v125.1 (Restored Normalization Logic):
-    Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision, int_on_deposits
+    Returns: rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision, _unused, fin_subtype
     
     - ebit: Yahoo-style EBIT (includes unusual items) - used for both sidebar and ICR
     - For financial companies: PPNR = Pretax + abs(Provision)
@@ -1580,7 +1580,7 @@ def get_financial_data_with_priority(ticker_obj, info_dict, ticker_symbol=None):
             
             if int_exp is None: 
                 int_exp = 0
-            # P2: get int_on_deposits from API TTM (same period as other TTM data)
+            # P2: iod kept for return signature compatibility (unused)
             iod_p2 = 0
             if is_financial and api_data:
                 iod_p2 = abs(api_data.get('int_exp_on_deposits_ttm', 0))
@@ -1723,14 +1723,8 @@ def get_target_financials(ticker):
             else: 
                 target_tax = 25.0
         
-        rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision, int_on_deposits, fin_subtype = \
+        rev, ebit, ebitda, int_exp, label_ebit, label_int, raw_pretax, raw_provision, _iod_unused, fin_subtype = \
             get_financial_data_with_priority(t, info, ticker_symbol=ticker)
-        
-        # For bank subtype, if int_on_deposits still 0, try HTML scraping as last resort
-        if fin_subtype == 'bank' and int_on_deposits == 0:
-            int_on_deposits = scrape_yahoo_deposit_interest(ticker)
-            if int_on_deposits > 0:
-                logger.info(f"[Target] Interest on Deposits from HTML scrape: ${int_on_deposits:,.0f}")
         
         mkt_cap = info.get('marketCap', 0)
         sector = str(info.get('sector', '')).lower()
@@ -1789,10 +1783,6 @@ def get_target_financials(ticker):
         ebit_usd = ebit * fx_rate
         raw_pretax_usd = raw_pretax * fx_rate
         raw_provision_usd = raw_provision * fx_rate
-        int_on_deposits_usd = int_on_deposits * fx_rate
-        # Non-deposit interest = Total IE - Deposit Interest
-        non_deposit_int_exp = max(int_exp - int_on_deposits, 0)
-        non_deposit_int_exp_usd = non_deposit_int_exp * fx_rate
         
         if 'financial' in sector or 'bank' in sector: 
             category = "Financial Firms"
@@ -1804,8 +1794,6 @@ def get_target_financials(ticker):
         return {
             "int_exp": int_exp_usd, "ebit": ebit_usd, 
             "int_exp_local": int_exp, "ebit_local": ebit,
-            "int_on_deposits": int_on_deposits_usd, "int_on_deposits_local": int_on_deposits,
-            "non_deposit_int_exp": non_deposit_int_exp_usd, "non_deposit_int_exp_local": non_deposit_int_exp,
             "label_int": label_int, "label_ebit": label_ebit,
             "raw_pretax": raw_pretax_usd, "raw_provision": raw_provision_usd,
             "raw_pretax_local": raw_pretax, "raw_provision_local": raw_provision,
@@ -1819,8 +1807,6 @@ def get_target_financials(ticker):
         return {
             "int_exp": 0.0, "ebit": 0.0,
             "int_exp_local": 0.0, "ebit_local": 0.0,
-            "int_on_deposits": 0.0, "int_on_deposits_local": 0.0,
-            "non_deposit_int_exp": 0.0, "non_deposit_int_exp_local": 0.0,
             "label_int": "N/A", "label_ebit": "N/A", 
             "raw_pretax": 0, "raw_provision": 0, 
             "raw_pretax_local": 0, "raw_provision_local": 0,
@@ -2097,43 +2083,18 @@ with st.sidebar:
         
         # Interest Expense section by financial subtype
         if _fin_subtype == 'bank':
-            # === BANKS: ICR = (PPNR + Financial Interest) / Financial Interest ===
-            st.caption("🏦 *Bank: ICR = (PPNR + Fin.Interest) / Fin.Interest*")
+            # === BANKS: ICR = (PPNR + IE) / IE ===
+            st.caption("🏦 *Bank: ICR = (PPNR + IE) / IE*")
             
-            # Total Interest Expense
+            # Interest Expense
             _ie_default = _fmt_dollar(tf['int_exp'])
             _ie_text = st.text_input(
-                "Total Interest Expense (USD)",
+                "Interest Expense (USD)",
                 value=_ie_default,
-                help="Total interest expense (includes deposit interest + debt interest)"
+                help="Total interest expense"
             )
             int_exp_in = _parse_dollar(_ie_text, tf['int_exp'])
             st.caption(f"{_fmt_k(int_exp_in)} · Source: {tf.get('label_int', 'N/A')}")
-            
-            # Interest on Deposits
-            _iod_val = tf.get('int_on_deposits', 0)
-            _iod_default = _fmt_dollar(_iod_val)
-            _iod_text = st.text_input(
-                "(−) Interest on Deposits (USD)",
-                value=_iod_default,
-                help="Interest paid to depositors. Often not available via API — enter from 10-K."
-            )
-            int_on_deposits_in = _parse_dollar(_iod_text, _iod_val)
-            if int_on_deposits_in == 0 and int_exp_in > 0:
-                st.warning("⚠️ Interest on Deposits = $0. Enter manually from 10-K.")
-            else:
-                st.caption(f"{_fmt_k(int_on_deposits_in)}")
-            
-            # Financial Interest
-            _ndie_calc = max(int_exp_in - int_on_deposits_in, 0)
-            _ndie_default = _fmt_dollar(_ndie_calc)
-            _ndie_text = st.text_input(
-                "Financial Interest (USD) — *used for ICR*",
-                value=_ndie_default,
-                help="Total IE − Interest on Deposits = debt/borrowing interest only"
-            )
-            non_deposit_ie_in = _parse_dollar(_ndie_text, _ndie_calc)
-            st.caption(f"{_fmt_k(non_deposit_ie_in)} = Total IE − Deposits")
             
             # PPNR
             _ebit_default = _fmt_dollar(tf['ebit'])
@@ -2155,7 +2116,7 @@ with st.sidebar:
             else:
                 st.warning("Credit Losses Provision = $0 (Check 10-K)")
             
-            int_exp_for_icr = non_deposit_ie_in
+            int_exp_for_icr = int_exp_in
             
         elif _fin_subtype == 'insurance':
             # === INSURANCE: ICR = (Adj.Pretax + IE) / IE ===
@@ -2271,8 +2232,6 @@ with st.sidebar:
             _d = st.session_state.get('target_fin', {})
             st.caption(f"**{target_ticker}** | {_d.get('country_name','?')} | Tax {_d.get('tax_rate',0):.1f}%")
             st.caption(f"EBIT ${_d.get('ebit',0):,.0f} | IntExp ${_d.get('int_exp',0):,.0f}")
-            if _d.get('int_on_deposits', 0) > 0:
-                st.caption(f"DepositInt ${_d.get('int_on_deposits',0):,.0f} | NonDepIE ${_d.get('non_deposit_int_exp',0):,.0f}")
             st.caption(f"Src: {_d.get('label_ebit','?')} | Cat: {_d.get('category','?')}")
             
             _di = {}
@@ -2333,24 +2292,18 @@ with st.sidebar:
                 # Test get_financial_data_with_priority directly
                 _dbg_rev, _dbg_ebit, _dbg_ebitda, _dbg_ie, _dbg_le, _dbg_li, _dbg_pt, _dbg_pp, _dbg_iod, _dbg_subtype = \
                     get_financial_data_with_priority(_dbg_t, _dbg_info, ticker_symbol=target_ticker)
-                st.caption(f"Priority result: rev=${_dbg_rev:,.0f} ebit=${_dbg_ebit:,.0f} ie=${_dbg_ie:,.0f} iod=${_dbg_iod:,.0f}")
+                st.caption(f"Priority result: rev=${_dbg_rev:,.0f} ebit=${_dbg_ebit:,.0f} ie=${_dbg_ie:,.0f}")
                 st.caption(f"  pretax=${_dbg_pt:,.0f} provision=${_dbg_pp:,.0f} label={_dbg_le} subtype={_dbg_subtype}")
                 
                 # Show API data for all firms
                 _api_cache = _financial_ttm_cache.get(target_ticker.upper())
                 if _api_cache:
-                    _iod = _api_cache.get('int_exp_on_deposits_ttm', 0)
                     _ie_api = _api_cache.get('int_exp_ttm', 0)
-                    _ii_api = _api_cache.get('int_income_ttm', 0)
                     _ebit_api = _api_cache.get('ebit_ttm', 0)
                     _rgl_api = _api_cache.get('realized_gl_ttm', 0)
-                    st.caption(f"  API: EBIT=${_ebit_api:,.0f} IntExp=${_ie_api:,.0f} DepositInt=${_iod:,.0f} IntIncome=${_ii_api:,.0f}")
+                    st.caption(f"  API: EBIT=${_ebit_api:,.0f} IntExp=${_ie_api:,.0f}")
                     st.caption(f"  API: RealizedGL=${_rgl_api:,.0f}")
                 
-                # Show scraping result
-                _scrape_key = f"_deposit_{target_ticker.upper()}"
-                _scrape_val = _financial_ttm_cache.get(_scrape_key, 'not tried')
-                st.caption(f"  HTML Scrape DepositInt: {('${:,.0f}'.format(_scrape_val) if isinstance(_scrape_val, (int, float)) else str(_scrape_val))}")
             except Exception as _pe:
                 st.caption(f"Priority path error: {_pe}")
             
@@ -2699,7 +2652,7 @@ if 'result' in st.session_state:
         if category == "Financial Firms" and _fin_subtype == 'bank':
             st.caption(
                 f"Based on {category} Table. "
-                f"ICR = (PPNR + Fin.Int) / Fin.Int = ({ebit:,.0f} + {int_exp:,.0f}) / {int_exp:,.0f}"
+                f"ICR = (PPNR + IE) / IE = ({ebit:,.0f} + {int_exp:,.0f}) / {int_exp:,.0f}"
             )
         elif category == "Financial Firms" and _fin_subtype == 'insurance':
             st.caption(
