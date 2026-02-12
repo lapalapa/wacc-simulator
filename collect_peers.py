@@ -1,173 +1,179 @@
 """
-S&P 1500 Peer Data Collector
-Runs via GitHub Actions (daily) to collect ticker/industry/sector/marketCap
-from Wikipedia S&P 500/400/600 lists + yfinance enrichment.
+US Listed Companies Peer Data Collector
+Runs via GitHub Actions (daily) to collect ticker/industry/sector/marketCap/revenue
+from NASDAQ screener (all US exchanges) + yfinance enrichment.
 
-Output: sp1500_peers.csv
+Output: sp1500_peers.csv (name kept for backward compatibility)
 """
 import pandas as pd
 import yfinance as yf
+import requests
 import time
 import random
-import sys
 
-def get_sp500():
-    """S&P 500 from Wikipedia"""
-    url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-    tables = pd.read_html(url)
-    df = tables[0][['Symbol', 'Security', 'GICS Sector', 'GICS Sub-Industry']].copy()
-    df.columns = ['ticker', 'name', 'gics_sector', 'gics_sub_industry']
-    df['index'] = 'SP500'
-    df['ticker'] = df['ticker'].str.replace('.', '-', regex=False)  # BRK.B → BRK-B
-    return df
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
-def get_sp400():
-    """S&P 400 MidCap from Wikipedia"""
-    url = 'https://en.wikipedia.org/wiki/List_of_S%26P_400_companies'
+
+def get_nasdaq_listed():
+    """Fetch all US-listed companies from NASDAQ screener API (NYSE + NASDAQ + AMEX)"""
+    url = "https://api.nasdaq.com/api/screener/stocks"
+    params = {
+        "tableonly": "true",
+        "limit": 10000,
+        "offset": 0,
+    }
     try:
-        tables = pd.read_html(url)
-        df = tables[0]
-        # Column names vary — find the right ones
-        col_map = {}
-        for c in df.columns:
-            cl = str(c).lower()
-            if 'symbol' in cl or 'ticker' in cl:
-                col_map['ticker'] = c
-            elif 'company' in cl or 'security' in cl or 'name' in cl:
-                col_map['name'] = c
-            elif 'sector' in cl and 'sub' not in cl:
-                col_map['gics_sector'] = c
-            elif 'sub' in cl and 'industr' in cl:
-                col_map['gics_sub_industry'] = c
+        r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        rows = data.get("data", {}).get("table", {}).get("rows", [])
         
-        if 'ticker' not in col_map:
-            print("[SP400] Could not find ticker column, skipping")
+        if not rows:
+            print(f"[NASDAQ] No rows returned. Response keys: {data.keys()}")
             return pd.DataFrame()
         
+        df = pd.DataFrame(rows)
+        print(f"[NASDAQ] Raw rows: {len(df)}, columns: {df.columns.tolist()}")
+        
+        # Standardize columns
         result = pd.DataFrame()
-        result['ticker'] = df[col_map['ticker']].str.replace('.', '-', regex=False)
-        result['name'] = df.get(col_map.get('name', ''), '')
-        result['gics_sector'] = df.get(col_map.get('gics_sector', ''), '')
-        result['gics_sub_industry'] = df.get(col_map.get('gics_sub_industry', ''), '')
-        result['index'] = 'SP400'
+        result['ticker'] = df.get('symbol', df.get('Symbol', pd.Series(dtype=str))).str.strip()
+        result['name'] = df.get('name', df.get('Name', ''))
+        result['nasdaq_sector'] = df.get('sector', df.get('Sector', ''))
+        result['nasdaq_industry'] = df.get('industry', df.get('Industry', ''))
+        result['exchange'] = df.get('exchange', df.get('Exchange', ''))
+        
+        # Parse market cap string (e.g., "$1,234,567,890" or "1.23B")
+        raw_cap = df.get('marketCap', df.get('Market Cap', pd.Series(dtype=str)))
+        if raw_cap is not None:
+            result['nasdaq_market_cap'] = raw_cap.apply(_parse_market_cap)
+        else:
+            result['nasdaq_market_cap'] = 0
+        
+        # Filter: only common stocks (exclude ETFs, warrants, etc.)
+        result = result[result['ticker'].str.len() <= 5]
+        result = result[~result['ticker'].str.contains(r'[^A-Za-z]', na=False)]
+        result = result[result['ticker'].str.len() > 0]
+        
+        result = result.drop_duplicates(subset='ticker', keep='first')
+        print(f"[NASDAQ] After filter: {len(result)} tickers")
         return result
+        
     except Exception as e:
-        print(f"[SP400] Failed: {e}")
+        print(f"[NASDAQ] Failed: {e}")
         return pd.DataFrame()
 
-def get_sp600():
-    """S&P 600 SmallCap from Wikipedia"""
-    url = 'https://en.wikipedia.org/wiki/List_of_S%26P_600_companies'
+
+def _parse_market_cap(val):
+    """Parse NASDAQ market cap string to float"""
+    if pd.isna(val) or val == '' or val is None:
+        return 0
+    s = str(val).replace('$', '').replace(',', '').strip()
+    if not s or s == 'N/A':
+        return 0
     try:
-        tables = pd.read_html(url)
-        df = tables[0]
-        col_map = {}
-        for c in df.columns:
-            cl = str(c).lower()
-            if 'symbol' in cl or 'ticker' in cl:
-                col_map['ticker'] = c
-            elif 'company' in cl or 'security' in cl or 'name' in cl:
-                col_map['name'] = c
-            elif 'sector' in cl and 'sub' not in cl:
-                col_map['gics_sector'] = c
-            elif 'sub' in cl and 'industr' in cl:
-                col_map['gics_sub_industry'] = c
-        
-        if 'ticker' not in col_map:
-            print("[SP600] Could not find ticker column, skipping")
-            return pd.DataFrame()
-        
-        result = pd.DataFrame()
-        result['ticker'] = df[col_map['ticker']].str.replace('.', '-', regex=False)
-        result['name'] = df.get(col_map.get('name', ''), '')
-        result['gics_sector'] = df.get(col_map.get('gics_sector', ''), '')
-        result['gics_sub_industry'] = df.get(col_map.get('gics_sub_industry', ''), '')
-        result['index'] = 'SP600'
-        return result
-    except Exception as e:
-        print(f"[SP600] Failed: {e}")
-        return pd.DataFrame()
+        return float(s)
+    except ValueError:
+        return 0
 
-def enrich_with_yfinance(df, batch_size=50):
+
+def enrich_with_yfinance(df):
     """
-    Enrich with Yahoo Finance industry (Yahoo's own classification).
-    Wikipedia uses GICS, Yahoo uses its own system.
-    We need Yahoo industry for matching with wacc-simulator's classification.
+    Enrich with Yahoo Finance: industry, sector, marketCap, totalRevenue.
+    Only enrich top ~3000 by market cap to save API calls.
+    Smaller companies keep NASDAQ-provided sector/industry.
     """
-    print(f"\nEnriching {len(df)} tickers with yfinance data...")
+    df = df.sort_values('nasdaq_market_cap', ascending=False).reset_index(drop=True)
     
-    yahoo_industries = []
-    yahoo_sectors = []
-    market_caps = []
+    ENRICH_LIMIT = 3000
+    enrich_mask = df.index < ENRICH_LIMIT
     
-    for i, ticker in enumerate(df['ticker']):
-        if i > 0 and i % batch_size == 0:
-            print(f"  Progress: {i}/{len(df)} ({i/len(df)*100:.0f}%)")
+    print(f"\nEnriching top {min(ENRICH_LIMIT, len(df))} tickers with yfinance...")
+    
+    yahoo_industries = [''] * len(df)
+    yahoo_sectors = [''] * len(df)
+    market_caps = [0] * len(df)
+    revenues = [0] * len(df)
+    
+    batch_count = 0
+    for i in df[enrich_mask].index:
+        ticker = df.at[i, 'ticker']
+        batch_count += 1
+        
+        if batch_count % 100 == 0:
+            print(f"  Progress: {batch_count}/{ENRICH_LIMIT} ({batch_count/ENRICH_LIMIT*100:.0f}%)")
         
         try:
-            time.sleep(random.uniform(0.3, 0.8))  # Rate limit protection
+            time.sleep(random.uniform(0.2, 0.5))
             t = yf.Ticker(ticker)
             info = t.info or {}
-            yahoo_industries.append(info.get('industry', ''))
-            yahoo_sectors.append(info.get('sector', ''))
-            market_caps.append(info.get('marketCap', 0) or 0)
+            yahoo_industries[i] = info.get('industry', '')
+            yahoo_sectors[i] = info.get('sector', '')
+            market_caps[i] = info.get('marketCap', 0) or 0
+            revenues[i] = info.get('totalRevenue', 0) or 0
         except Exception as e:
-            yahoo_industries.append('')
-            yahoo_sectors.append('')
-            market_caps.append(0)
-            if i % 100 == 0:
+            if batch_count % 200 == 0:
                 print(f"  ⚠️ {ticker}: {e}")
     
     df['yahoo_industry'] = yahoo_industries
     df['yahoo_sector'] = yahoo_sectors
     df['market_cap'] = market_caps
+    df['revenue'] = revenues
+    
+    # For non-enriched tickers, use NASDAQ data as fallback
+    mask_no_ind = df['yahoo_industry'] == ''
+    df.loc[mask_no_ind, 'yahoo_industry'] = df.loc[mask_no_ind, 'nasdaq_industry']
+    mask_no_sec = df['yahoo_sector'] == ''
+    df.loc[mask_no_sec, 'yahoo_sector'] = df.loc[mask_no_sec, 'nasdaq_sector']
+    mask_no_cap = df['market_cap'] == 0
+    df.loc[mask_no_cap, 'market_cap'] = df.loc[mask_no_cap, 'nasdaq_market_cap']
     
     return df
 
+
 def main():
     print("=" * 60)
-    print("S&P 1500 Peer Data Collection")
+    print("US Listed Companies — Peer Data Collection")
     print("=" * 60)
     
-    # Step 1: Get S&P 500/400/600 from Wikipedia
-    print("\n[1/4] Fetching S&P 500...")
-    sp500 = get_sp500()
-    print(f"  → {len(sp500)} tickers")
+    # Step 1: Get all US-listed tickers from NASDAQ screener
+    print("\n[1/2] Fetching US-listed companies from NASDAQ...")
+    df = get_nasdaq_listed()
     
-    print("[2/4] Fetching S&P 400 MidCap...")
-    sp400 = get_sp400()
-    print(f"  → {len(sp400)} tickers")
+    if df.empty:
+        print("ERROR: No tickers fetched. Exiting.")
+        return
     
-    print("[3/4] Fetching S&P 600 SmallCap...")
-    sp600 = get_sp600()
-    print(f"  → {len(sp600)} tickers")
+    print(f"  → {len(df)} tickers from NASDAQ/NYSE/AMEX")
     
-    # Combine
-    combined = pd.concat([sp500, sp400, sp600], ignore_index=True)
-    combined = combined.drop_duplicates(subset='ticker', keep='first')
-    print(f"\nTotal unique tickers: {len(combined)}")
-    
-    # Step 2: Enrich with yfinance (Yahoo industry/sector + market cap)
-    print("\n[4/4] Enriching with Yahoo Finance data...")
-    combined = enrich_with_yfinance(combined)
-    
-    # Fill missing yahoo_industry with GICS sub-industry
-    mask = combined['yahoo_industry'] == ''
-    combined.loc[mask, 'yahoo_industry'] = combined.loc[mask, 'gics_sub_industry']
-    combined.loc[combined['yahoo_sector'] == '', 'yahoo_sector'] = combined.loc[combined['yahoo_sector'] == '', 'gics_sector']
+    # Step 2: Enrich with yfinance (Yahoo industry/sector + market cap + revenue)
+    print("\n[2/2] Enriching with Yahoo Finance data...")
+    df = enrich_with_yfinance(df)
     
     # Sort by market cap descending
-    combined = combined.sort_values('market_cap', ascending=False)
+    df = df.sort_values('market_cap', ascending=False).reset_index(drop=True)
+    
+    # Select final columns
+    final = df[['ticker', 'name', 'yahoo_sector', 'yahoo_industry',
+                 'market_cap', 'revenue', 'exchange']].copy()
     
     # Save
-    combined.to_csv('sp1500_peers.csv', index=False)
+    final.to_csv('sp1500_peers.csv', index=False)
+    
+    # Stats
+    enriched = (final['yahoo_industry'] != '').sum()
+    with_revenue = (final['revenue'] > 0).sum()
     
     print(f"\n{'=' * 60}")
-    print(f"DONE: sp1500_peers.csv ({len(combined)} tickers)")
-    print(f"Columns: {combined.columns.tolist()}")
-    print(f"Top 10 by market cap:")
-    print(combined[['ticker', 'name', 'yahoo_industry', 'market_cap']].head(10).to_string())
+    print(f"DONE: sp1500_peers.csv")
+    print(f"  Total tickers: {len(final)}")
+    print(f"  With Yahoo industry: {enriched}")
+    print(f"  With revenue data: {with_revenue}")
+    print(f"  Unique industries: {final['yahoo_industry'].nunique()}")
+    print(f"\nTop 10 by market cap:")
+    print(final[['ticker', 'name', 'yahoo_industry', 'market_cap', 'revenue']].head(10).to_string())
     print(f"{'=' * 60}")
+
 
 if __name__ == "__main__":
     main()
