@@ -51,6 +51,7 @@ import re
 import urllib3
 import warnings
 import logging
+import plotly.graph_objects as go
 
 # Suppress SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -1952,15 +1953,109 @@ class DetailWACCModel:
             return None, f"⚠️ {ticker}: Error {str(e)}"
 
     def get_5y_monthly_beta_analysis(self):
-        """5년 월간 베타 분석 (현재는 목 데이터 반환)"""
+        """
+        5년 월간 베타 분석: 각 peer ticker의 월간 수익률을 S&P500 월간 수익률에 대해 회귀분석.
+        S&P500 데이터는 FRED(SP500 시리즈)에서 가져옴.
+        Returns: beta_df, sp500_monthly, peer_monthly_dict, error_logs
+        """
+        error_logs = []
         beta_list = []
+        peer_monthly_dict = {}
+        
+        # --- 1. Fetch S&P500 monthly from FRED ---
+        sp500_monthly = None
+        try:
+            url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=SP500"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            r = requests.get(url, headers=headers, timeout=15, verify=False)
+            r.raise_for_status()
+            sp_df = pd.read_csv(io.StringIO(r.text))
+            sp_df.columns = ["DATE", "VALUE"]
+            sp_df["DATE"] = pd.to_datetime(sp_df["DATE"], errors='coerce')
+            sp_df["VALUE"] = pd.to_numeric(sp_df["VALUE"], errors='coerce')
+            sp_df = sp_df.dropna().sort_values("DATE")
+            
+            # Resample to month-end (last observation per month)
+            sp_df = sp_df.set_index("DATE")
+            sp_monthly = sp_df["VALUE"].resample("ME").last().dropna()
+            
+            # Filter to last 5 years
+            cutoff = sp_monthly.index.max() - pd.DateOffset(years=5)
+            sp_monthly = sp_monthly[sp_monthly.index >= cutoff]
+            
+            # Monthly returns
+            sp500_monthly = sp_monthly.pct_change().dropna()
+            sp500_monthly.name = "SP500"
+            logger.info(f"[Beta] S&P500 monthly returns: {len(sp500_monthly)} months from FRED")
+        except Exception as e:
+            error_logs.append(f"⚠️ S&P500 FRED fetch failed: {str(e)}")
+            logger.error(f"[Beta] S&P500 FRED fetch failed: {e}")
+        
+        # --- 2. Calculate Raw Beta for each peer ---
         for t in self.peers:
-            beta_list.append({"Ticker": t, "Raw Beta": 1.2, "Adj Beta": 1.13})
-        return pd.DataFrame(beta_list), None, None, []
+            try:
+                ticker_obj = yf.Ticker(t)
+                # Get 5+ years of monthly price data
+                hist = ticker_obj.history(period="6y", interval="1mo")
+                if hist.empty or len(hist) < 13:
+                    error_logs.append(f"⚠️ {t}: Insufficient price history ({len(hist)} months)")
+                    beta_list.append({"Ticker": t, "Raw Beta": None, "Adj Beta": None})
+                    continue
+                
+                # Month-end closing prices → returns
+                peer_returns = hist["Close"].resample("ME").last().pct_change().dropna()
+                
+                # Filter to last 5 years
+                if not peer_returns.empty:
+                    cutoff_peer = peer_returns.index.max() - pd.DateOffset(years=5)
+                    peer_returns = peer_returns[peer_returns.index >= cutoff_peer]
+                
+                peer_monthly_dict[t] = peer_returns
+                
+                if sp500_monthly is None:
+                    # No market data — can't compute beta
+                    beta_list.append({"Ticker": t, "Raw Beta": None, "Adj Beta": None})
+                    continue
+                
+                # Align dates
+                combined = pd.DataFrame({
+                    "peer": peer_returns,
+                    "market": sp500_monthly
+                }).dropna()
+                
+                if len(combined) < 12:
+                    error_logs.append(f"⚠️ {t}: Only {len(combined)} overlapping months")
+                    beta_list.append({"Ticker": t, "Raw Beta": None, "Adj Beta": None})
+                    continue
+                
+                # OLS Regression: peer = alpha + beta * market
+                x = combined["market"]
+                y = combined["peer"]
+                cov_xy = ((x - x.mean()) * (y - y.mean())).sum()
+                var_x = ((x - x.mean()) ** 2).sum()
+                raw_beta = cov_xy / var_x if var_x != 0 else 1.0
+                
+                # Bloomberg Adjusted Beta
+                adj_beta = 0.67 * raw_beta + 0.33
+                
+                beta_list.append({
+                    "Ticker": t,
+                    "Raw Beta": round(raw_beta, 4),
+                    "Adj Beta": round(adj_beta, 4),
+                    "N_Months": len(combined),
+                })
+                logger.info(f"[Beta] {t}: Raw={raw_beta:.4f} Adj={adj_beta:.4f} ({len(combined)} months)")
+                
+            except Exception as e:
+                error_logs.append(f"⚠️ {t}: Beta calc error: {str(e)}")
+                beta_list.append({"Ticker": t, "Raw Beta": None, "Adj Beta": None})
+        
+        beta_df = pd.DataFrame(beta_list)
+        return beta_df, sp500_monthly, peer_monthly_dict, error_logs
 
     def run(self):
         """WACC 계산 실행"""
-        beta_df, _, _, beta_err = self.get_5y_monthly_beta_analysis()
+        beta_df, sp500_monthly, peer_monthly_dict, beta_err = self.get_5y_monthly_beta_analysis()
         error_logs = beta_err if beta_err else []
         peer_data = []
         progress_text = st.empty()
@@ -2018,7 +2113,9 @@ class DetailWACCModel:
             "market_params": {"Rm": rm, "MRP": mrp},
             "rf_trend": self.rf_trend_df, 
             "gdp_df": self.gdp_df, 
-            "errors": error_logs
+            "errors": error_logs,
+            "sp500_monthly": sp500_monthly,
+            "peer_monthly_dict": peer_monthly_dict,
         }
 
 # ==============================================================================
@@ -2598,6 +2695,124 @@ if 'result' in st.session_state:
                     st.markdown("**3. Re-levered Beta**")
                     st.latex(r"\beta_{re} = \beta_U [1 + (1 - T_{target}) (\frac{D}{E})_{target}]")
 
+            st.divider()
+            st.markdown("##### Raw Beta — 5Y Monthly Return Regression")
+            
+            # Retrieve stored data
+            sp500_m = res.get('sp500_monthly')
+            peer_m_dict = res.get('peer_monthly_dict', {})
+            
+            if sp500_m is not None and len(peer_m_dict) > 0:
+                # --- Monthly Returns Table ---
+                # Build combined table: Date | SP500 | Peer1 | Peer2 | ...
+                returns_frames = {"S&P 500": sp500_m}
+                for t in calc_df["Ticker"].tolist():
+                    if t in peer_m_dict:
+                        returns_frames[t] = peer_m_dict[t]
+                
+                returns_combined = pd.DataFrame(returns_frames)
+                returns_combined.index.name = "Date"
+                returns_combined = returns_combined.sort_index(ascending=False)
+                
+                # Display table (formatted as %)
+                disp_returns = returns_combined.copy()
+                disp_returns.index = disp_returns.index.strftime('%Y-%m')
+                for c in disp_returns.columns:
+                    disp_returns[c] = disp_returns[c].apply(lambda x: f"{x:.2%}" if pd.notna(x) else "—")
+                
+                with st.expander("📊 Monthly Returns Table (5Y)", expanded=False):
+                    st.dataframe(disp_returns, use_container_width=True, height=400)
+                    st.caption(f"S&P 500 source: [FRED SP500](https://fred.stlouisfed.org/series/SP500) | "
+                              f"Peer prices: Yahoo Finance | Period: {returns_combined.index.min().strftime('%Y-%m')} ~ {returns_combined.index.max().strftime('%Y-%m')}")
+                
+                # --- Scatter Plots: each peer vs S&P 500 ---
+                st.markdown("**Regression: Peer Monthly Return vs S&P 500**")
+                peer_tickers = [t for t in calc_df["Ticker"].tolist() if t in peer_m_dict]
+                
+                # Up to 4 per row
+                n_peers = len(peer_tickers)
+                cols_per_row = min(4, n_peers) if n_peers > 0 else 1
+                
+                for row_start in range(0, n_peers, cols_per_row):
+                    row_peers = peer_tickers[row_start:row_start + cols_per_row]
+                    cols_chart = st.columns(len(row_peers))
+                    
+                    for cidx, t in enumerate(row_peers):
+                        with cols_chart[cidx]:
+                            peer_ret = peer_m_dict[t]
+                            scatter_df = pd.DataFrame({
+                                "S&P 500": sp500_m,
+                                t: peer_ret
+                            }).dropna()
+                            
+                            if len(scatter_df) < 12:
+                                st.caption(f"{t}: insufficient data")
+                                continue
+                            
+                            x = scatter_df["S&P 500"]
+                            y = scatter_df[t]
+                            cov_xy = ((x - x.mean()) * (y - y.mean())).sum()
+                            var_x = ((x - x.mean()) ** 2).sum()
+                            beta_val = cov_xy / var_x if var_x != 0 else 1.0
+                            alpha_val = y.mean() - beta_val * x.mean()
+                            r_squared = (cov_xy ** 2) / (var_x * ((y - y.mean()) ** 2).sum()) if var_x > 0 else 0
+                            
+                            # Regression line
+                            x_line = pd.Series([x.min(), x.max()])
+                            y_line = alpha_val + beta_val * x_line
+                            
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=x, y=y, mode='markers',
+                                marker=dict(size=5, opacity=0.6, color='#1f77b4'),
+                                name='Monthly'
+                            ))
+                            fig.add_trace(go.Scatter(
+                                x=x_line, y=y_line, mode='lines',
+                                line=dict(color='red', width=2),
+                                name=f'β={beta_val:.2f}'
+                            ))
+                            fig.update_layout(
+                                title=dict(text=f"{t}  β={beta_val:.2f}  R²={r_squared:.2f}", font=dict(size=12)),
+                                xaxis_title="S&P 500", yaxis_title=t,
+                                height=280, margin=dict(l=40, r=20, t=40, b=40),
+                                showlegend=False,
+                                xaxis=dict(tickformat='.0%'),
+                                yaxis=dict(tickformat='.0%'),
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                
+                # --- Summary: Beta by Ticker ---
+                beta_summary = []
+                for t in peer_tickers:
+                    peer_ret = peer_m_dict[t]
+                    scatter_df = pd.DataFrame({"market": sp500_m, "peer": peer_ret}).dropna()
+                    if len(scatter_df) >= 12:
+                        x = scatter_df["market"]
+                        y = scatter_df["peer"]
+                        cov_xy = ((x - x.mean()) * (y - y.mean())).sum()
+                        var_x = ((x - x.mean()) ** 2).sum()
+                        raw_b = cov_xy / var_x if var_x != 0 else 1.0
+                        r2 = (cov_xy ** 2) / (var_x * ((y - y.mean()) ** 2).sum()) if var_x > 0 else 0
+                        beta_summary.append({
+                            "Ticker": t,
+                            "Raw Beta": round(raw_b, 4),
+                            "Adj Beta": round(0.67 * raw_b + 0.33, 4),
+                            "R²": round(r2, 4),
+                            "N Months": len(scatter_df),
+                        })
+                
+                if beta_summary:
+                    bs_df = pd.DataFrame(beta_summary)
+                    st.dataframe(bs_df, use_container_width=True, hide_index=True,
+                                column_config={
+                                    "Raw Beta": st.column_config.NumberColumn(format="%.4f"),
+                                    "Adj Beta": st.column_config.NumberColumn(format="%.4f"),
+                                    "R²": st.column_config.NumberColumn(format="%.4f"),
+                                })
+            else:
+                st.warning("S&P 500 data unavailable from FRED. Raw beta regression could not be performed.")
+            
             st.divider()
             st.markdown("##### Adjust Peer Tax Rates")
             cols = st.columns(len(df_init))
