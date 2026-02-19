@@ -2003,21 +2003,52 @@ class DetailWACCModel:
             
             mkt_cap = info.get('marketCap', 0)
             debt = 0
+            debt_period = ""
             
-            # Primary: balance_sheet for total debt (more accurate than info['totalDebt'])
+            # --- Total Debt: Quarterly balance sheet (most recent) ---
+            # Priority 1: quarterly_balance_sheet → "Total Debt" row
+            # Priority 2: quarterly_balance_sheet → calculated: Current Debt And Capital Lease Obligation + Long Term Debt And Capital Lease Obligation
+            # Priority 3: info['totalDebt'] (Yahoo financialData — may differ from B/S)
             try:
-                bs = t.balance_sheet
-                if bs is not None and not bs.empty:
-                    debt_val = get_value_max_fuzzy(bs, 0, ['Total Debt', 'Long Term Debt', 'Total Non Current Liabilities Net Minority Interest'])
-                    if debt_val > 0:
-                        debt = debt_val
-                        logger.info(f"[Peer] {ticker}: Got debt from balance_sheet: ${debt:,.0f}")
+                qbs = t.quarterly_balance_sheet
+                if qbs is not None and not qbs.empty:
+                    # P1: Direct "Total Debt" from quarterly B/S
+                    for row_idx in qbs.index:
+                        norm = str(row_idx).lower().replace(" ", "").replace("-", "").replace("_", "")
+                        if norm == "totaldebt":
+                            val = qbs.loc[row_idx].iloc[0]
+                            if pd.notna(val) and val != 0:
+                                debt = abs(float(val))
+                                debt_period = str(qbs.columns[0])[:10] if hasattr(qbs.columns[0], 'strftime') else str(qbs.columns[0])[:10]
+                                logger.info(f"[Peer] {ticker}: Total Debt from Q B/S = ${debt:,.0f} ({debt_period})")
+                            break
+                    
+                    # P2: Calculate from components if Total Debt not found
+                    if debt == 0:
+                        current_debt = 0
+                        lt_debt = 0
+                        for row_idx in qbs.index:
+                            norm = str(row_idx).lower().replace(" ", "").replace("-", "").replace("_", "")
+                            if "currentdebtandcapitalleaseobligation" in norm:
+                                v = qbs.loc[row_idx].iloc[0]
+                                if pd.notna(v): current_debt = abs(float(v))
+                            elif "longtermdebtandcapitalleaseobligation" in norm:
+                                v = qbs.loc[row_idx].iloc[0]
+                                if pd.notna(v): lt_debt = abs(float(v))
+                        
+                        if current_debt > 0 or lt_debt > 0:
+                            debt = current_debt + lt_debt
+                            debt_period = str(qbs.columns[0])[:10] if hasattr(qbs.columns[0], 'strftime') else str(qbs.columns[0])[:10]
+                            logger.info(f"[Peer] {ticker}: Total Debt calculated (CD={current_debt:,.0f} + LTD={lt_debt:,.0f}) = ${debt:,.0f} ({debt_period})")
             except Exception as e:
-                logger.debug(f"Balance sheet failed for {ticker}: {str(e)}")
+                logger.debug(f"Quarterly balance sheet failed for {ticker}: {str(e)}")
             
-            # Fallback: info['totalDebt'] (Yahoo financialData module — may include lease liabilities)
+            # P3: Fallback to info['totalDebt']
             if debt == 0:
                 debt = info.get('totalDebt', 0)
+                if debt > 0:
+                    debt_period = "info"
+                    logger.info(f"[Peer] {ticker}: Total Debt from info = ${debt:,.0f}")
             
             # Fallback: try fast_info for market cap
             if mkt_cap == 0: 
@@ -2062,7 +2093,8 @@ class DetailWACCModel:
                     "Total Debt": debt * fx, 
                     "Market Cap": mkt_cap * fx
                 },
-                "period": period_display
+                "period": period_display,
+                "debt_period": debt_period
             }
             return data, None
         except Exception as e:
@@ -2228,7 +2260,8 @@ class DetailWACCModel:
                     "Market Cap": d['Market Cap'],
                     "D/E Ratio": de_ratio,
                     "Debt/TIC Ratio": dtic_ratio,
-                    "Period": fin['period']
+                    "Period": fin['period'],
+                    "Debt Period": fin.get('debt_period', '')
                 })
         
         progress_text.empty()
@@ -2789,7 +2822,10 @@ if 'result' in st.session_state:
             ]
             disp_df = calc_df.copy()
             disp_df["Total Debt"] = disp_df.apply(
-                lambda x: f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B", axis=1
+                lambda x: f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B ({x['Debt Period']})" 
+                    if x.get('Debt Period') and x['Debt Period'] != 'info'
+                    else f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B", 
+                axis=1
             )
             disp_df["Market Cap"] = disp_df.apply(
                 lambda x: f"{x['Currency']} {x['Market Cap']/1e9:,.2f}B", axis=1
@@ -3009,14 +3045,18 @@ if 'result' in st.session_state:
     if not df_init.empty:
         fin_cols = [
             "Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", 
-            "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Period"
+            "Total Debt", "Debt Period", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Period"
         ]
         fin_df = df_init.copy()
         for c in ["Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap"]: 
             fin_df[c] = fin_df[c] / 1e9 
         
+        # Ensure Debt Period column exists
+        if "Debt Period" not in fin_df.columns:
+            fin_df["Debt Period"] = ""
+        
         st.dataframe(
-            fin_df[fin_cols], 
+            fin_df[[c for c in fin_cols if c in fin_df.columns]], 
             use_container_width=True, 
             hide_index=True,
             column_config={
@@ -3024,12 +3064,13 @@ if 'result' in st.session_state:
                 "EBIT": st.column_config.NumberColumn("EBIT ($B)", format="%.2f"),
                 "EBITDA": st.column_config.NumberColumn("EBITDA ($B)", format="%.2f"),
                 "Total Debt": st.column_config.NumberColumn("Total Debt ($B)", format="%.2f"),
+                "Debt Period": st.column_config.TextColumn("Debt As Of"),
                 "Market Cap": st.column_config.NumberColumn("Market Cap ($B)", format="%.2f"),
                 "D/E Ratio": st.column_config.NumberColumn(format="%.3f"),
                 "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.3f"),
             }
         )
-        st.caption("Note: Converted to USD Billions.")
+        st.caption("Note: Converted to USD Billions. Total Debt sourced from most recent quarterly balance sheet.")
         
         with st.expander("Applied FX Rates Details"):
             st.dataframe(df_init[["Ticker", "Currency", "FX Rate"]].T, use_container_width=True)
