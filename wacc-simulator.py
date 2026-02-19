@@ -2002,7 +2002,22 @@ class DetailWACCModel:
             fx, curr_code = self.get_exchange_rate_to_usd(curr)
             
             mkt_cap = info.get('marketCap', 0)
-            debt = info.get('totalDebt', 0)
+            debt = 0
+            
+            # Primary: balance_sheet for total debt (more accurate than info['totalDebt'])
+            try:
+                bs = t.balance_sheet
+                if bs is not None and not bs.empty:
+                    debt_val = get_value_max_fuzzy(bs, 0, ['Total Debt', 'Long Term Debt', 'Total Non Current Liabilities Net Minority Interest'])
+                    if debt_val > 0:
+                        debt = debt_val
+                        logger.info(f"[Peer] {ticker}: Got debt from balance_sheet: ${debt:,.0f}")
+            except Exception as e:
+                logger.debug(f"Balance sheet failed for {ticker}: {str(e)}")
+            
+            # Fallback: info['totalDebt'] (Yahoo financialData module — may include lease liabilities)
+            if debt == 0:
+                debt = info.get('totalDebt', 0)
             
             # Fallback: try fast_info for market cap
             if mkt_cap == 0: 
@@ -2023,18 +2038,6 @@ class DetailWACCModel:
             if mkt_cap == 0:
                 return None, f"⚠️ {ticker}: Excluded (Missing Market Cap)"
             
-            # Fallback: try balance_sheet for total debt
-            if debt == 0:
-                try:
-                    bs = t.balance_sheet
-                    if not bs.empty:
-                        debt_val = get_value_max_fuzzy(bs, 0, ['Total Debt', 'Long Term Debt', 'Total Non Current Liabilities Net Minority Interest'])
-                        if debt_val > 0:
-                            debt = debt_val
-                            logger.info(f"[Peer] {ticker}: Got debt from balance_sheet: ${debt:,.0f}")
-                except Exception as e:
-                    logger.debug(f"Balance sheet failed for {ticker}: {str(e)}")
-
             rev, ebit, ebitda, int_exp_dummy, label_ebit, label_int, pt, pp, _, _ = \
                 get_financial_data_with_priority(t, info, ticker_symbol=ticker)
             
