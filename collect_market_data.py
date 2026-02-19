@@ -134,6 +134,9 @@ def collect_kpmg_tax_rates():
         result["Rate"] = pd.to_numeric(result["Rate"], errors='coerce')
         result = result.dropna(subset=["Rate"])
         
+        # Save the year as metadata in first row comment or separate column
+        result["Year"] = str(latest_col).strip()
+        
         overrides = pd.DataFrame([
             {"Country": "United States", "Rate": 25.57},
             {"Country": "Korea", "Rate": 26.40},
