@@ -1219,9 +1219,9 @@ def get_damodaran_spreads():
     ])
 
     result_dict = {
-        "Large Firms": (fallback_large, "Source: Fallback (Offline, Jan 2026 Data)"),
-        "Small/Risky Firms": (fallback_small, "Source: Fallback (Offline, Jan 2026 Data)"), 
-        "Financial Firms": (fallback_fin, "Source: Fallback (Offline, Jan 2026 Data)")
+        "Large Firms": (fallback_large, "Aswath Damodaran (NYU Stern) | Data as of: Jan 2026"),
+        "Small/Risky Firms": (fallback_small, "Aswath Damodaran (NYU Stern) | Data as of: Jan 2026"), 
+        "Financial Firms": (fallback_fin, "Aswath Damodaran (NYU Stern) | Data as of: Jan 2026")
     }
 
     try:
@@ -3134,14 +3134,16 @@ if 'result' in st.session_state:
     ])
     
     with t1:
-        st.caption("Source: FRED (St. Louis Fed) - Series DGS10")
+        _rf_date = df_rf_trend["Date"].max().strftime('%Y-%m-%d') if df_rf_trend is not None and not df_rf_trend.empty else "N/A"
+        st.caption(f"Source: FRED (St. Louis Fed) — Series DGS10 | Last updated: {_rf_date}")
         if df_rf_trend is not None: 
             st.line_chart(df_rf_trend.set_index("Date")["Rate"], color="#FF4B4B")
         else:
             st.info("Risk-free rate trend data unavailable")
     
     with t2:
-        st.caption("Source: FRED (St. Louis Fed) - Series A191RP1A027NBEA")
+        _gdp_date = df_gdp_disp["Date"].max().strftime('%Y-%m-%d') if df_gdp_disp is not None and not df_gdp_disp.empty else "N/A"
+        st.caption(f"Source: FRED (St. Louis Fed) — Series A191RP1A027NBEA | Last updated: {_gdp_date}")
         if df_gdp_disp is not None:
             st.dataframe(
                 df_gdp_disp, 
@@ -3156,7 +3158,7 @@ if 'result' in st.session_state:
             st.info("GDP data unavailable")
     
     with t3:
-        st.caption("Source: Aswath Damodaran (NYU Stern)")
+        st.caption("Source: Aswath Damodaran (NYU Stern) — pages.stern.nyu.edu | Updated: Annually")
         _, _, sp_table, _ = get_sp_buyback_data()
         if sp_table is not None: 
             st.dataframe(sp_table, use_container_width=True)
@@ -3165,7 +3167,7 @@ if 'result' in st.session_state:
     
     with t4:
         kpmg_df, _, yr = get_kpmg_tax_rates()
-        st.caption(f"Source: KPMG (Live Data, {yr} Rates)")
+        st.caption(f"Source: KPMG — kpmg.com/dk (OECD data) | Rates as of: {yr}")
         if kpmg_df is not None: 
             st.dataframe(
                 kpmg_df, 
@@ -3179,7 +3181,8 @@ if 'result' in st.session_state:
             st.info("KPMG tax data unavailable")
     
     with t5:
-        st.caption("Source: FRED (St. Louis Fed) - ICE BofA US Corporate Option-Adjusted Spread Data")
+        _oas_date = df_oas["Date"].iloc[0] if df_oas is not None and not df_oas.empty and "Date" in df_oas.columns else "N/A"
+        st.caption(f"Source: FRED (St. Louis Fed) — ICE BofA US Corporate OAS | Last updated: {_oas_date}")
         if df_oas is not None and not df_oas.empty:
             st.dataframe(
                 df_oas, 
@@ -3196,7 +3199,7 @@ if 'result' in st.session_state:
     with t6:
         damodaran_dict = get_damodaran_spreads()
         source_note = damodaran_dict["Large Firms"][1]
-        st.caption(f"{source_note}")
+        st.caption(f"Source: Aswath Damodaran (NYU Stern) — {source_note}")
         
         dt1, dt2, dt3 = st.tabs(["Large Firms", "Smaller/Risky Firms", "Financial Firms"])
         
