@@ -1124,12 +1124,14 @@ def get_kpmg_tax_rates():
     try:
         df = pd.read_csv(KPMG_CSV_URL)
         df["Rate"] = pd.to_numeric(df["Rate"], errors='coerce')
+        # Extract year from CSV if available
+        kpmg_year = int(df["Year"].iloc[0]) if "Year" in df.columns else 2025
         tax_dict = dict(zip(df["Country"].str.upper().str.strip(), df["Rate"]))
         tax_dict["UNITED STATES"] = 25.57
         tax_dict["USA"] = 25.57
         tax_dict["KOREA"] = 26.40
-        logger.info(f"[KPMG] Loaded {len(tax_dict)} countries from GitHub CSV")
-        return df, tax_dict, 2025
+        logger.info(f"[KPMG] Loaded {len(tax_dict)} countries from GitHub CSV (year={kpmg_year})")
+        return df, tax_dict, kpmg_year
     except Exception as e:
         logger.warning(f"[KPMG] GitHub CSV failed: {e}, falling back to scraping")
     
@@ -1148,11 +1150,14 @@ def get_kpmg_tax_rates():
         result_df["Rate"] = pd.to_numeric(result_df["Rate"], errors='coerce')
         tax_dict = dict(zip(result_df["Country"].str.upper().str.strip(), result_df["Rate"]))
         
+        # Auto-detect year from column name
+        scrape_year = int(str(col_name).strip()) if str(col_name).strip().isdigit() else 2025
+        
         tax_dict["UNITED STATES"] = 25.57
         tax_dict["USA"] = 25.57
         tax_dict["KOREA"] = 26.40
         
-        return result_df, tax_dict, 2025
+        return result_df, tax_dict, scrape_year
     except requests.RequestException as e:
         logger.warning(f"KPMG tax data fetch failed: {str(e)}")
         return None, {"UNITED STATES": 25.57, "USA": 25.57, "KOREA": 26.40}, 2025
