@@ -2544,6 +2544,22 @@ with st.sidebar:
         g_in = st.number_input(f"Growth Rate (Latest GDP: {latest_gdp:.2f}%)", value=latest_gdp, step=0.1)
 
     st.divider()
+    
+    # Auto-calculate on first visit with default values
+    if 'auto_calculated' not in st.session_state:
+        st.session_state['auto_calculated'] = True
+        model = DetailWACCModel(
+            target_ticker, peers_input, rf_in, crp_in, size_in, 
+            bb_in, div_in, g_in, tax_in, df_rf_trend, df_gdp_disp
+        )
+        with st.spinner("Loading default WACC analysis..."):
+            st.session_state['result'] = model.run()
+            st.session_state['inputs'] = {
+                'rf': rf_in, 'crp': crp_in, 'sp': size_in, 'tax': tax_in,
+                'bb': bb_in, 'div': div_in, 'g': g_in,
+                'int_exp': int_exp_for_icr, 'ebit': ebit_in, 'category': category_in
+            }
+    
     if st.button("Calculate WACC", type="primary", use_container_width=True):
         model = DetailWACCModel(
             target_ticker, peers_input, rf_in, crp_in, size_in, 
