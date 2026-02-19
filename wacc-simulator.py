@@ -2348,7 +2348,7 @@ with st.sidebar:
             
     peers_input = st.text_area(
         "Peer Tickers", 
-        value=st.session_state.get('peers', "ON, STM, IFX.DE"), 
+        value=st.session_state.get('peers', "ON, STM, IFX.DE, 6963.T, 688234.SS"), 
         height=100
     )
     st.caption("※ Top 5 revenue companies in the industry\n(Source: Yahoo Finance Industry/Sector Data)")
@@ -3118,7 +3118,7 @@ if 'result' in st.session_state:
         
         with st.expander("Applied FX Rates Details"):
             fx_display = df_init[["Ticker", "Currency", "FX Rate"]].copy()
-            fx_display["FX Rate"] = fx_display["FX Rate"].apply(lambda x: f"{x:.4f}")
+            fx_display["FX Rate"] = fx_display["FX Rate"].apply(lambda x: f"{x:.4f}".rstrip('0').rstrip('.'))
             fx_display = fx_display.set_index("Ticker").T
             st.dataframe(fx_display, use_container_width=True)
 
