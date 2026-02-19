@@ -2860,57 +2860,9 @@ if 'result' in st.session_state:
                     st.caption(f"S&P 500 source: [FRED SP500](https://fred.stlouisfed.org/series/SP500) | "
                               f"Peer prices: Yahoo Finance | Period: {returns_combined.index.min().strftime('%Y-%m')} ~ {returns_combined.index.max().strftime('%Y-%m')}")
                 
-                # --- Scatter Plots: each peer vs S&P 500 ---
-                st.markdown("**Regression: Peer Monthly Return vs S&P 500**")
-                peer_tickers = [t for t in calc_df["Ticker"].tolist() if t in peer_m_dict]
-                
-                # Up to 4 per row
-                import matplotlib.pyplot as plt
-                import matplotlib.ticker as mticker
-                
-                n_peers = len(peer_tickers)
-                cols_per_row = min(4, n_peers) if n_peers > 0 else 1
-                
-                for row_start in range(0, n_peers, cols_per_row):
-                    row_peers = peer_tickers[row_start:row_start + cols_per_row]
-                    cols_chart = st.columns(len(row_peers))
-                    
-                    for cidx, t in enumerate(row_peers):
-                        with cols_chart[cidx]:
-                            peer_ret = peer_m_dict[t]
-                            scatter_df = pd.DataFrame({
-                                "S&P 500": sp500_m,
-                                t: peer_ret
-                            }).dropna()
-                            
-                            if len(scatter_df) < 12:
-                                st.caption(f"{t}: insufficient data")
-                                continue
-                            
-                            x = scatter_df["S&P 500"]
-                            y = scatter_df[t]
-                            cov_xy = ((x - x.mean()) * (y - y.mean())).sum()
-                            var_x = ((x - x.mean()) ** 2).sum()
-                            beta_val = cov_xy / var_x if var_x != 0 else 1.0
-                            alpha_val = y.mean() - beta_val * x.mean()
-                            r_squared = (cov_xy ** 2) / (var_x * ((y - y.mean()) ** 2).sum()) if var_x > 0 else 0
-                            
-                            fig, ax = plt.subplots(figsize=(4, 3))
-                            ax.scatter(x, y, s=15, alpha=0.6, color='#1f77b4')
-                            x_line = np.array([x.min(), x.max()])
-                            ax.plot(x_line, alpha_val + beta_val * x_line, 'r-', linewidth=1.5)
-                            ax.set_title(f"{t}  β={beta_val:.2f}  R²={r_squared:.2f}", fontsize=10)
-                            ax.set_xlabel("S&P 500", fontsize=8)
-                            ax.set_ylabel(t, fontsize=8)
-                            ax.xaxis.set_major_formatter(mticker.PercentFormatter(1.0, decimals=0))
-                            ax.yaxis.set_major_formatter(mticker.PercentFormatter(1.0, decimals=0))
-                            ax.tick_params(labelsize=7)
-                            fig.tight_layout()
-                            st.pyplot(fig)
-                            plt.close(fig)
-                
                 # --- Summary: Beta by Ticker ---
                 beta_summary = []
+                peer_tickers = [t for t in calc_df["Ticker"].tolist() if t in peer_m_dict]
                 for t in peer_tickers:
                     peer_ret = peer_m_dict[t]
                     scatter_df = pd.DataFrame({"market": sp500_m, "peer": peer_ret}).dropna()
