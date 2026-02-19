@@ -2843,8 +2843,8 @@ if 'result' in st.session_state:
                 use_container_width=True, 
                 hide_index=True,
                 column_config={
-                    "Total Debt": st.column_config.NumberColumn(f"Total Debt ({_disp_curr} B)", format="%.2f"),
-                    "Market Cap": st.column_config.NumberColumn(f"Market Cap ({_disp_curr} B)", format="%.2f"),
+                    "Total Debt": st.column_config.NumberColumn(format="%.2f"),
+                    "Market Cap": st.column_config.NumberColumn(format="%.2f"),
                     "Tax Rate": st.column_config.NumberColumn("Tax Rate (%)", format="%.2f"),
                     "D/E Ratio": st.column_config.NumberColumn(format="%.3f"),
                     "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.3f"),
@@ -2854,6 +2854,7 @@ if 'result' in st.session_state:
                     "Re-levered Beta": st.column_config.NumberColumn(format="%.2f"),
                 }
             )
+            st.caption(f"Note: Total Debt and Market Cap in {_disp_curr} Billions.")
             
             st.divider()
             st.markdown("##### Beta Calculation Methodologies")
@@ -3074,16 +3075,16 @@ if 'result' in st.session_state:
             use_container_width=True, 
             hide_index=True,
             column_config={
-                "Revenue": st.column_config.NumberColumn("Revenue ($B)", format="%.2f"),
-                "EBIT": st.column_config.NumberColumn("EBIT ($B)", format="%.2f"),
-                "EBITDA": st.column_config.NumberColumn("EBITDA ($B)", format="%.2f"),
-                "Total Debt": st.column_config.NumberColumn("Total Debt ($B)", format="%.2f"),
-                "Market Cap": st.column_config.NumberColumn("Market Cap ($B)", format="%.2f"),
+                "Revenue": st.column_config.NumberColumn(format="%.2f"),
+                "EBIT": st.column_config.NumberColumn(format="%.2f"),
+                "EBITDA": st.column_config.NumberColumn(format="%.2f"),
+                "Total Debt": st.column_config.NumberColumn(format="%.2f"),
+                "Market Cap": st.column_config.NumberColumn(format="%.2f"),
                 "D/E Ratio": st.column_config.NumberColumn(format="%.3f"),
                 "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.3f"),
             }
         )
-        st.caption("Note: Converted to USD Billions. Total Debt sourced from most recent quarterly balance sheet.")
+        st.caption("Note: All financial figures in USD Billions. Total Debt sourced from most recent quarterly balance sheet.")
         
         with st.expander("Applied FX Rates Details"):
             st.dataframe(df_init[["Ticker", "Currency", "FX Rate"]].T, use_container_width=True)
