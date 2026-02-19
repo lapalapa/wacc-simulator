@@ -1984,8 +1984,41 @@ class DetailWACCModel:
         _, self.kpmg_map, _ = get_kpmg_tax_rates()
 
     def get_exchange_rate_to_usd(self, currency):
-        """환율 조회 (현재는 USD 고정)"""
-        return 1.0, "USD" 
+        """Peer 기업용 환율 조회: 1Y 평균 → Spot fallback"""
+        if not currency or currency == 'USD':
+            return 1.0, "USD"
+        
+        # Cache to avoid duplicate API calls for same currency
+        cache_key = f"_fx_{currency}"
+        if hasattr(self, cache_key):
+            return getattr(self, cache_key)
+        
+        fx_rate = 1.0
+        try:
+            fx_ticker = f"{currency}USD=X"
+            fx_data = yf.Ticker(fx_ticker)
+            
+            # Try 1Y average first
+            fx_hist = fx_data.history(period="1y")
+            if not fx_hist.empty and len(fx_hist) > 20:
+                fx_rate = float(fx_hist['Close'].mean())
+                logger.info(f"[FX-Peer] {currency}->USD: {fx_rate:.4f} (1Y avg, {len(fx_hist)} days)")
+            elif not fx_hist.empty:
+                fx_rate = float(fx_hist['Close'].iloc[-1])
+                logger.info(f"[FX-Peer] {currency}->USD: {fx_rate:.4f} (spot)")
+            
+            if fx_rate == 1.0:
+                # Last resort: 5d spot
+                fx_hist = fx_data.history(period="5d")
+                if not fx_hist.empty:
+                    fx_rate = float(fx_hist['Close'].iloc[-1])
+                    logger.info(f"[FX-Peer] {currency}->USD: {fx_rate:.4f} (5d spot)")
+        except Exception as e:
+            logger.warning(f"[FX-Peer] Failed for {currency}: {e}")
+        
+        result = (fx_rate, currency)
+        setattr(self, cache_key, result)
+        return result
 
     def get_financials_latest(self, ticker):
         """Peer 기업의 최신 재무 데이터 조회"""
@@ -2819,10 +2852,7 @@ if 'result' in st.session_state:
         with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
             disp_df = calc_df.copy()
             
-            # Determine currency for column titles (use first peer's currency, default USD)
-            _disp_curr = disp_df["Currency"].iloc[0] if not disp_df.empty and "Currency" in disp_df.columns else "USD"
-            
-            # Total Debt & Market Cap: numeric only (currency in column title)
+            # Total Debt & Market Cap: numeric only (USD, currency in note)
             disp_df["Total Debt"] = disp_df["Total Debt"] / 1e9
             disp_df["Market Cap"] = disp_df["Market Cap"] / 1e9
             
@@ -2854,7 +2884,7 @@ if 'result' in st.session_state:
                     "Re-levered Beta": st.column_config.NumberColumn(format="%.2f"),
                 }
             )
-            st.caption(f"Note: Total Debt and Market Cap in {_disp_curr} Billions.")
+            st.caption("Note: Total Debt and Market Cap in USD Billions (converted at 1Y avg FX rate).")
             
             st.divider()
             st.markdown("##### Beta Calculation Methodologies")
