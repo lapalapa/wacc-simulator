@@ -2075,6 +2075,11 @@ class DetailWACCModel:
             if rev == 0: 
                 return None, f"⚠️ {ticker}: Excluded (Missing Revenue)"
 
+            period_display = label_ebit if "Calculated" in label_ebit else label_int
+
+            country_norm = str(country).upper().strip()
+            tax_rate = self.kpmg_map.get(country_norm, 25.0)
+
             data = {
                 "name": info.get('longName', ticker), 
                 "country": country, 
