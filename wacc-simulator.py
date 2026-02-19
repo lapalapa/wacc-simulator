@@ -2817,32 +2817,34 @@ if 'result' in st.session_state:
         wacc = (we * ke) + (wd * kd)
 
         with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
-            cols_show = [
-                "Ticker", "Company Name", "Country", "EBIT Src", "IE Src", "Total Debt", "Market Cap", 
-                "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", 
-                "Unlevered Beta", "Re-levered Beta"
-            ]
             disp_df = calc_df.copy()
             
-            # Rename Period → EBIT Src, IE Period → IE Src
-            disp_df["EBIT Src"] = disp_df["Period"]
-            disp_df["IE Src"] = disp_df.get("IE Period", "")
+            # Determine currency for column titles (use first peer's currency, default USD)
+            _disp_curr = disp_df["Currency"].iloc[0] if not disp_df.empty and "Currency" in disp_df.columns else "USD"
             
-            disp_df["Total Debt"] = disp_df.apply(
-                lambda x: f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B ({x['Debt Period']})" 
-                    if x.get('Debt Period') and x['Debt Period'] != 'info'
-                    else f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B", 
-                axis=1
-            )
-            disp_df["Market Cap"] = disp_df.apply(
-                lambda x: f"{x['Currency']} {x['Market Cap']/1e9:,.2f}B", axis=1
-            )
+            # Total Debt & Market Cap: numeric only (currency in column title)
+            disp_df["Total Debt"] = disp_df["Total Debt"] / 1e9
+            disp_df["Market Cap"] = disp_df["Market Cap"] / 1e9
+            
+            # Rename date columns
+            disp_df["EBIT As Of"] = disp_df["Period"]
+            disp_df["IE As Of"] = disp_df.get("IE Period", "")
+            disp_df["Debt As Of"] = disp_df.get("Debt Period", "")
+            
+            cols_show = [
+                "Ticker", "Company Name", "Country", "Total Debt", "Market Cap", 
+                "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", 
+                "Unlevered Beta", "Re-levered Beta",
+                "EBIT As Of", "IE As Of", "Debt As Of"
+            ]
             
             st.dataframe(
                 disp_df[cols_show], 
                 use_container_width=True, 
                 hide_index=True,
                 column_config={
+                    "Total Debt": st.column_config.NumberColumn(f"Total Debt ({_disp_curr} B)", format="%.2f"),
+                    "Market Cap": st.column_config.NumberColumn(f"Market Cap ({_disp_curr} B)", format="%.2f"),
                     "Tax Rate": st.column_config.NumberColumn("Tax Rate (%)", format="%.2f"),
                     "D/E Ratio": st.column_config.NumberColumn(format="%.3f"),
                     "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.3f"),
@@ -3050,20 +3052,22 @@ if 'result' in st.session_state:
     st.markdown("---")
     st.subheader("Peer Group Analysis (Financials)")
     if not df_init.empty:
-        fin_cols = [
-            "Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", 
-            "Total Debt", "Debt Period", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", 
-            "EBIT Src", "IE Src"
-        ]
         fin_df = df_init.copy()
         for c in ["Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap"]: 
             fin_df[c] = fin_df[c] / 1e9 
         
-        # Ensure columns exist
+        # Ensure columns exist and rename
         if "Debt Period" not in fin_df.columns:
             fin_df["Debt Period"] = ""
-        fin_df["EBIT Src"] = fin_df.get("Period", "")
-        fin_df["IE Src"] = fin_df.get("IE Period", "")
+        fin_df["EBIT As Of"] = fin_df.get("Period", "")
+        fin_df["IE As Of"] = fin_df.get("IE Period", "")
+        fin_df["Debt As Of"] = fin_df["Debt Period"]
+        
+        fin_cols = [
+            "Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", 
+            "Total Debt", "Market Cap", "D/E Ratio", "Debt/TIC Ratio",
+            "EBIT As Of", "IE As Of", "Debt As Of"
+        ]
         
         st.dataframe(
             fin_df[[c for c in fin_cols if c in fin_df.columns]], 
@@ -3074,7 +3078,6 @@ if 'result' in st.session_state:
                 "EBIT": st.column_config.NumberColumn("EBIT ($B)", format="%.2f"),
                 "EBITDA": st.column_config.NumberColumn("EBITDA ($B)", format="%.2f"),
                 "Total Debt": st.column_config.NumberColumn("Total Debt ($B)", format="%.2f"),
-                "Debt Period": st.column_config.TextColumn("Debt As Of"),
                 "Market Cap": st.column_config.NumberColumn("Market Cap ($B)", format="%.2f"),
                 "D/E Ratio": st.column_config.NumberColumn(format="%.3f"),
                 "Debt/TIC Ratio": st.column_config.NumberColumn(format="%.3f"),
