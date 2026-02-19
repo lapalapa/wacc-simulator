@@ -2075,11 +2075,6 @@ class DetailWACCModel:
             if rev == 0: 
                 return None, f"⚠️ {ticker}: Excluded (Missing Revenue)"
 
-            period_display = label_ebit if "Calculated" in label_ebit else label_int
-
-            country_norm = str(country).upper().strip()
-            tax_rate = self.kpmg_map.get(country_norm, 25.0)
-            
             data = {
                 "name": info.get('longName', ticker), 
                 "country": country, 
@@ -2093,7 +2088,8 @@ class DetailWACCModel:
                     "Total Debt": debt * fx, 
                     "Market Cap": mkt_cap * fx
                 },
-                "period": period_display,
+                "period": label_ebit,
+                "ie_period": label_int,
                 "debt_period": debt_period
             }
             return data, None
@@ -2261,6 +2257,7 @@ class DetailWACCModel:
                     "D/E Ratio": de_ratio,
                     "Debt/TIC Ratio": dtic_ratio,
                     "Period": fin['period'],
+                    "IE Period": fin.get('ie_period', ''),
                     "Debt Period": fin.get('debt_period', '')
                 })
         
@@ -2816,11 +2813,16 @@ if 'result' in st.session_state:
 
         with st.expander("5-Year Monthly Beta Analysis Table", expanded=True):
             cols_show = [
-                "Ticker", "Company Name", "Country", "Period", "Total Debt", "Market Cap", 
+                "Ticker", "Company Name", "Country", "EBIT Src", "IE Src", "Total Debt", "Market Cap", 
                 "D/E Ratio", "Debt/TIC Ratio", "Tax Rate", "Raw Beta", "Adj Beta", 
                 "Unlevered Beta", "Re-levered Beta"
             ]
             disp_df = calc_df.copy()
+            
+            # Rename Period → EBIT Src, IE Period → IE Src
+            disp_df["EBIT Src"] = disp_df["Period"]
+            disp_df["IE Src"] = disp_df.get("IE Period", "")
+            
             disp_df["Total Debt"] = disp_df.apply(
                 lambda x: f"{x['Currency']} {x['Total Debt']/1e9:,.2f}B ({x['Debt Period']})" 
                     if x.get('Debt Period') and x['Debt Period'] != 'info'
@@ -3045,15 +3047,18 @@ if 'result' in st.session_state:
     if not df_init.empty:
         fin_cols = [
             "Ticker", "Company Name", "Revenue", "EBIT", "EBITDA", 
-            "Total Debt", "Debt Period", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", "Period"
+            "Total Debt", "Debt Period", "Market Cap", "D/E Ratio", "Debt/TIC Ratio", 
+            "EBIT Src", "IE Src"
         ]
         fin_df = df_init.copy()
         for c in ["Revenue", "EBIT", "EBITDA", "Total Debt", "Market Cap"]: 
             fin_df[c] = fin_df[c] / 1e9 
         
-        # Ensure Debt Period column exists
+        # Ensure columns exist
         if "Debt Period" not in fin_df.columns:
             fin_df["Debt Period"] = ""
+        fin_df["EBIT Src"] = fin_df.get("Period", "")
+        fin_df["IE Src"] = fin_df.get("IE Period", "")
         
         st.dataframe(
             fin_df[[c for c in fin_cols if c in fin_df.columns]], 
